@@ -799,9 +799,58 @@ in {
       default = {};
       description = "Higher-level generic project lifecycle definitions lowered into db-harbor operations.";
     };
+
+    dataDirectories = mkOption {
+      type = types.listOf (types.submodule {
+        options = {
+          path = mkOption {
+            type = types.str;
+            description = "Absolute path of the data directory.";
+          };
+
+          user = mkOption {
+            type = types.str;
+            default = "root";
+            description = "Owner of the data directory.";
+          };
+
+          group = mkOption {
+            type = types.str;
+            default = "root";
+            description = "Group owner of the data directory.";
+          };
+
+          mode = mkOption {
+            type = types.str;
+            default = "0750";
+            description = "Mode of the data directory.";
+          };
+        };
+      });
+      default = [];
+      description = "Data directories that must exist before any unit that bind-mounts them starts, on every boot and switch.";
+    };
   };
 
   config = mkMerge [
+    (mkIf (cfg.dataDirectories != []) {
+      assertions = [
+        {
+          assertion = lib.all (dir: lib.hasPrefix "/" dir.path) cfg.dataDirectories;
+          message = "services.db-harbor.dataDirectories: each path must be absolute";
+        }
+      ];
+
+      # systemd-tmpfiles runs only at boot, ordered after local-fs.target.
+      # The activation script covers live switches, where the dir would
+      # otherwise be missing when a unit sets up its mount namespace.
+      systemd.tmpfiles.rules = map (dir: "d ${dir.path} ${dir.mode} ${dir.user} ${dir.group} - -") cfg.dataDirectories;
+
+      system.activationScripts.db-harbor-establish-data-directories = lib.stringAfter ["groups" "users"] (
+        lib.concatMapStringsSep "\n" (dir: "install -d -o ${dir.user} -g ${dir.group} -m ${dir.mode} ${dir.path}") cfg.dataDirectories
+      );
+    })
+
     (mkIf (enabledProjects != {}) {
       assertions = lib.flatten (lib.mapAttrsToList (name: project: let
         operations = enabledOperations project;

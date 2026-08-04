@@ -43,6 +43,14 @@
             runtimeUnits = ["demo-app.service"];
           };
         };
+        services.db-harbor.dataDirectories = [
+          {
+            path = "/var/lib/db-harbor-data";
+            user = "postgres";
+            group = "postgres";
+            mode = "0700";
+          }
+        ];
       }
     ];
   };
@@ -111,6 +119,16 @@ in
         name = "raw-operation-directories";
         assertion = rawService.serviceConfig.StateDirectory == "db-harbor-raw" && rawService.serviceConfig.RuntimeDirectory == "db-harbor-raw";
         message = "raw lifecycle operations must expose state and runtime directories";
+      }
+      {
+        name = "data-directory-tmpfiles-rule";
+        assertion = lib.elem "d /var/lib/db-harbor-data 0700 postgres postgres - -" eval.config.systemd.tmpfiles.rules;
+        message = "dataDirectories must lower into a boot-time tmpfiles rule";
+      }
+      {
+        name = "data-directory-activation-script";
+        assertion = lib.hasInfix "install -d -o postgres -g postgres -m 0700 /var/lib/db-harbor-data" eval.config.system.activationScripts.db-harbor-establish-data-directories.text;
+        message = "dataDirectories must lower into an activation script for live switches";
       }
     ];
   }
