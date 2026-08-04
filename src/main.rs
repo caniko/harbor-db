@@ -7,7 +7,7 @@ use db_harbor::{MigrationError, RunMode, RunOptions, load_plan, run_plan};
 #[command(
     name = "db-harbor",
     version,
-    about = "Apply and check structured database-operation plans"
+    about = "Apply and check structured lifecycle-operation plans"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -18,7 +18,7 @@ struct Cli {
 enum Command {
     /// Apply automatic operations, or explicitly selected operator operations.
     Apply(RunArgs),
-    /// Run read-only database-state checks.
+    /// Run read-only lifecycle-state checks.
     Check(RunArgs),
     /// Validate a plan without contacting any database.
     Validate(PlanArgs),
@@ -26,7 +26,7 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct PlanArgs {
-    /// JSON or TOML database-operation plan.
+    /// JSON or TOML lifecycle-operation plan.
     #[arg(long)]
     manifest: PathBuf,
 }

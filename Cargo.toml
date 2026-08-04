@@ -1,7 +1,7 @@
 [package]
 name = "db-harbor"
 version = "0.1.0"
-description = "Generic migration plans and deployment orchestration for Rust services"
+description = "Secure generic lifecycle plans and deployment orchestration for Rust services"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"

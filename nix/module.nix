@@ -8,18 +8,26 @@
 
   cfg = config.services.db-harbor;
 
-  dbHarborPackage = pkgs.rustPlatform.buildRustPackage {
-    pname = "db-harbor";
-    version = "0.1.0";
-    src = ../.;
-    cargoLock.lockFile = ../Cargo.lock;
-  };
-
   sqlIdentifier = value: "\"" + builtins.replaceStrings ["\""] ["\"\""] value + "\"";
+
+  credentialEntries = credentials:
+    lib.mapAttrsToList (name: path: "${name}:${path}") credentials;
 
   migrationType = types.submodule ({name, ...}: {
     options = {
       enable = mkEnableOption "db-harbor database operation ${name}";
+
+      kind = mkOption {
+        type = types.enum ["generic" "database" "credential"];
+        default = "generic";
+        description = "Broad kind of lifecycle operation.";
+      };
+
+      lifecycle = mkOption {
+        type = types.enum ["ensure" "reconcile"];
+        default = "ensure";
+        description = "Idempotent lifecycle contract for this operation.";
+      };
 
       description = mkOption {
         type = types.str;
@@ -66,6 +74,24 @@
         type = types.listOf types.str;
         default = [];
         description = "systemd LoadCredential entries for database-operation units.";
+      };
+
+      credentials = mkOption {
+        type = types.attrsOf types.path;
+        default = {};
+        description = "Credential name to source-file mapping; contents stay outside the plan and process environment.";
+      };
+
+      stateDirectory = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Optional systemd StateDirectory for this operation.";
+      };
+
+      runtimeDirectory = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Optional systemd RuntimeDirectory for this operation.";
       };
 
       after = mkOption {
@@ -133,6 +159,18 @@
         description = "Arguments passed to the migration executable for read-only readiness checks.";
       };
 
+      credentialArgs = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Credential names appended as file paths to the executable arguments.";
+      };
+
+      credentialEnvironment = mkOption {
+        type = types.attrsOf types.str;
+        default = {};
+        description = "Environment names mapped to credential names; values are runtime file paths, never secret contents.";
+      };
+
       command = mkOption {
         type = types.nullOr types.str;
         default = null;
@@ -149,7 +187,19 @@
 
   operationType = types.submodule ({name, ...}: {
     options = {
-      enable = mkEnableOption "db-harbor database operation ${name}";
+      enable = mkEnableOption "db-harbor lifecycle operation ${name}";
+
+      kind = mkOption {
+        type = types.enum ["generic" "database" "credential"];
+        default = "generic";
+        description = "Broad kind of lifecycle operation.";
+      };
+
+      lifecycle = mkOption {
+        type = types.enum ["ensure" "reconcile"];
+        default = "ensure";
+        description = "Idempotent lifecycle contract for this operation.";
+      };
 
       backend = mkOption {
         type = types.enum ["generic" "postgres" "clickhouse"];
@@ -179,6 +229,72 @@
         type = types.listOf types.str;
         default = [];
         description = "Operation identifiers that must run first.";
+      };
+
+      credentials = mkOption {
+        type = types.attrsOf types.path;
+        default = {};
+        description = "Credential name to source-file mapping; contents stay outside the plan and process environment.";
+      };
+
+      loadCredentials = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Legacy systemd LoadCredential entries for this operation.";
+      };
+
+      stateDirectory = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Optional systemd StateDirectory for this operation.";
+      };
+
+      runtimeDirectory = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Optional systemd RuntimeDirectory for this operation.";
+      };
+
+      after = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Units this lifecycle operation should start after.";
+      };
+
+      requires = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Units required by this lifecycle operation.";
+      };
+
+      wants = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Units wanted by this lifecycle operation.";
+      };
+
+      runtimeUnits = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Runtime units gated on this lifecycle operation.";
+      };
+
+      beforeUnits = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Units ordered after this lifecycle operation.";
+      };
+
+      requiredByUnits = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Units that require this lifecycle operation.";
+      };
+
+      serviceConfig = mkOption {
+        type = types.attrs;
+        default = {};
+        description = "Additional systemd serviceConfig for this operation.";
       };
     };
   });
@@ -254,8 +370,8 @@
 
       description = mkOption {
         type = types.str;
-        default = "${name} database migrations";
-        description = "Human-readable description for the generated migration unit.";
+        default = "${name} lifecycle operations";
+        description = "Human-readable description for the generated lifecycle unit.";
       };
 
       runner = mkOption {
@@ -267,7 +383,7 @@
       operations = mkOption {
         type = types.attrsOf operationType;
         default = {};
-        description = "Structured database operations. The runner shorthand becomes the default operation.";
+        description = "Structured lifecycle operations. The runner shorthand becomes the default operation.";
       };
 
       user = mkOption {
@@ -297,7 +413,25 @@
       loadCredentials = mkOption {
         type = types.listOf types.str;
         default = [];
-        description = "systemd LoadCredential entries for generated migration units.";
+        description = "Legacy systemd LoadCredential entries for generated lifecycle units.";
+      };
+
+      credentials = mkOption {
+        type = types.attrsOf types.path;
+        default = {};
+        description = "Credential name to source-file mapping for generated lifecycle units.";
+      };
+
+      stateDirectory = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Optional systemd StateDirectory for generated lifecycle units.";
+      };
+
+      runtimeDirectory = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Optional systemd RuntimeDirectory for generated lifecycle units.";
       };
 
       after = mkOption {
@@ -327,7 +461,7 @@
       serviceConfig = mkOption {
         type = types.attrs;
         default = {};
-        description = "Additional or overriding systemd serviceConfig for generated database-operation units.";
+        description = "Additional or overriding systemd serviceConfig for generated lifecycle units.";
       };
 
       postgres = mkOption {
@@ -347,6 +481,8 @@
     (lib.optionalAttrs (runnerConfigured project.runner) {
       default = {
         enable = true;
+        kind = "database";
+        lifecycle = "ensure";
         backend =
           if project.postgres.enable
           then "postgres"
@@ -355,6 +491,17 @@
         safety = "automatic";
         runner = project.runner;
         dependsOn = [];
+        credentials = {};
+        loadCredentials = [];
+        stateDirectory = null;
+        runtimeDirectory = null;
+        after = [];
+        requires = [];
+        wants = [];
+        runtimeUnits = [];
+        beforeUnits = [];
+        requiredByUnits = [];
+        serviceConfig = {};
       };
     })
     // project.operations;
@@ -366,6 +513,30 @@
     lib.any
     (operation: operation.runner.checkCommand != null || operation.runner.checkArgs != null)
     (lib.attrValues (enabledOperations project));
+
+  operationValues = project: lib.attrValues (enabledOperations project);
+
+  projectCredentialSources = project:
+    lib.foldl'
+    (sources: operation: sources // operation.credentials)
+    project.credentials
+    (operationValues project);
+
+  projectUnitList = field: project:
+    lib.unique ((project.${field} or []) ++ lib.concatMap (operation: operation.${field}) (operationValues project));
+
+  projectDirectoryConfig = project: let
+    stateDirectories = lib.unique (
+      lib.optional (project.stateDirectory != null) project.stateDirectory
+      ++ lib.concatMap (operation: lib.optional (operation.stateDirectory != null) operation.stateDirectory) (operationValues project)
+    );
+    runtimeDirectories = lib.unique (
+      lib.optional (project.runtimeDirectory != null) project.runtimeDirectory
+      ++ lib.concatMap (operation: lib.optional (operation.runtimeDirectory != null) operation.runtimeDirectory) (operationValues project)
+    );
+  in
+    (lib.optionalAttrs (stateDirectories != []) {StateDirectory = stateDirectories;})
+    // (lib.optionalAttrs (runtimeDirectories != []) {RuntimeDirectory = runtimeDirectories;});
 
   sqlLiteral = value: "'" + builtins.replaceStrings ["'"] ["''"] value + "'";
 
@@ -380,21 +551,28 @@
     environment = {};
   };
 
+  withCredentialReferences = runner: {
+    credential_args = runner.credentialArgs;
+    credential_environment = runner.credentialEnvironment;
+  };
+
   runnerCommandSpec = name: suffix: runner: args:
     if runner.command != null
-    then fullCommandSpec name suffix runner.command
-    else {
-      program =
-        if runner.package != null
-        then "${runner.package}/${runner.executable}"
-        else runner.executable;
-      inherit args;
-      environment = {};
-    };
+    then (fullCommandSpec name suffix runner.command) // (withCredentialReferences runner)
+    else
+      {
+        program =
+          if runner.package != null
+          then "${runner.package}/${runner.executable}"
+          else runner.executable;
+        inherit args;
+        environment = {};
+      }
+      // (withCredentialReferences runner);
 
   runnerCheckSpec = name: runner:
     if runner.checkCommand != null
-    then fullCommandSpec name "check" runner.checkCommand
+    then (fullCommandSpec name "check" runner.checkCommand) // (withCredentialReferences runner)
     else if runner.checkArgs != null
     then runnerCommandSpec name "check" (runner // {command = null;}) runner.checkArgs
     else null;
@@ -439,6 +617,8 @@
 
   operationToPlan = name: operation: {
     id = name;
+    kind = operation.kind;
+    lifecycle = operation.lifecycle;
     backend = operation.backend;
     phase = operation.phase;
     safety = operation.safety;
@@ -452,6 +632,8 @@
     baseOperations = lib.mapAttrsToList operationToPlan operations;
     grantOperation = lib.optional (project.postgres.enable && project.postgres.grants.enable) {
       id = "postgres-grants";
+      kind = "database";
+      lifecycle = "ensure";
       backend = "postgres";
       phase = "schema";
       safety = "automatic";
@@ -467,35 +649,50 @@
     });
 
   projectApplyCommand = name: project:
-    assert dbHarborPackage != null;
-      lib.escapeShellArgs [
-        "${dbHarborPackage}/bin/db-harbor"
+    assert cfg.package != null; let
+      command = lib.escapeShellArgs (map toString [
+        "${toString cfg.package}/bin/db-harbor"
         "apply"
         "--manifest"
         (projectPlan name project)
-      ];
+      ]);
+    in "${pkgs.writeShellScript "db-harbor-${name}-apply" ''
+      set -eu
+      exec ${command}
+    ''}";
 
   projectCheckCommand = name: project:
-    assert dbHarborPackage != null;
-      lib.escapeShellArgs [
-        "${dbHarborPackage}/bin/db-harbor"
+    assert cfg.package != null; let
+      command = lib.escapeShellArgs (map toString [
+        "${toString cfg.package}/bin/db-harbor"
         "check"
         "--manifest"
         (projectPlan name project)
-      ];
+      ]);
+    in "${pkgs.writeShellScript "db-harbor-${name}-check" ''
+      set -eu
+      exec ${command}
+    ''}";
 
   projectToMigration = name: project: {
     enable = true;
-    inherit (project) description user group environment path loadCredentials wants serviceConfig;
+    inherit (project) description user group environment path;
+    loadCredentials = project.loadCredentials ++ lib.concatMap (operation: operation.loadCredentials) (operationValues project);
+    credentials = projectCredentialSources project;
     command = projectApplyCommand name project;
     checkCommand =
       if projectHasChecks project
       then projectCheckCommand name project
       else null;
-    after = project.postgres.setupUnits ++ project.after;
-    requires = project.postgres.setupUnits ++ project.requires;
-    beforeUnits = project.runtimeUnits;
-    requiredByUnits = project.runtimeUnits;
+    after = project.postgres.setupUnits ++ projectUnitList "after" project;
+    requires = project.postgres.setupUnits ++ projectUnitList "requires" project;
+    wants = projectUnitList "wants" project;
+    beforeUnits = projectUnitList "beforeUnits" project ++ projectUnitList "runtimeUnits" project;
+    requiredByUnits = projectUnitList "requiredByUnits" project ++ projectUnitList "runtimeUnits" project;
+    serviceConfig =
+      projectDirectoryConfig project
+      // lib.foldl' (serviceConfig: operation: serviceConfig // operation.serviceConfig) {} (operationValues project)
+      // project.serviceConfig;
   };
 
   serviceConfigFor = migration:
@@ -512,8 +709,14 @@
     // optionalAttrs (migration.group != null) {
       Group = migration.group;
     }
-    // optionalAttrs (migration.loadCredentials != []) {
-      LoadCredential = migration.loadCredentials;
+    // optionalAttrs (migration.loadCredentials != [] || migration.credentials != {}) {
+      LoadCredential = migration.loadCredentials ++ credentialEntries migration.credentials;
+    }
+    // optionalAttrs (migration.stateDirectory != null) {
+      StateDirectory = migration.stateDirectory;
+    }
+    // optionalAttrs (migration.runtimeDirectory != null) {
+      RuntimeDirectory = migration.runtimeDirectory;
     }
     // migration.serviceConfig;
 
@@ -579,16 +782,22 @@ in {
   ];
 
   options.services.db-harbor = {
+    package = mkOption {
+      type = types.nullOr types.package;
+      default = null;
+      description = "db-harbor package used for generated project plan units.";
+    };
+
     migrations = mkOption {
       type = types.attrsOf migrationType;
       default = {};
-      description = "Compatibility name for named database operations managed as systemd units.";
+      description = "Compatibility name for named lifecycle operations managed as systemd units.";
     };
 
     projects = mkOption {
       type = types.attrsOf projectType;
       default = {};
-      description = "Higher-level project database-operation definitions lowered into db-harbor.operations.";
+      description = "Higher-level generic project lifecycle definitions lowered into db-harbor operations.";
     };
   };
 
@@ -596,6 +805,7 @@ in {
     (mkIf (enabledProjects != {}) {
       assertions = lib.flatten (lib.mapAttrsToList (name: project: let
         operations = enabledOperations project;
+        credentialSources = projectCredentialSources project;
         operationAssertions = lib.flatten (lib.mapAttrsToList (operationName: operation: [
             {
               assertion = operation.runner.command != null || operation.runner.executable != null;
@@ -609,6 +819,10 @@ in {
               assertion = lib.all (dependency: builtins.hasAttr dependency operations) operation.dependsOn;
               message = "services.db-harbor.projects.${name}.operations.${operationName}: dependsOn references an unknown operation";
             }
+            {
+              assertion = lib.all (credential: builtins.hasAttr credential credentialSources) (operation.runner.credentialArgs ++ lib.attrValues operation.runner.credentialEnvironment);
+              message = "services.db-harbor.projects.${name}.operations.${operationName}: credential references need a matching credentials entry";
+            }
           ])
           operations);
       in
@@ -616,6 +830,14 @@ in {
           {
             assertion = operations != {};
             message = "services.db-harbor.projects.${name}: configure runner or at least one enabled operation";
+          }
+          {
+            assertion = cfg.package != null;
+            message = "services.db-harbor.package must be set when a project uses generated plan units";
+          }
+          {
+            assertion = lib.all (credential: builtins.match "[A-Za-z0-9_.-]+" credential != null) (builtins.attrNames credentialSources);
+            message = "services.db-harbor.projects.${name}: credential names must be safe systemd credential names";
           }
           {
             assertion = !project.postgres.grants.enable || project.postgres.enable;
@@ -657,12 +879,17 @@ in {
     })
 
     (mkIf (enabledMigrations != {}) {
-      assertions =
-        lib.mapAttrsToList (name: _migration: {
-          assertion = builtins.match "[A-Za-z0-9_.@-]+" name != null;
-          message = "services.db-harbor.migrations.${name}: migration names must be valid systemd unit-name fragments";
-        })
-        enabledMigrations;
+      assertions = lib.flatten (lib.mapAttrsToList (name: migration: [
+          {
+            assertion = builtins.match "[A-Za-z0-9_.@-]+" name != null;
+            message = "services.db-harbor.migrations.${name}: migration names must be valid systemd unit-name fragments";
+          }
+          {
+            assertion = lib.all (credential: builtins.match "[A-Za-z0-9_.-]+" credential != null) (builtins.attrNames migration.credentials);
+            message = "services.db-harbor.migrations.${name}: credential names must be safe systemd credential names";
+          }
+        ])
+        enabledMigrations);
 
       systemd.services =
         mkMerge

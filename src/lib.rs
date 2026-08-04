@@ -1,14 +1,14 @@
-//! Generic, database-agnostic operation plans.
+//! Secure, generic lifecycle-operation plans.
 //!
-//! DB Harbor owns the lifecycle contract around database operations while
-//! the application or database owner supplies the actual commands. This keeps
-//! deployment orchestration reusable for schema changes, backfills, backups,
-//! maintenance, and operational cutovers without moving database knowledge
-//! into this crate.
+//! DB Harbor owns the lifecycle contract while the project or database owner
+//! supplies the actual commands. This keeps deployment orchestration reusable
+//! for schema changes, credential provisioning, backfills, backups,
+//! maintenance, and operational cutovers without moving domain knowledge into
+//! this crate.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
+    env, fmt,
     path::Path,
     process::Stdio,
 };
@@ -17,8 +17,32 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::process::Command;
 
-/// The current serialized database-operation plan format.
+/// The current serialized lifecycle-operation plan format.
 pub const PLAN_VERSION: u32 = 1;
+
+/// The broad kind of lifecycle operation.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationKind {
+    /// An operation owned by a database or migration backend.
+    #[default]
+    Database,
+    /// A project operation without database-specific semantics.
+    Generic,
+    /// A project operation that reconciles a credential-backed resource.
+    Credential,
+}
+
+/// The idempotent lifecycle contract for an operation.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lifecycle {
+    /// Bring the resource to the declared state; repeatable on activation.
+    #[default]
+    Ensure,
+    /// Reconcile an already-created resource with the declared state.
+    Reconcile,
+}
 
 /// A database family used by an operation.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -35,10 +59,11 @@ pub enum Backend {
 }
 
 /// The lifecycle phase of a database operation.
-#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     /// Creates or upgrades the normal application schema.
+    #[default]
     Schema,
     /// Reconciles or backfills data after the schema exists.
     Backfill,
@@ -68,6 +93,18 @@ pub struct CommandSpec {
     /// Environment overrides for this invocation.
     #[serde(default)]
     pub environment: BTreeMap<String, String>,
+    /// Credential names appended as file paths to the invocation arguments.
+    ///
+    /// The plan contains only names. At runtime db-harbor resolves each name
+    /// below systemd's `CREDENTIALS_DIRECTORY`; it never reads or serializes
+    /// the credential contents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_args: Vec<String>,
+    /// Environment variables whose values are credential file paths.
+    ///
+    /// The map values are credential names, not secret values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credential_environment: BTreeMap<String, String>,
 }
 
 impl CommandSpec {
@@ -80,6 +117,8 @@ impl CommandSpec {
             program: program.into(),
             args: args.into_iter().map(Into::into).collect(),
             environment: BTreeMap::new(),
+            credential_args: Vec::new(),
+            credential_environment: BTreeMap::new(),
         }
     }
 
@@ -88,6 +127,22 @@ impl CommandSpec {
             return Err(MigrationError::InvalidPlan(format!(
                 "{context}: command program must not be empty"
             )));
+        }
+        for credential in &self.credential_args {
+            validate_credential_name(credential, context)?;
+        }
+        for (environment, credential) in &self.credential_environment {
+            if environment.trim().is_empty() {
+                return Err(MigrationError::InvalidPlan(format!(
+                    "{context}: credential environment name must not be empty"
+                )));
+            }
+            if self.environment.contains_key(environment) {
+                return Err(MigrationError::InvalidPlan(format!(
+                    "{context}: credential environment {environment} conflicts with environment"
+                )));
+            }
+            validate_credential_name(credential, context)?;
         }
         Ok(())
     }
@@ -98,10 +153,18 @@ impl CommandSpec {
 pub struct MigrationOperation {
     /// Stable operation identifier within its plan.
     pub id: String,
+    /// Broad operation kind. Missing in v1 manifests, where it defaults to
+    /// `database` without changing execution behavior.
+    #[serde(default)]
+    pub kind: OperationKind,
+    /// Idempotent lifecycle metadata for reporting and policy consumers.
+    #[serde(default)]
+    pub lifecycle: Lifecycle,
     /// Database family owned by the operation.
     #[serde(default)]
     pub backend: Backend,
     /// Lifecycle phase used for human-readable reporting and policy checks.
+    #[serde(default)]
     pub phase: Phase,
     /// Deployment safety policy.
     #[serde(default)]
@@ -135,6 +198,12 @@ pub type DatabasePlan = MigrationPlan;
 /// Neutral name for [`MigrationOperation`] while the db-harbor wire/API
 /// name is kept for compatibility.
 pub type DatabaseOperation = MigrationOperation;
+
+/// Generic name for [`MigrationPlan`].
+pub type Plan = MigrationPlan;
+
+/// Generic name for [`MigrationOperation`].
+pub type Operation = MigrationOperation;
 
 /// Neutral name for [`Backend`] while the db-harbor API remains compatible.
 pub type DatabaseBackend = Backend;
@@ -347,6 +416,12 @@ pub enum MigrationError {
     /// A selected operation does not exist.
     #[error("selected migration operation does not exist: {0}")]
     MissingOperation(String),
+    /// A credential reference is not a safe systemd credential name.
+    #[error("invalid credential name {credential} in {context}")]
+    InvalidCredentialName { credential: String, context: String },
+    /// A credential-backed command was not started by a unit with credentials.
+    #[error("operation {operation} requires systemd CREDENTIALS_DIRECTORY")]
+    MissingCredentialsDirectory { operation: String },
     /// Dependency graph contains a cycle.
     #[error("migration dependency cycle includes {0}")]
     DependencyCycle(String),
@@ -375,6 +450,22 @@ pub enum MigrationError {
     /// A migration command failed.
     #[error("{operation} command exited with status {status}")]
     CommandFailed { operation: String, status: i32 },
+}
+
+fn validate_credential_name(name: &str, context: &str) -> Result<(), MigrationError> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(MigrationError::InvalidCredentialName {
+            credential: name.to_owned(),
+            context: context.to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Read a JSON or TOML plan based on its file extension.
@@ -461,6 +552,19 @@ async fn run_command(
     spec: &CommandSpec,
     mode: RunMode,
 ) -> Result<OperationStatus, MigrationError> {
+    let credential_directory =
+        if spec.credential_args.is_empty() && spec.credential_environment.is_empty() {
+            None
+        } else {
+            Some(
+                env::var_os("CREDENTIALS_DIRECTORY")
+                    .map(std::path::PathBuf::from)
+                    .ok_or_else(|| MigrationError::MissingCredentialsDirectory {
+                        operation: operation.to_owned(),
+                    })?,
+            )
+        };
+
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
@@ -468,6 +572,14 @@ async fn run_command(
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    if let Some(directory) = credential_directory {
+        for credential in &spec.credential_args {
+            command.arg(directory.join(credential));
+        }
+        for (environment, credential) in &spec.credential_environment {
+            command.env(environment, directory.join(credential));
+        }
+    }
     let status = command
         .status()
         .await
@@ -513,6 +625,8 @@ mod tests {
     fn operation(id: &str, depends_on: &[&str]) -> MigrationOperation {
         MigrationOperation {
             id: id.to_owned(),
+            kind: OperationKind::Generic,
+            lifecycle: Lifecycle::Ensure,
             backend: Backend::Generic,
             phase: Phase::Schema,
             safety: Safety::Automatic,
@@ -566,6 +680,54 @@ mod tests {
             serde_json::to_string(&Backend::ClickHouse).expect("backend serializes"),
             "\"clickhouse\""
         );
+    }
+
+    #[test]
+    fn generic_metadata_and_credential_refs_are_wire_safe() {
+        let mut operation = operation("provision", &[]);
+        operation.kind = OperationKind::Credential;
+        operation.lifecycle = Lifecycle::Ensure;
+        operation.apply.credential_args = vec!["password".to_owned()];
+        operation
+            .apply
+            .credential_environment
+            .insert("PASSWORD_FILE".to_owned(), "password".to_owned());
+        let serialized = serde_json::to_string(&plan(vec![operation])).expect("plan serializes");
+
+        assert!(serialized.contains("\"kind\":\"credential\""));
+        assert!(serialized.contains("\"lifecycle\":\"ensure\""));
+        assert!(serialized.contains("\"password\""));
+        assert!(!serialized.contains("super-secret-value"));
+        assert!(!serialized.contains("/run/secrets/password"));
+    }
+
+    #[test]
+    fn v1_database_shape_still_decodes_without_generic_metadata() {
+        let old = r#"{
+            "version": 1,
+            "name": "legacy",
+            "operations": [{
+                "id": "schema",
+                "backend": "postgres",
+                "phase": "schema",
+                "apply": {"program": "/bin/true"}
+            }]
+        }"#;
+        let decoded: MigrationPlan = serde_json::from_str(old).expect("legacy plan decodes");
+        decoded.validate().expect("legacy plan validates");
+        assert_eq!(decoded.operations[0].kind, OperationKind::Database);
+        assert_eq!(decoded.operations[0].lifecycle, Lifecycle::Ensure);
+    }
+
+    #[test]
+    fn credential_references_cannot_escape_the_systemd_directory() {
+        let mut operation = operation("provision", &[]);
+        operation.apply.credential_args = vec!["../password".to_owned()];
+
+        assert!(matches!(
+            plan(vec![operation]).validate(),
+            Err(MigrationError::InvalidCredentialName { .. })
+        ));
     }
 
     #[tokio::test]

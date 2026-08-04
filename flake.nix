@@ -1,8 +1,8 @@
 {
-  description = "db-harbor - generic database-operation plans and NixOS systemd wiring";
+  description = "db-harbor - secure generic lifecycle plans and NixOS systemd wiring";
 
   inputs = {
-    rs-harbor.url = "git+https://codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=c26b735eede8078f795651c4a9cbf0be8733b221";
+    rs-harbor.url = "git+https://codefloe.com/caniko/rs-harbor.git?ref=trunk&rev=7fa1c2104dab4e1dbaa1aaa6df84bba815aa282d";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
   };
@@ -18,20 +18,29 @@
       "aarch64-linux"
     ];
     forAllSystems = f:
-      nixpkgs.lib.genAttrs systems (system:
-        let
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [(import rs-harbor.inputs.rust-overlay)];
-          };
-          toolchain = rs-harbor.lib.mkToolchain { inherit pkgs; toolchainProfile = "stable"; };
-        in
+      nixpkgs.lib.genAttrs systems (system: let
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [(import rs-harbor.inputs.rust-overlay)];
+        };
+        toolchain = rs-harbor.lib.mkToolchain {
+          inherit pkgs;
+          toolchainProfile = "stable";
+        };
+      in
         f {
           inherit system pkgs toolchain;
           craneLib = toolchain.craneLib;
         });
   in {
-    nixosModules.db-harbor = import ./nix/module.nix;
+    nixosModules.db-harbor = {
+      lib,
+      pkgs,
+      ...
+    }: {
+      imports = [(import ./nix/module.nix)];
+      services.db-harbor.package = lib.mkDefault self.packages.${pkgs.system}.db-harbor;
+    };
     nixosModules.pg-backup = import ./nix/pg-backup.nix;
     nixosModules.default = self.nixosModules.db-harbor;
 
@@ -47,7 +56,7 @@
         strictDeps = true;
         cargoExtraArgs = "--locked";
         meta = {
-          description = "Generic database-operation plans and deployment orchestration for services";
+          description = "Secure generic lifecycle plans and deployment orchestration for services";
           homepage = "https://codeberg.org/caniko/migrationix";
           license = pkgs.lib.licenses.asl20;
           mainProgram = "db-harbor";
@@ -84,9 +93,11 @@
       };
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
     in {
+      module-eval = pkgs.callPackage ./nix/module-eval.nix {
+        module = import ./nix/module.nix;
+      };
       module-smoke = pkgs.callPackage ./nix/test-module.nix {
         module = self.nixosModules.default;
-        dbHarborPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.db-harbor;
       };
       pg-backup-eval = pkgs.callPackage ./nix/pg-backup-eval.nix {};
       db-harbor = self.packages.${pkgs.stdenv.hostPlatform.system}.db-harbor;

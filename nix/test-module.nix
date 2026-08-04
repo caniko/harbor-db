@@ -1,6 +1,5 @@
 {
   lib,
-  dbHarborPackage,
   module,
   pkgs,
 }:
@@ -33,8 +32,34 @@ pkgs.testers.nixosTest {
           ;;
       esac
     '';
+    credentialMigrator = pkgs.writeShellScriptBin "credential-migrator" ''
+      set -eu
+      test -n "''${CREDENTIALS_DIRECTORY:-}"
+      test -n "''${TOKEN_FILE:-}"
+      test "$TOKEN_FILE" = "$CREDENTIALS_DIRECTORY/api-token"
+      test "$(cat "$TOKEN_FILE")" = "lifecycle-secret"
+      test -d "$STATE_DIRECTORY"
+      test -d "$RUNTIME_DIRECTORY"
+      case "$1" in
+        ensure)
+          if [ ! -e "$STATE_DIRECTORY/ensured" ]; then
+            touch "$STATE_DIRECTORY/ensured"
+            echo ensured >> "$STATE_DIRECTORY/events"
+          fi
+          ;;
+        check)
+          test -e "$STATE_DIRECTORY/ensured"
+          ;;
+        *)
+          echo "unknown command: $1" >&2
+          exit 64
+          ;;
+      esac
+    '';
   in {
     imports = [module];
+
+    environment.etc."db-harbor-lifecycle-secret".text = "lifecycle-secret\n";
 
     systemd.tmpfiles.rules = ["d /var/lib/db-harbor-demo 0775 postgres postgres -"];
 
@@ -85,6 +110,15 @@ pkgs.testers.nixosTest {
           test -f /var/lib/db-harbor-demo/structured-schema
           test ! -e /var/lib/db-harbor-demo/structured-manual
           echo structured-app-started >> /var/lib/db-harbor-demo/structured-events
+        ''}";
+      };
+    };
+
+    systemd.services.lifecycle-app = {
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${pkgs.writeShellScript "lifecycle-app" ''
+          test -f /var/lib/db-harbor-lifecycle/ensured
         ''}";
       };
     };
@@ -176,6 +210,27 @@ pkgs.testers.nixosTest {
       runtimeUnits = ["multi-app.service"];
       serviceConfig.ReadWritePaths = ["/var/lib/db-harbor-demo"];
     };
+
+    services.db-harbor.projects.lifecycle = {
+      enable = true;
+      description = "Generic credential lifecycle";
+      operations.ensure = {
+        enable = true;
+        kind = "credential";
+        lifecycle = "ensure";
+        credentials.api-token = "/etc/db-harbor-lifecycle-secret";
+        runner = {
+          package = credentialMigrator;
+          executable = "bin/credential-migrator";
+          args = ["ensure"];
+          checkArgs = ["check"];
+          credentialEnvironment.TOKEN_FILE = "api-token";
+        };
+        stateDirectory = "db-harbor-lifecycle";
+        runtimeDirectory = "db-harbor-lifecycle";
+        runtimeUnits = ["lifecycle-app.service"];
+      };
+    };
   };
 
   testScript = ''
@@ -203,5 +258,12 @@ pkgs.testers.nixosTest {
     machine.succeed("systemctl start db-harbor-project-check.service")
     machine.succeed("test $(grep -c migrated /var/lib/db-harbor-demo/events) -ge 2")
     machine.succeed("sudo -u project_app psql -d db_harbor_project -tAc 'INSERT INTO project_item DEFAULT VALUES RETURNING id;' | grep -Fx 1")
+    machine.wait_until_succeeds("systemctl show db-harbor-lifecycle.service -p Result --value | grep -Fx success")
+    machine.wait_until_succeeds("systemctl show lifecycle-app.service -p Result --value | grep -Fx success")
+    machine.succeed("systemctl start db-harbor-lifecycle.service")
+    machine.succeed("systemctl start db-harbor-lifecycle-check.service")
+    machine.succeed("test $(grep -c ensured /var/lib/db-harbor-lifecycle/events) -eq 1")
+    machine.succeed("! grep -R -n lifecycle-secret /nix/store/*db-harbor-lifecycle-plan.json")
+    machine.succeed("! systemctl show db-harbor-lifecycle.service | grep -F lifecycle-secret")
   '';
 }

@@ -6,15 +6,15 @@
 
 <!-- simit:badges:end -->
 
-`db-harbor` provides generic database-operation plans and NixOS systemd
-wiring for project-owned database work.
+`db-harbor` provides secure generic lifecycle-operation plans and NixOS
+systemd wiring for project-owned work.
 
 The flake does not know about a migration framework, database, or application.
-Projects keep their own database engine or operational command and expose
-structured apply/check commands; `db-harbor` owns dependency ordering,
-confirmation policy, readiness checks, and the deployment envelope around
-those commands. Operations can cover schema changes, backfills, backups,
-maintenance, replication, and cutovers.
+Projects keep their own idempotent ensure/check commands; `db-harbor` owns
+dependency ordering, confirmation policy, readiness checks, credentials, state
+directories, and the deployment envelope around those commands. Operations can
+cover schema changes, backfills, backups, maintenance, credential provisioning,
+replication, and cutovers.
 
 ## Project surface
 
@@ -27,7 +27,7 @@ surface. It lowers into the raw migration units described below:
 
   services.db-harbor.projects.my-app = {
     enable = true;
-    description = "My App database migrations";
+    description = "My App lifecycle operations";
 
     runner = {
       package = pkgs.my-app;
@@ -54,6 +54,10 @@ surface. It lowers into the raw migration units described below:
   };
 }
 ```
+
+The flake module injects its own `db-harbor` package. When importing
+`nix/module.nix` directly, set `services.db-harbor.package` to the package
+output explicitly.
 
 This generates `db-harbor-my-app.service` and, when `checkArgs` or
 `checkCommand` is set, `db-harbor-my-app-check.service`. Runtime units are
@@ -168,14 +172,15 @@ db-harbor apply --manifest /path/to/syndb-plan.json \
 
 ## Raw migration surface
 
-Use the raw surface when a project needs complete control over the command or
-when the migration is not tied to the project-level Postgres conventions:
+Use the raw lifecycle surface when a project needs complete control over the
+command or when the operation is not tied to the project-level Postgres
+conventions:
 
 ```nix
 {
   imports = [inputs.db-harbor.nixosModules.default];
 
-  services.db-harbor.migrations.my-app = {
+  services.db-harbor.operations.my-app = {
     enable = true;
     command = "${pkgs.my-app}/bin/my-app migrate";
     checkCommand = "${pkgs.my-app}/bin/my-app migrate --check";
@@ -190,4 +195,37 @@ when the migration is not tied to the project-level Postgres conventions:
 
 This generates `db-harbor-my-app.service`, a `Type=oneshot` unit without
 `RemainAfterExit`, so starting a dependent application unit can re-run the
-idempotent migration command when needed.
+idempotent lifecycle command when needed. `services.db-harbor.migrations` is
+kept as the compatibility spelling.
+
+## Credential-backed operations
+
+Credential sources are declared by name and file path. The source contents are
+loaded by systemd and are never written to the generated plan or passed as a
+command argument or environment value. Credential references resolve to paths
+under systemd's `CREDENTIALS_DIRECTORY`:
+
+```nix
+services.db-harbor.projects.provision = {
+  enable = true;
+  operations.ensure = {
+    enable = true;
+    kind = "credential";
+    lifecycle = "ensure";
+    credentials.api-token = config.age.secrets.api-token.path;
+    stateDirectory = "my-app-provision";
+    runtimeDirectory = "my-app-provision";
+    runner = {
+      package = pkgs.my-app;
+      executable = "bin/my-app";
+      args = ["provision"];
+      checkArgs = ["provision" "--check"];
+      credentialEnvironment.API_TOKEN_FILE = "api-token";
+    };
+  };
+};
+```
+
+`credentialArgs` appends credential file paths to the runner arguments;
+`credentialEnvironment` maps environment names to credential names. Do not put
+secret values in `args`, `environment`, or generated plans.
