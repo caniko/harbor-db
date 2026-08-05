@@ -78,9 +78,11 @@
       # Same derivation: exports both db-harbor and the standalone
       # home-manager-backup bin. mainProgram lets `lib.getExe` resolve the
       # backup helper on both supported architectures.
-      home-manager-backup = db-harbor // {
-        meta = db-harbor.meta // {mainProgram = "home-manager-backup";};
-      };
+      home-manager-backup =
+        db-harbor
+        // {
+          meta = db-harbor.meta // {mainProgram = "home-manager-backup";};
+        };
       default = db-harbor;
     });
 
