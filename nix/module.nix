@@ -24,7 +24,7 @@
       };
 
       lifecycle = mkOption {
-        type = types.enum ["ensure" "reconcile"];
+        type = types.enum ["ensure" "reconcile" "restore"];
         default = "ensure";
         description = "Idempotent lifecycle contract for this operation.";
       };
@@ -44,6 +44,12 @@
         type = types.nullOr types.str;
         default = null;
         description = "Optional read-only command that reports pending or incompatible database state.";
+      };
+
+      restoreCommand = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Optional on-demand restore command that repairs pending operations and verifies.";
       };
 
       user = mkOption {
@@ -196,7 +202,7 @@
       };
 
       lifecycle = mkOption {
-        type = types.enum ["ensure" "reconcile"];
+        type = types.enum ["ensure" "reconcile" "restore"];
         default = "ensure";
         description = "Idempotent lifecycle contract for this operation.";
       };
@@ -674,6 +680,23 @@
       exec ${command}
     ''}";
 
+  restoreOperationIds = name: project:
+    lib.attrNames (lib.filterAttrs (_: operation: operation.lifecycle == "restore") (enabledOperations project));
+
+  projectRestoreCommand = name: project:
+    assert cfg.package != null; let
+      command = lib.escapeShellArgs (map toString ([
+          "${toString cfg.package}/bin/db-harbor"
+          "restore"
+          "--manifest"
+          (projectPlan name project)
+        ]
+        ++ lib.concatMap (operation: ["--operation" operation]) (restoreOperationIds name project) ++ ["--confirm"]));
+    in "${pkgs.writeShellScript "db-harbor-${name}-restore" ''
+      set -eu
+      exec ${command}
+    ''}";
+
   projectToMigration = name: project: {
     enable = true;
     inherit (project) description user group environment path;
@@ -683,6 +706,10 @@
     checkCommand =
       if projectHasChecks project
       then projectCheckCommand name project
+      else null;
+    restoreCommand =
+      if restoreOperationIds name project != []
+      then projectRestoreCommand name project
       else null;
     after = project.postgres.setupUnits ++ projectUnitList "after" project;
     requires = project.postgres.setupUnits ++ projectUnitList "requires" project;
@@ -776,6 +803,21 @@
           ExecStart = migration.checkCommand;
         };
     };
+
+  restoreService = name: migration: {
+    description = "${migration.description} on-demand restore";
+    inherit (migration) environment path;
+    after = migration.after;
+    requires = migration.requires;
+    wants = migration.wants;
+    restartIfChanged = true;
+    stopIfChanged = true;
+    serviceConfig =
+      serviceConfigFor migration
+      // {
+        ExecStart = migration.restoreCommand;
+      };
+  };
 in {
   imports = [
     (lib.mkAliasOptionModule ["services" "db-harbor" "operations"] ["services" "db-harbor" "migrations"])
@@ -949,6 +991,9 @@ in {
           (lib.mapAttrs' (name: migration:
             lib.nameValuePair "db-harbor-${name}-check" (checkService name migration))
           enabledMigrations)
+          (lib.mapAttrs' (name: migration:
+            lib.nameValuePair "db-harbor-${name}-restore" (restoreService name migration))
+          (lib.filterAttrs (_: migration: migration.restoreCommand != null) enabledMigrations))
           (lib.mapAttrs' (name: migration:
             lib.nameValuePair "db-harbor-${name}-activate" (runtimeActivationService name migration))
           enabledMigrations)

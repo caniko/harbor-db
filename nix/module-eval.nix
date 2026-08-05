@@ -42,6 +42,15 @@
             requires = ["network-online.target"];
             runtimeUnits = ["demo-app.service"];
           };
+          operations.restore = {
+            enable = true;
+            lifecycle = "restore";
+            safety = "operator_confirmed";
+            runner = {
+              command = "systemctl start demo-helper.service";
+              checkCommand = "test -f /var/lib/db-harbor-restore-healed";
+            };
+          };
         };
         services.db-harbor.dataDirectories = [
           {
@@ -56,10 +65,12 @@
   };
   service = eval.config.systemd.services.db-harbor-demo;
   checkService = eval.config.systemd.services.db-harbor-demo-check;
+  restoreService = eval.config.systemd.services.db-harbor-demo-restore;
   rawService = eval.config.systemd.services.db-harbor-raw;
   applyScript = builtins.replaceStrings ["\n"] [" "] (builtins.readFile service.serviceConfig.ExecStart);
   manifest = builtins.elemAt (builtins.match ".*--manifest ([^ ]+).*" applyScript) 0;
   plan = builtins.readFile manifest;
+  restoreScript = builtins.replaceStrings ["\n"] [" "] (builtins.readFile restoreService.serviceConfig.ExecStart);
 in
   (import ./eval-checks.nix {inherit pkgs;}).mkEvalCheck {
     name = "db-harbor-module-eval";
@@ -129,6 +140,24 @@ in
         name = "data-directory-activation-script";
         assertion = lib.hasInfix "install -d -o postgres -g postgres -m 0700 /var/lib/db-harbor-data" eval.config.system.activationScripts.db-harbor-establish-data-directories.text;
         message = "dataDirectories must lower into an activation script for live switches";
+      }
+      {
+        name = "restore-unit-is-generated";
+        assertion = restoreService.serviceConfig.ExecStart != null;
+        message = "restore-lifecycle operations must generate an on-demand restore unit";
+      }
+      {
+        name = "restore-unit-is-manual";
+        assertion = (restoreService.wantedBy or []) == [];
+        message = "the restore unit must never start during activation";
+      }
+      {
+        name = "restore-targets-only-restore-operations";
+        assertion =
+          lib.hasInfix "--operation restore" restoreScript
+          && lib.hasInfix "--confirm" restoreScript
+          && !(lib.hasInfix "--operation ensure" restoreScript);
+        message = "the restore command must select exactly the restore-lifecycle operations";
       }
     ];
   }

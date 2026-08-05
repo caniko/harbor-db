@@ -20,6 +20,8 @@ enum Command {
     Apply(RunArgs),
     /// Run read-only lifecycle-state checks.
     Check(RunArgs),
+    /// Repair pending operations: check, apply what is pending, and verify.
+    Restore(RunArgs),
     /// Validate a plan without contacting any database.
     Validate(PlanArgs),
 }
@@ -64,6 +66,7 @@ async fn run() -> Result<ExitCode, MigrationError> {
         }
         Command::Apply(args) => run_plan_command(args, RunMode::Apply).await,
         Command::Check(args) => run_plan_command(args, RunMode::Check).await,
+        Command::Restore(args) => run_plan_command(args, RunMode::Restore).await,
     }
 }
 

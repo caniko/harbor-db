@@ -42,6 +42,9 @@ pub enum Lifecycle {
     Ensure,
     /// Reconcile an already-created resource with the declared state.
     Reconcile,
+    /// Reactive repair of an unhealthy resource. Never runs at activation;
+    /// executed on demand through `db-harbor restore`.
+    Restore,
 }
 
 /// A database family used by an operation.
@@ -346,13 +349,22 @@ impl MigrationPlan {
     }
 }
 
-/// Apply or check mode.
+/// Apply, check, or restore mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunMode {
     /// Apply selected operations.
     Apply,
     /// Run read-only checks for selected operations.
     Check,
+    /// Repair selected operations: check, apply only what is pending, verify.
+    Restore,
+}
+
+impl RunMode {
+    /// Whether this mode runs apply commands.
+    pub fn applies(self) -> bool {
+        matches!(self, Self::Apply | Self::Restore)
+    }
 }
 
 /// Options controlling one plan execution.
@@ -375,6 +387,8 @@ pub enum OperationStatus {
     Pending,
     /// Operator-only operation was not selected during a normal run.
     SkippedManual,
+    /// Restore applied a pending operation and the re-check reported current.
+    Restored,
 }
 
 /// Execution report returned by the library and CLI.
@@ -509,7 +523,7 @@ pub async fn run_plan(
     let selected = options.operations.clone();
     let order = plan.execution_order(&selected)?;
     let selected_explicitly = !selected.is_empty();
-    if mode == RunMode::Apply
+    if mode.applies()
         && selected_explicitly
         && !options.confirm
         && let Some(operation) = order.iter().find(|operation| {
@@ -526,7 +540,7 @@ pub async fn run_plan(
     for operation in order {
         let explicitly_selected = selected.contains(&operation.id);
         if operation.safety == Safety::OperatorConfirmed
-            && mode == RunMode::Apply
+            && mode.applies()
             && (!selected_explicitly || !explicitly_selected)
         {
             report
@@ -534,14 +548,37 @@ pub async fn run_plan(
                 .push((operation.id.clone(), OperationStatus::SkippedManual));
             continue;
         }
-        let command = match mode {
-            RunMode::Apply => &operation.apply,
-            RunMode::Check => operation
-                .check
-                .as_ref()
-                .ok_or_else(|| MigrationError::MissingCheckCommand(operation.id.clone()))?,
+        let status = match mode {
+            RunMode::Apply => run_command(&operation.id, &operation.apply, RunMode::Apply).await?,
+            RunMode::Check => {
+                run_command(
+                    &operation.id,
+                    operation
+                        .check
+                        .as_ref()
+                        .ok_or_else(|| MigrationError::MissingCheckCommand(operation.id.clone()))?,
+                    RunMode::Check,
+                )
+                .await?
+            }
+            RunMode::Restore => {
+                let check = operation
+                    .check
+                    .as_ref()
+                    .ok_or_else(|| MigrationError::MissingCheckCommand(operation.id.clone()))?;
+                match run_command(&operation.id, check, RunMode::Check).await? {
+                    OperationStatus::Current => OperationStatus::Current,
+                    OperationStatus::Pending => {
+                        run_command(&operation.id, &operation.apply, RunMode::Apply).await?;
+                        match run_command(&operation.id, check, RunMode::Check).await? {
+                            OperationStatus::Current => OperationStatus::Restored,
+                            status => status,
+                        }
+                    }
+                    status => status,
+                }
+            }
         };
-        let status = run_command(&operation.id, command, mode).await?;
         report.operations.push((operation.id.clone(), status));
     }
     Ok(report)
@@ -590,7 +627,7 @@ async fn run_command(
         })?;
     if status.success() {
         return Ok(match mode {
-            RunMode::Apply => OperationStatus::Applied,
+            RunMode::Apply | RunMode::Restore => OperationStatus::Applied,
             RunMode::Check => OperationStatus::Current,
         });
     }
@@ -610,6 +647,7 @@ impl fmt::Display for OperationStatus {
             Self::Current => "current",
             Self::Pending => "pending",
             Self::SkippedManual => "skipped-manual",
+            Self::Restored => "restored",
         })
     }
 }
@@ -782,5 +820,101 @@ mod tests {
             .expect("pending checks are reports, not runner failures");
         assert_eq!(report.operations[0].1, OperationStatus::Pending);
         assert!(report.is_pending());
+    }
+
+    fn marked_command(mark: &std::path::Path, body: &str) -> CommandSpec {
+        CommandSpec {
+            program: "sh".to_owned(),
+            args: vec!["-c".to_owned(), body.to_owned()],
+            environment: [("MARK".to_owned(), mark.to_string_lossy().into_owned())]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_repairs_pending_operations_and_verifies() {
+        let mark =
+            std::env::temp_dir().join(format!("db-harbor-restore-mark-{}", std::process::id()));
+        let _ = std::fs::remove_file(&mark);
+        let mut broken = operation("endpoint", &[]);
+        broken.check = Some(marked_command(&mark, "test -e \"$MARK\" || exit 2"));
+        broken.apply = marked_command(&mark, "touch \"$MARK\"");
+        let report = run_plan(
+            &plan(vec![broken]),
+            RunMode::Restore,
+            &RunOptions::default(),
+        )
+        .await
+        .expect("restore repairs and verifies");
+        assert_eq!(report.operations[0].1, OperationStatus::Restored);
+        assert!(mark.exists());
+        assert!(!report.is_pending());
+        let _ = std::fs::remove_file(&mark);
+    }
+
+    #[tokio::test]
+    async fn restore_leaves_current_operations_untouched() {
+        let mut current = operation("endpoint", &[]);
+        current.apply = CommandSpec::new("sh", ["-c", "exit 1"]);
+        let report = run_plan(
+            &plan(vec![current]),
+            RunMode::Restore,
+            &RunOptions::default(),
+        )
+        .await
+        .expect("current operations skip the apply command");
+        assert_eq!(report.operations[0].1, OperationStatus::Current);
+    }
+
+    #[tokio::test]
+    async fn restore_reports_pending_when_repair_does_not_converge() {
+        let mut broken = operation("endpoint", &[]);
+        broken.check = Some(CommandSpec::new("sh", ["-c", "exit 2"]));
+        let report = run_plan(
+            &plan(vec![broken]),
+            RunMode::Restore,
+            &RunOptions::default(),
+        )
+        .await
+        .expect("non-converging restores are reports, not runner failures");
+        assert_eq!(report.operations[0].1, OperationStatus::Pending);
+        assert!(report.is_pending());
+    }
+
+    #[tokio::test]
+    async fn restore_requires_checks_and_operator_confirmation() {
+        let mut uncheckable = operation("apply-only", &[]);
+        uncheckable.check = None;
+        assert!(matches!(
+            run_plan(
+                &plan(vec![uncheckable]),
+                RunMode::Restore,
+                &RunOptions::default()
+            )
+            .await,
+            Err(MigrationError::MissingCheckCommand(_))
+        ));
+
+        let mut operator = operation("operator", &[]);
+        operator.safety = Safety::OperatorConfirmed;
+        let skipped = run_plan(
+            &plan(vec![operator.clone()]),
+            RunMode::Restore,
+            &RunOptions::default(),
+        )
+        .await
+        .expect("unselected restore operations are skipped");
+        assert_eq!(skipped.operations[0].1, OperationStatus::SkippedManual);
+
+        let selected = RunOptions {
+            operations: ["operator".to_owned()].into_iter().collect(),
+            confirm: false,
+        };
+        assert!(matches!(
+            run_plan(&plan(vec![operator]), RunMode::Restore, &selected).await,
+            Err(MigrationError::ConfirmationRequired(_))
+        ));
     }
 }

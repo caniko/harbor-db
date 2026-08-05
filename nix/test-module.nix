@@ -26,6 +26,14 @@ pkgs.testers.nixosTest {
         check-manual)
           true
           ;;
+        apply-restore)
+          mkdir -p /var/lib/db-harbor-demo
+          touch /var/lib/db-harbor-demo/structured-restored
+          echo structured-restored >> /var/lib/db-harbor-demo/structured-events
+          ;;
+        check-restore)
+          test -f /var/lib/db-harbor-demo/structured-restored || exit 2
+          ;;
         *)
           echo "unknown command: $1" >&2
           exit 64
@@ -206,6 +214,18 @@ pkgs.testers.nixosTest {
           };
           dependsOn = ["schema"];
         };
+        restore = {
+          enable = true;
+          lifecycle = "restore";
+          safety = "operator_confirmed";
+          phase = "operational";
+          runner = {
+            package = multiMigrator;
+            executable = "bin/multi-migrator";
+            args = ["apply-restore"];
+            checkArgs = ["check-restore"];
+          };
+        };
       };
       runtimeUnits = ["multi-app.service"];
       serviceConfig.ReadWritePaths = ["/var/lib/db-harbor-demo"];
@@ -245,6 +265,11 @@ pkgs.testers.nixosTest {
     machine.wait_until_succeeds("systemctl show multi-app.service -p Result --value | grep -Fx success")
     machine.succeed("test -f /var/lib/db-harbor-demo/structured-schema")
     machine.succeed("test ! -e /var/lib/db-harbor-demo/structured-manual")
+    machine.succeed("test ! -e /var/lib/db-harbor-demo/structured-restored")
+    machine.succeed("systemctl start db-harbor-structured-restore.service")
+    machine.wait_until_succeeds("systemctl show db-harbor-structured-restore.service -p Result --value | grep -Fx success")
+    machine.succeed("test -f /var/lib/db-harbor-demo/structured-restored")
+    machine.succeed("grep -n structured-restored /var/lib/db-harbor-demo/structured-events")
     machine.succeed("systemctl start db-harbor-structured-check.service")
     machine.succeed("test -f /var/lib/db-harbor-demo/stamp")
     machine.succeed("test -f /var/lib/db-harbor-demo/project-stamp")
