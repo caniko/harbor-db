@@ -1,8 +1,8 @@
 [ci]
 runtime = "nix"
-runner = "codefloe-global"
+runner = "ubuntu-24.04"
 workspace = true
 with_nextest = true
 with_docs = true
-provider = "crow"
-platform = "forgejo"
+provider = "actions"
+platform = "github"

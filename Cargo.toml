@@ -6,8 +6,8 @@ edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
 publish = false
-repository = "https://codeberg.org/caniko/migrationix"
-homepage = "https://codeberg.org/caniko/migrationix"
+repository = "https://github.com/caniko/db-harbor"
+homepage = "https://github.com/caniko/db-harbor"
 
 [lib]
 path = "src/lib.rs"

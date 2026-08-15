@@ -2,7 +2,7 @@
   description = "db-harbor - secure generic lifecycle plans and NixOS systemd wiring";
 
   inputs = {
-    rs-harbor.url = "git+ssh://git@codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=f209ddbca3fdbb0dc31fa3886ccc2ff7369c18ac";
+    rs-harbor.url = "git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=f209ddbca3fdbb0dc31fa3886ccc2ff7369c18ac";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
   };
@@ -57,7 +57,7 @@
         cargoExtraArgs = "--locked";
         meta = {
           description = "Secure generic lifecycle plans and deployment orchestration for services";
-          homepage = "https://codeberg.org/caniko/migrationix";
+          homepage = "https://github.com/caniko/db-harbor";
           license = pkgs.lib.licenses.asl20;
           mainProgram = "db-harbor";
         };
