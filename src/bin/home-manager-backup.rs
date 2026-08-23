@@ -102,7 +102,7 @@ mod tests {
 
     fn tempdir(name: &str) -> PathBuf {
         let directory =
-            env::temp_dir().join(format!("db-harbor-hm-backup-{name}-{}", process::id()));
+            env::temp_dir().join(format!("harbor-db-hm-backup-{name}-{}", process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
         directory

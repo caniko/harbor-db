@@ -4,8 +4,8 @@
   pkgs,
 }: let
   secretValue = "module-eval-secret";
-  secretFile = pkgs.writeText "db-harbor-module-eval-secret" secretValue;
-  rawCommand = pkgs.writeShellScript "db-harbor-module-eval-raw" "exit 0";
+  secretFile = pkgs.writeText "harbor-db-module-eval-secret" secretValue;
+  rawCommand = pkgs.writeShellScript "harbor-db-module-eval-raw" "exit 0";
   runner = pkgs.writeShellScriptBin "module-eval-runner" "exit 0";
   eval = import "${pkgs.path}/nixos/lib/eval-config.nix" {
     system = pkgs.system;
@@ -13,16 +13,16 @@
       module
       {
         system.stateVersion = "24.11";
-        services.db-harbor.package = pkgs.writeShellScriptBin "db-harbor" "exit 0";
-        services.db-harbor.operations.raw = {
+        services.harbor-db.package = pkgs.writeShellScriptBin "harbor-db" "exit 0";
+        services.harbor-db.operations.raw = {
           enable = true;
           command = "${rawCommand}";
           checkCommand = "${rawCommand}";
           credentials.token = secretFile;
-          stateDirectory = "db-harbor-raw";
-          runtimeDirectory = "db-harbor-raw";
+          stateDirectory = "harbor-db-raw";
+          runtimeDirectory = "harbor-db-raw";
         };
-        services.db-harbor.projects.demo = {
+        services.harbor-db.projects.demo = {
           enable = true;
           operations.ensure = {
             enable = true;
@@ -36,8 +36,8 @@
               checkArgs = ["check"];
               credentialEnvironment.TOKEN_FILE = "token";
             };
-            stateDirectory = "db-harbor-module-eval";
-            runtimeDirectory = "db-harbor-module-eval";
+            stateDirectory = "harbor-db-module-eval";
+            runtimeDirectory = "harbor-db-module-eval";
             after = ["network-online.target"];
             requires = ["network-online.target"];
             runtimeUnits = ["demo-app.service"];
@@ -48,13 +48,13 @@
             safety = "operator_confirmed";
             runner = {
               command = "systemctl start demo-helper.service";
-              checkCommand = "test -f /var/lib/db-harbor-restore-healed";
+              checkCommand = "test -f /var/lib/harbor-db-restore-healed";
             };
           };
         };
-        services.db-harbor.dataDirectories = [
+        services.harbor-db.dataDirectories = [
           {
-            path = "/var/lib/db-harbor-data";
+            path = "/var/lib/harbor-db-data";
             user = "postgres";
             group = "postgres";
             mode = "0700";
@@ -63,18 +63,18 @@
       }
     ];
   };
-  service = eval.config.systemd.services.db-harbor-demo;
-  checkService = eval.config.systemd.services.db-harbor-demo-check;
-  restoreService = eval.config.systemd.services.db-harbor-demo-restore;
-  rawService = eval.config.systemd.services.db-harbor-raw;
+  service = eval.config.systemd.services.harbor-db-demo;
+  checkService = eval.config.systemd.services.harbor-db-demo-check;
+  restoreService = eval.config.systemd.services.harbor-db-demo-restore;
+  rawService = eval.config.systemd.services.harbor-db-raw;
   applyScript = builtins.replaceStrings ["\n"] [" "] (builtins.readFile service.serviceConfig.ExecStart);
   manifest = builtins.elemAt (builtins.match ".*--manifest ([^ ]+).*" applyScript) 0;
   plan = builtins.readFile manifest;
   restoreScript = builtins.replaceStrings ["\n"] [" "] (builtins.readFile restoreService.serviceConfig.ExecStart);
 in
   (import ./eval-checks.nix {inherit pkgs;}).mkEvalCheck {
-    name = "db-harbor-module-eval";
-    resultMessage = "db-harbor generic lifecycle module keeps credentials out of plans";
+    name = "harbor-db-module-eval";
+    resultMessage = "harbor-db generic lifecycle module keeps credentials out of plans";
     assertions = [
       {
         name = "credential-load-is-per-operation-source";
@@ -93,12 +93,12 @@ in
       }
       {
         name = "state-directory";
-        assertion = service.serviceConfig.StateDirectory == ["db-harbor-module-eval"];
+        assertion = service.serviceConfig.StateDirectory == ["harbor-db-module-eval"];
         message = "operation stateDirectory must reach systemd serviceConfig";
       }
       {
         name = "runtime-directory";
-        assertion = service.serviceConfig.RuntimeDirectory == ["db-harbor-module-eval"];
+        assertion = service.serviceConfig.RuntimeDirectory == ["harbor-db-module-eval"];
         message = "operation runtimeDirectory must reach systemd serviceConfig";
       }
       {
@@ -128,17 +128,17 @@ in
       }
       {
         name = "raw-operation-directories";
-        assertion = rawService.serviceConfig.StateDirectory == "db-harbor-raw" && rawService.serviceConfig.RuntimeDirectory == "db-harbor-raw";
+        assertion = rawService.serviceConfig.StateDirectory == "harbor-db-raw" && rawService.serviceConfig.RuntimeDirectory == "harbor-db-raw";
         message = "raw lifecycle operations must expose state and runtime directories";
       }
       {
         name = "data-directory-tmpfiles-rule";
-        assertion = lib.elem "d /var/lib/db-harbor-data 0700 postgres postgres - -" eval.config.systemd.tmpfiles.rules;
+        assertion = lib.elem "d /var/lib/harbor-db-data 0700 postgres postgres - -" eval.config.systemd.tmpfiles.rules;
         message = "dataDirectories must lower into a boot-time tmpfiles rule";
       }
       {
         name = "data-directory-activation-script";
-        assertion = lib.hasInfix "install -d -o postgres -g postgres -m 0700 /var/lib/db-harbor-data" eval.config.system.activationScripts.db-harbor-establish-data-directories.text;
+        assertion = lib.hasInfix "install -d -o postgres -g postgres -m 0700 /var/lib/harbor-db-data" eval.config.system.activationScripts.harbor-db-establish-data-directories.text;
         message = "dataDirectories must lower into an activation script for live switches";
       }
       {

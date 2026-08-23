@@ -1,11 +1,11 @@
 use std::{collections::BTreeSet, path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand};
-use db_harbor::{MigrationError, RunMode, RunOptions, load_plan, run_plan};
+use harbor_db::{MigrationError, RunMode, RunOptions, load_plan, run_plan};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "db-harbor",
+    name = "harbor-db",
     version,
     about = "Apply and check structured lifecycle-operation plans"
 )]
@@ -50,7 +50,7 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("db-harbor: {error}");
+            eprintln!("harbor-db: {error}");
             ExitCode::from(1)
         }
     }

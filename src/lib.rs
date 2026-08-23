@@ -43,7 +43,7 @@ pub enum Lifecycle {
     /// Reconcile an already-created resource with the declared state.
     Reconcile,
     /// Reactive repair of an unhealthy resource. Never runs at activation;
-    /// executed on demand through `db-harbor restore`.
+    /// executed on demand through `harbor-db restore`.
     Restore,
 }
 
@@ -98,7 +98,7 @@ pub struct CommandSpec {
     pub environment: BTreeMap<String, String>,
     /// Credential names appended as file paths to the invocation arguments.
     ///
-    /// The plan contains only names. At runtime db-harbor resolves each name
+    /// The plan contains only names. At runtime harbor-db resolves each name
     /// below systemd's `CREDENTIALS_DIRECTORY`; it never reads or serializes
     /// the credential contents.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -175,7 +175,7 @@ pub struct MigrationOperation {
     /// Command that applies the operation idempotently.
     pub apply: CommandSpec,
     /// Optional read-only command. A missing command is allowed for apply-only
-    /// operations but makes them unavailable to `db-harbor check`.
+    /// operations but makes them unavailable to `harbor-db check`.
     #[serde(default)]
     pub check: Option<CommandSpec>,
     /// Operations that must complete before this operation.
@@ -194,11 +194,11 @@ pub struct MigrationPlan {
     pub operations: Vec<MigrationOperation>,
 }
 
-/// Neutral name for [`MigrationPlan`] while the db-harbor wire/API name is
+/// Neutral name for [`MigrationPlan`] while the harbor-db wire/API name is
 /// kept for compatibility. The serialized format remains unchanged.
 pub type DatabasePlan = MigrationPlan;
 
-/// Neutral name for [`MigrationOperation`] while the db-harbor wire/API
+/// Neutral name for [`MigrationOperation`] while the harbor-db wire/API
 /// name is kept for compatibility.
 pub type DatabaseOperation = MigrationOperation;
 
@@ -208,10 +208,10 @@ pub type Plan = MigrationPlan;
 /// Generic name for [`MigrationOperation`].
 pub type Operation = MigrationOperation;
 
-/// Neutral name for [`Backend`] while the db-harbor API remains compatible.
+/// Neutral name for [`Backend`] while the harbor-db API remains compatible.
 pub type DatabaseBackend = Backend;
 
-/// Neutral name for [`Phase`] while the db-harbor API remains compatible.
+/// Neutral name for [`Phase`] while the harbor-db API remains compatible.
 pub type OperationPhase = Phase;
 
 impl MigrationPlan {
@@ -836,7 +836,7 @@ mod tests {
     #[tokio::test]
     async fn restore_repairs_pending_operations_and_verifies() {
         let mark =
-            std::env::temp_dir().join(format!("db-harbor-restore-mark-{}", std::process::id()));
+            std::env::temp_dir().join(format!("harbor-db-restore-mark-{}", std::process::id()));
         let _ = std::fs::remove_file(&mark);
         let mut broken = operation("endpoint", &[]);
         broken.check = Some(marked_command(&mark, "test -e \"$MARK\" || exit 2"));

@@ -1,19 +1,19 @@
 [package]
-name = "db-harbor"
+name = "harbor-db"
 version = "0.1.0"
 description = "Secure generic lifecycle plans and deployment orchestration for Rust services"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
 publish = false
-repository = "https://github.com/caniko/db-harbor"
-homepage = "https://github.com/caniko/db-harbor"
+repository = "https://github.com/caniko/harbor-db"
+homepage = "https://github.com/caniko/harbor-db"
 
 [lib]
 path = "src/lib.rs"
 
 [[bin]]
-name = "db-harbor"
+name = "harbor-db"
 path = "src/main.rs"
 
 [[bin]]

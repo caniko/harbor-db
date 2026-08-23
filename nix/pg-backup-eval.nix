@@ -7,7 +7,7 @@
       ./pg-backup.nix
       {
         system.stateVersion = "24.11";
-        services.db-harbor.pgBackup = {
+        services.harbor-db.pgBackup = {
           enable = true;
           role = "target";
           source.hostName = "10.0.0.2";
@@ -23,7 +23,7 @@
       {
         system.stateVersion = "24.11";
         services.postgresql.enable = true;
-        services.db-harbor.pgBackup = {
+        services.harbor-db.pgBackup = {
           enable = true;
           role = "source";
           source.hostName = "10.0.0.1";
@@ -41,8 +41,8 @@
   sourcePostgresql = sourceEval.config.services.postgresql;
 in
   mkEvalCheck {
-    name = "db-harbor-pg-backup-eval";
-    resultMessage = "db-harbor PostgreSQL backup creates slots before streaming and verifies base backups";
+    name = "harbor-db-pg-backup-eval";
+    resultMessage = "harbor-db PostgreSQL backup creates slots before streaming and verifies base backups";
     assertions = [
       {
         name = "slot-create-is-pre-start";

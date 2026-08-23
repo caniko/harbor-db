@@ -5,7 +5,7 @@
   ...
 }: let
   inherit (lib) mkEnableOption mkIf mkMerge mkOption types;
-  cfg = config.services.db-harbor.pgBackup;
+  cfg = config.services.harbor-db.pgBackup;
 
   # A hostname is also used as a directory component. Keep the legacy IPv4
   # paths stable while preventing IPv6 / URI punctuation from becoming path
@@ -180,7 +180,7 @@
     };
   };
 in {
-  options.services.db-harbor.pgBackup = {
+  options.services.harbor-db.pgBackup = {
     enable = mkEnableOption "PostgreSQL backup replication (source or target)";
 
     role = mkOption {
@@ -333,23 +333,23 @@ in {
         assertions = [
           {
             assertion = cfg.role == "source" -> config.services.postgresql.enable or false;
-            message = "services.db-harbor.pgBackup (role=source) requires services.postgresql.enable = true on this host.";
+            message = "services.harbor-db.pgBackup (role=source) requires services.postgresql.enable = true on this host.";
           }
           {
             assertion = cfg.role != "source" || cfg.sourceSettings.replicatorPasswordFile != null;
-            message = "services.db-harbor.pgBackup (role=source) requires sourceSettings.replicatorPasswordFile to be set.";
+            message = "services.harbor-db.pgBackup (role=source) requires sourceSettings.replicatorPasswordFile to be set.";
           }
           {
             assertion = cfg.role != "target" || cfg.targetSettings.receiveWal.enable || cfg.targetSettings.baseBackup.enable;
-            message = "services.db-harbor.pgBackup (role=target) requires at least one target operation to be enabled.";
+            message = "services.harbor-db.pgBackup (role=target) requires at least one target operation to be enabled.";
           }
           {
             assertion = cfg.role != "target" || cfg.targetSettings.retain.walDays >= cfg.targetSettings.retain.baseBackupDays + 1;
-            message = "services.db-harbor.pgBackup requires walDays >= baseBackupDays + 1 for safe PITR.";
+            message = "services.harbor-db.pgBackup requires walDays >= baseBackupDays + 1 for safe PITR.";
           }
           {
             assertion = cfg.role != "target" || cfg.targetSettings.replicatorPasswordFile != null;
-            message = "services.db-harbor.pgBackup (role=target) requires targetSettings.replicatorPasswordFile to be set.";
+            message = "services.harbor-db.pgBackup (role=target) requires targetSettings.replicatorPasswordFile to be set.";
           }
         ];
       }
@@ -403,7 +403,7 @@ in {
           {
             # Preserve the legacy same-secret fallback for deployments that
             # put the agenix path under sourceSettings on both hosts.
-            services.db-harbor.pgBackup.targetSettings.replicatorPasswordFile = lib.mkDefault cfg.sourceSettings.replicatorPasswordFile;
+            services.harbor-db.pgBackup.targetSettings.replicatorPasswordFile = lib.mkDefault cfg.sourceSettings.replicatorPasswordFile;
           }
           (mkMerge (lib.mapAttrsToList mkTarget targetSources))
         ]))

@@ -4,35 +4,35 @@
   pkgs,
 }:
 pkgs.testers.nixosTest {
-  name = "db-harbor-module-smoke";
+  name = "harbor-db-module-smoke";
 
   nodes.machine = {pkgs, ...}: let
     multiMigrator = pkgs.writeShellScriptBin "multi-migrator" ''
       set -eu
       case "$1" in
         apply-schema)
-          mkdir -p /var/lib/db-harbor-demo
-          touch /var/lib/db-harbor-demo/structured-schema
-          echo structured-schema >> /var/lib/db-harbor-demo/structured-events
+          mkdir -p /var/lib/harbor-db-demo
+          touch /var/lib/harbor-db-demo/structured-schema
+          echo structured-schema >> /var/lib/harbor-db-demo/structured-events
           ;;
         check-schema)
-          test -f /var/lib/db-harbor-demo/structured-schema
+          test -f /var/lib/harbor-db-demo/structured-schema
           ;;
         apply-manual)
-          mkdir -p /var/lib/db-harbor-demo
-          touch /var/lib/db-harbor-demo/structured-manual
-          echo structured-manual >> /var/lib/db-harbor-demo/structured-events
+          mkdir -p /var/lib/harbor-db-demo
+          touch /var/lib/harbor-db-demo/structured-manual
+          echo structured-manual >> /var/lib/harbor-db-demo/structured-events
           ;;
         check-manual)
           true
           ;;
         apply-restore)
-          mkdir -p /var/lib/db-harbor-demo
-          touch /var/lib/db-harbor-demo/structured-restored
-          echo structured-restored >> /var/lib/db-harbor-demo/structured-events
+          mkdir -p /var/lib/harbor-db-demo
+          touch /var/lib/harbor-db-demo/structured-restored
+          echo structured-restored >> /var/lib/harbor-db-demo/structured-events
           ;;
         check-restore)
-          test -f /var/lib/db-harbor-demo/structured-restored || exit 2
+          test -f /var/lib/harbor-db-demo/structured-restored || exit 2
           ;;
         *)
           echo "unknown command: $1" >&2
@@ -67,9 +67,9 @@ pkgs.testers.nixosTest {
   in {
     imports = [module];
 
-    environment.etc."db-harbor-lifecycle-secret".text = "lifecycle-secret\n";
+    environment.etc."harbor-db-lifecycle-secret".text = "lifecycle-secret\n";
 
-    systemd.tmpfiles.rules = ["d /var/lib/db-harbor-demo 0775 postgres postgres -"];
+    systemd.tmpfiles.rules = ["d /var/lib/harbor-db-demo 0775 postgres postgres -"];
 
     services.postgresql = {
       enable = true;
@@ -94,8 +94,8 @@ pkgs.testers.nixosTest {
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${pkgs.writeShellScript "project-app" ''
-          test -f /var/lib/db-harbor-demo/project-stamp
-          echo project-app-started >> /var/lib/db-harbor-demo/project-events
+          test -f /var/lib/harbor-db-demo/project-stamp
+          echo project-app-started >> /var/lib/harbor-db-demo/project-events
         ''}";
       };
     };
@@ -105,8 +105,8 @@ pkgs.testers.nixosTest {
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${pkgs.writeShellScript "demo-app" ''
-          test -f /var/lib/db-harbor-demo/stamp
-          echo app-started >> /var/lib/db-harbor-demo/events
+          test -f /var/lib/harbor-db-demo/stamp
+          echo app-started >> /var/lib/harbor-db-demo/events
         ''}";
       };
     };
@@ -115,9 +115,9 @@ pkgs.testers.nixosTest {
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${pkgs.writeShellScript "multi-app" ''
-          test -f /var/lib/db-harbor-demo/structured-schema
-          test ! -e /var/lib/db-harbor-demo/structured-manual
-          echo structured-app-started >> /var/lib/db-harbor-demo/structured-events
+          test -f /var/lib/harbor-db-demo/structured-schema
+          test ! -e /var/lib/harbor-db-demo/structured-manual
+          echo structured-app-started >> /var/lib/harbor-db-demo/structured-events
         ''}";
       };
     };
@@ -126,28 +126,28 @@ pkgs.testers.nixosTest {
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${pkgs.writeShellScript "lifecycle-app" ''
-          test -f /var/lib/db-harbor-lifecycle/ensured
+          test -f /var/lib/harbor-db-lifecycle/ensured
         ''}";
       };
     };
 
-    services.db-harbor.operations.demo = {
+    services.harbor-db.operations.demo = {
       enable = true;
       description = "Demo migration";
       command = "${pkgs.writeShellScript "demo-migration" ''
-        mkdir -p /var/lib/db-harbor-demo
-        touch /var/lib/db-harbor-demo/stamp
-        echo migrated >> /var/lib/db-harbor-demo/events
+        mkdir -p /var/lib/harbor-db-demo
+        touch /var/lib/harbor-db-demo/stamp
+        echo migrated >> /var/lib/harbor-db-demo/events
       ''}";
       checkCommand = "${pkgs.writeShellScript "demo-migration-check" ''
-        test -f /var/lib/db-harbor-demo/stamp
+        test -f /var/lib/harbor-db-demo/stamp
       ''}";
       beforeUnits = ["demo-app.service"];
       requiredByUnits = ["demo-app.service"];
-      serviceConfig.ReadWritePaths = ["/var/lib/db-harbor-demo"];
+      serviceConfig.ReadWritePaths = ["/var/lib/harbor-db-demo"];
     };
 
-    services.db-harbor.projects.project = {
+    services.harbor-db.projects.project = {
       enable = true;
       description = "Project migration";
       runner = {
@@ -168,8 +168,8 @@ pkgs.testers.nixosTest {
           esac
         '';
         executable = "bin/project-migrator";
-        args = ["apply" "/var/lib/db-harbor-demo"];
-        checkArgs = ["check" "/var/lib/db-harbor-demo"];
+        args = ["apply" "/var/lib/harbor-db-demo"];
+        checkArgs = ["check" "/var/lib/harbor-db-demo"];
       };
       user = "postgres";
       group = "postgres";
@@ -183,10 +183,10 @@ pkgs.testers.nixosTest {
           runtimeRole = "project_app";
         };
       };
-      serviceConfig.ReadWritePaths = ["/var/lib/db-harbor-demo"];
+      serviceConfig.ReadWritePaths = ["/var/lib/harbor-db-demo"];
     };
 
-    services.db-harbor.projects.structured = {
+    services.harbor-db.projects.structured = {
       enable = true;
       description = "Structured migration plan";
       operations = {
@@ -228,17 +228,17 @@ pkgs.testers.nixosTest {
         };
       };
       runtimeUnits = ["multi-app.service"];
-      serviceConfig.ReadWritePaths = ["/var/lib/db-harbor-demo"];
+      serviceConfig.ReadWritePaths = ["/var/lib/harbor-db-demo"];
     };
 
-    services.db-harbor.projects.lifecycle = {
+    services.harbor-db.projects.lifecycle = {
       enable = true;
       description = "Generic credential lifecycle";
       operations.ensure = {
         enable = true;
         kind = "credential";
         lifecycle = "ensure";
-        credentials.api-token = "/etc/db-harbor-lifecycle-secret";
+        credentials.api-token = "/etc/harbor-db-lifecycle-secret";
         runner = {
           package = credentialMigrator;
           executable = "bin/credential-migrator";
@@ -246,49 +246,49 @@ pkgs.testers.nixosTest {
           checkArgs = ["check"];
           credentialEnvironment.TOKEN_FILE = "api-token";
         };
-        stateDirectory = "db-harbor-lifecycle";
-        runtimeDirectory = "db-harbor-lifecycle";
+        stateDirectory = "harbor-db-lifecycle";
+        runtimeDirectory = "harbor-db-lifecycle";
         runtimeUnits = ["lifecycle-app.service"];
       };
     };
   };
 
   testScript = ''
-    machine.wait_until_succeeds("systemctl show db-harbor-demo.service -p Result --value | grep -Fx success")
+    machine.wait_until_succeeds("systemctl show harbor-db-demo.service -p Result --value | grep -Fx success")
     machine.wait_until_succeeds("systemctl show demo-app.service -p Result --value | grep -Fx success")
     machine.wait_for_unit("postgresql-setup.service")
     machine.succeed("systemctl start project-app.service")
-    machine.wait_until_succeeds("systemctl show db-harbor-project.service -p Result --value | grep -Fx success")
+    machine.wait_until_succeeds("systemctl show harbor-db-project.service -p Result --value | grep -Fx success")
     machine.wait_until_succeeds("systemctl show project-app.service -p Result --value | grep -Fx success")
     machine.succeed("systemctl start multi-app.service")
-    machine.wait_until_succeeds("systemctl show db-harbor-structured.service -p Result --value | grep -Fx success")
+    machine.wait_until_succeeds("systemctl show harbor-db-structured.service -p Result --value | grep -Fx success")
     machine.wait_until_succeeds("systemctl show multi-app.service -p Result --value | grep -Fx success")
-    machine.succeed("test -f /var/lib/db-harbor-demo/structured-schema")
-    machine.succeed("test ! -e /var/lib/db-harbor-demo/structured-manual")
-    machine.succeed("test ! -e /var/lib/db-harbor-demo/structured-restored")
-    machine.succeed("systemctl start db-harbor-structured-restore.service")
-    machine.wait_until_succeeds("systemctl show db-harbor-structured-restore.service -p Result --value | grep -Fx success")
-    machine.succeed("test -f /var/lib/db-harbor-demo/structured-restored")
-    machine.succeed("grep -n structured-restored /var/lib/db-harbor-demo/structured-events")
-    machine.succeed("systemctl start db-harbor-structured-check.service")
-    machine.succeed("test -f /var/lib/db-harbor-demo/stamp")
-    machine.succeed("test -f /var/lib/db-harbor-demo/project-stamp")
-    machine.succeed("grep -n migrated /var/lib/db-harbor-demo/events")
-    machine.succeed("grep -n project-migrated /var/lib/db-harbor-demo/project-events")
-    machine.succeed("grep -n app-started /var/lib/db-harbor-demo/events")
-    machine.succeed("grep -n project-app-started /var/lib/db-harbor-demo/project-events")
-    machine.succeed("systemctl start db-harbor-demo.service")
-    machine.succeed("systemctl start db-harbor-demo-check.service")
-    machine.succeed("systemctl start db-harbor-project.service")
-    machine.succeed("systemctl start db-harbor-project-check.service")
-    machine.succeed("test $(grep -c migrated /var/lib/db-harbor-demo/events) -ge 2")
+    machine.succeed("test -f /var/lib/harbor-db-demo/structured-schema")
+    machine.succeed("test ! -e /var/lib/harbor-db-demo/structured-manual")
+    machine.succeed("test ! -e /var/lib/harbor-db-demo/structured-restored")
+    machine.succeed("systemctl start harbor-db-structured-restore.service")
+    machine.wait_until_succeeds("systemctl show harbor-db-structured-restore.service -p Result --value | grep -Fx success")
+    machine.succeed("test -f /var/lib/harbor-db-demo/structured-restored")
+    machine.succeed("grep -n structured-restored /var/lib/harbor-db-demo/structured-events")
+    machine.succeed("systemctl start harbor-db-structured-check.service")
+    machine.succeed("test -f /var/lib/harbor-db-demo/stamp")
+    machine.succeed("test -f /var/lib/harbor-db-demo/project-stamp")
+    machine.succeed("grep -n migrated /var/lib/harbor-db-demo/events")
+    machine.succeed("grep -n project-migrated /var/lib/harbor-db-demo/project-events")
+    machine.succeed("grep -n app-started /var/lib/harbor-db-demo/events")
+    machine.succeed("grep -n project-app-started /var/lib/harbor-db-demo/project-events")
+    machine.succeed("systemctl start harbor-db-demo.service")
+    machine.succeed("systemctl start harbor-db-demo-check.service")
+    machine.succeed("systemctl start harbor-db-project.service")
+    machine.succeed("systemctl start harbor-db-project-check.service")
+    machine.succeed("test $(grep -c migrated /var/lib/harbor-db-demo/events) -ge 2")
     machine.succeed("sudo -u project_app psql -d db_harbor_project -tAc 'INSERT INTO project_item DEFAULT VALUES RETURNING id;' | grep -Fx 1")
-    machine.wait_until_succeeds("systemctl show db-harbor-lifecycle.service -p Result --value | grep -Fx success")
+    machine.wait_until_succeeds("systemctl show harbor-db-lifecycle.service -p Result --value | grep -Fx success")
     machine.wait_until_succeeds("systemctl show lifecycle-app.service -p Result --value | grep -Fx success")
-    machine.succeed("systemctl start db-harbor-lifecycle.service")
-    machine.succeed("systemctl start db-harbor-lifecycle-check.service")
-    machine.succeed("test $(grep -c ensured /var/lib/db-harbor-lifecycle/events) -eq 1")
-    machine.succeed("! grep -R -n lifecycle-secret /nix/store/*db-harbor-lifecycle-plan.json")
-    machine.succeed("! systemctl show db-harbor-lifecycle.service | grep -F lifecycle-secret")
+    machine.succeed("systemctl start harbor-db-lifecycle.service")
+    machine.succeed("systemctl start harbor-db-lifecycle-check.service")
+    machine.succeed("test $(grep -c ensured /var/lib/harbor-db-lifecycle/events) -eq 1")
+    machine.succeed("! grep -R -n lifecycle-secret /nix/store/*harbor-db-lifecycle-plan.json")
+    machine.succeed("! systemctl show harbor-db-lifecycle.service | grep -F lifecycle-secret")
   '';
 }

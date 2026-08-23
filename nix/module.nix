@@ -6,7 +6,7 @@
 }: let
   inherit (lib) mkEnableOption mkIf mkMerge mkOption optionalAttrs types;
 
-  cfg = config.services.db-harbor;
+  cfg = config.services.harbor-db;
 
   sqlIdentifier = value: "\"" + builtins.replaceStrings ["\""] ["\"\""] value + "\"";
 
@@ -15,7 +15,7 @@
 
   migrationType = types.submodule ({name, ...}: {
     options = {
-      enable = mkEnableOption "db-harbor database operation ${name}";
+      enable = mkEnableOption "harbor-db database operation ${name}";
 
       kind = mkOption {
         type = types.enum ["generic" "database" "credential"];
@@ -193,7 +193,7 @@
 
   operationType = types.submodule ({name, ...}: {
     options = {
-      enable = mkEnableOption "db-harbor lifecycle operation ${name}";
+      enable = mkEnableOption "harbor-db lifecycle operation ${name}";
 
       kind = mkOption {
         type = types.enum ["generic" "database" "credential"];
@@ -372,7 +372,7 @@
 
   projectType = types.submodule ({name, ...}: {
     options = {
-      enable = mkEnableOption "db-harbor project ${name}";
+      enable = mkEnableOption "harbor-db project ${name}";
 
       description = mkOption {
         type = types.str;
@@ -547,7 +547,7 @@
   sqlLiteral = value: "'" + builtins.replaceStrings ["'"] ["''"] value + "'";
 
   fullCommandSpec = name: suffix: command: let
-    script = pkgs.writeShellScript "db-harbor-${name}-${suffix}" ''
+    script = pkgs.writeShellScript "harbor-db-${name}-${suffix}" ''
       set -eu
       ${command}
     '';
@@ -648,7 +648,7 @@
       depends_on = ["default"];
     };
   in
-    pkgs.writeText "db-harbor-${name}-plan.json" (builtins.toJSON {
+    pkgs.writeText "harbor-db-${name}-plan.json" (builtins.toJSON {
       version = 1;
       inherit name;
       operations = baseOperations ++ grantOperation;
@@ -657,12 +657,12 @@
   projectApplyCommand = name: project:
     assert cfg.package != null; let
       command = lib.escapeShellArgs (map toString [
-        "${toString cfg.package}/bin/db-harbor"
+        "${toString cfg.package}/bin/harbor-db"
         "apply"
         "--manifest"
         (projectPlan name project)
       ]);
-    in "${pkgs.writeShellScript "db-harbor-${name}-apply" ''
+    in "${pkgs.writeShellScript "harbor-db-${name}-apply" ''
       set -eu
       exec ${command}
     ''}";
@@ -670,12 +670,12 @@
   projectCheckCommand = name: project:
     assert cfg.package != null; let
       command = lib.escapeShellArgs (map toString [
-        "${toString cfg.package}/bin/db-harbor"
+        "${toString cfg.package}/bin/harbor-db"
         "check"
         "--manifest"
         (projectPlan name project)
       ]);
-    in "${pkgs.writeShellScript "db-harbor-${name}-check" ''
+    in "${pkgs.writeShellScript "harbor-db-${name}-check" ''
       set -eu
       exec ${command}
     ''}";
@@ -686,13 +686,13 @@
   projectRestoreCommand = name: project:
     assert cfg.package != null; let
       command = lib.escapeShellArgs (map toString ([
-          "${toString cfg.package}/bin/db-harbor"
+          "${toString cfg.package}/bin/harbor-db"
           "restore"
           "--manifest"
           (projectPlan name project)
         ]
         ++ lib.concatMap (operation: ["--operation" operation]) (restoreOperationIds name project) ++ ["--confirm"]));
-    in "${pkgs.writeShellScript "db-harbor-${name}-restore" ''
+    in "${pkgs.writeShellScript "harbor-db-${name}-restore" ''
       set -eu
       exec ${command}
     ''}";
@@ -773,14 +773,14 @@
   runtimeActivationService = name: migration:
     mkIf (migration.requiredByUnits != []) {
       description = "Start ${migration.description} runtime units after a successful migration";
-      after = ["db-harbor-${name}.service"];
-      requires = ["db-harbor-${name}.service"];
+      after = ["harbor-db-${name}.service"];
+      requires = ["harbor-db-${name}.service"];
       wantedBy = ["multi-user.target"];
       restartIfChanged = true;
       stopIfChanged = true;
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = pkgs.writeShellScript "db-harbor-${name}-start-runtime" ''
+        ExecStart = pkgs.writeShellScript "harbor-db-${name}-start-runtime" ''
           set -eu
           for unit in ${lib.escapeShellArgs migration.requiredByUnits}; do
             ${pkgs.systemd}/bin/systemctl reset-failed "$unit" || true
@@ -820,14 +820,14 @@
   };
 in {
   imports = [
-    (lib.mkAliasOptionModule ["services" "db-harbor" "operations"] ["services" "db-harbor" "migrations"])
+    (lib.mkAliasOptionModule ["services" "harbor-db" "operations"] ["services" "harbor-db" "migrations"])
   ];
 
-  options.services.db-harbor = {
+  options.services.harbor-db = {
     package = mkOption {
       type = types.nullOr types.package;
       default = null;
-      description = "db-harbor package used for generated project plan units.";
+      description = "harbor-db package used for generated project plan units.";
     };
 
     migrations = mkOption {
@@ -839,7 +839,7 @@ in {
     projects = mkOption {
       type = types.attrsOf projectType;
       default = {};
-      description = "Higher-level generic project lifecycle definitions lowered into db-harbor operations.";
+      description = "Higher-level generic project lifecycle definitions lowered into harbor-db operations.";
     };
 
     dataDirectories = mkOption {
@@ -879,7 +879,7 @@ in {
       assertions = [
         {
           assertion = lib.all (dir: lib.hasPrefix "/" dir.path) cfg.dataDirectories;
-          message = "services.db-harbor.dataDirectories: each path must be absolute";
+          message = "services.harbor-db.dataDirectories: each path must be absolute";
         }
       ];
 
@@ -888,7 +888,7 @@ in {
       # otherwise be missing when a unit sets up its mount namespace.
       systemd.tmpfiles.rules = map (dir: "d ${dir.path} ${dir.mode} ${dir.user} ${dir.group} - -") cfg.dataDirectories;
 
-      system.activationScripts.db-harbor-establish-data-directories = lib.stringAfter ["groups" "users"] (
+      system.activationScripts.harbor-db-establish-data-directories = lib.stringAfter ["groups" "users"] (
         lib.concatMapStringsSep "\n" (dir: "install -d -o ${dir.user} -g ${dir.group} -m ${dir.mode} ${dir.path}") cfg.dataDirectories
       );
     })
@@ -900,19 +900,19 @@ in {
         operationAssertions = lib.flatten (lib.mapAttrsToList (operationName: operation: [
             {
               assertion = operation.runner.command != null || operation.runner.executable != null;
-              message = "services.db-harbor.projects.${name}.operations.${operationName}: set runner.command or runner.executable";
+              message = "services.harbor-db.projects.${name}.operations.${operationName}: set runner.command or runner.executable";
             }
             {
               assertion = operation.runner.command != null || operation.runner.package == null || operation.runner.executable != null;
-              message = "services.db-harbor.projects.${name}.operations.${operationName}: runner.package requires runner.executable when runner.command is unset";
+              message = "services.harbor-db.projects.${name}.operations.${operationName}: runner.package requires runner.executable when runner.command is unset";
             }
             {
               assertion = lib.all (dependency: builtins.hasAttr dependency operations) operation.dependsOn;
-              message = "services.db-harbor.projects.${name}.operations.${operationName}: dependsOn references an unknown operation";
+              message = "services.harbor-db.projects.${name}.operations.${operationName}: dependsOn references an unknown operation";
             }
             {
               assertion = lib.all (credential: builtins.hasAttr credential credentialSources) (operation.runner.credentialArgs ++ lib.attrValues operation.runner.credentialEnvironment);
-              message = "services.db-harbor.projects.${name}.operations.${operationName}: credential references need a matching credentials entry";
+              message = "services.harbor-db.projects.${name}.operations.${operationName}: credential references need a matching credentials entry";
             }
           ])
           operations);
@@ -920,39 +920,39 @@ in {
         [
           {
             assertion = operations != {};
-            message = "services.db-harbor.projects.${name}: configure runner or at least one enabled operation";
+            message = "services.harbor-db.projects.${name}: configure runner or at least one enabled operation";
           }
           {
             assertion = cfg.package != null;
-            message = "services.db-harbor.package must be set when a project uses generated plan units";
+            message = "services.harbor-db.package must be set when a project uses generated plan units";
           }
           {
             assertion = lib.all (credential: builtins.match "[A-Za-z0-9_.-]+" credential != null) (builtins.attrNames credentialSources);
-            message = "services.db-harbor.projects.${name}: credential names must be safe systemd credential names";
+            message = "services.harbor-db.projects.${name}: credential names must be safe systemd credential names";
           }
           {
             assertion = !project.postgres.grants.enable || project.postgres.enable;
-            message = "services.db-harbor.projects.${name}: postgres.grants.enable requires postgres.enable";
+            message = "services.harbor-db.projects.${name}: postgres.grants.enable requires postgres.enable";
           }
           {
             assertion = !project.postgres.grants.enable || project.postgres.databaseUrl != null;
-            message = "services.db-harbor.projects.${name}: postgres.databaseUrl is required when postgres.grants.enable is set";
+            message = "services.harbor-db.projects.${name}: postgres.databaseUrl is required when postgres.grants.enable is set";
           }
           {
             assertion = !project.postgres.grants.enable || project.postgres.grants.runtimeRole != null;
-            message = "services.db-harbor.projects.${name}: postgres.grants.runtimeRole is required when postgres.grants.enable is set";
+            message = "services.harbor-db.projects.${name}: postgres.grants.runtimeRole is required when postgres.grants.enable is set";
           }
           {
             assertion = !project.postgres.grants.enable || builtins.hasAttr "default" operations;
-            message = "services.db-harbor.projects.${name}: postgres grants require the default migration operation";
+            message = "services.harbor-db.projects.${name}: postgres grants require the default migration operation";
           }
           {
             assertion = !project.postgres.grants.enable || project.postgres.grants.tablePrivileges != [];
-            message = "services.db-harbor.projects.${name}: postgres.grants.tablePrivileges must not be empty";
+            message = "services.harbor-db.projects.${name}: postgres.grants.tablePrivileges must not be empty";
           }
           {
             assertion = !project.postgres.grants.enable || project.postgres.grants.sequencePrivileges != [];
-            message = "services.db-harbor.projects.${name}: postgres.grants.sequencePrivileges must not be empty";
+            message = "services.harbor-db.projects.${name}: postgres.grants.sequencePrivileges must not be empty";
           }
           {
             assertion =
@@ -960,24 +960,24 @@ in {
               || lib.all
               (operation: operation.runner.checkCommand != null || operation.runner.checkArgs != null)
               (lib.attrValues operations);
-            message = "services.db-harbor.projects.${name}: every enabled operation needs a read-only check when project checks are configured";
+            message = "services.harbor-db.projects.${name}: every enabled operation needs a read-only check when project checks are configured";
           }
         ]
         ++ operationAssertions)
       enabledProjects);
 
-      services.db-harbor.migrations = lib.mapAttrs projectToMigration enabledProjects;
+      services.harbor-db.migrations = lib.mapAttrs projectToMigration enabledProjects;
     })
 
     (mkIf (enabledMigrations != {}) {
       assertions = lib.flatten (lib.mapAttrsToList (name: migration: [
           {
             assertion = builtins.match "[A-Za-z0-9_.@-]+" name != null;
-            message = "services.db-harbor.migrations.${name}: migration names must be valid systemd unit-name fragments";
+            message = "services.harbor-db.migrations.${name}: migration names must be valid systemd unit-name fragments";
           }
           {
             assertion = lib.all (credential: builtins.match "[A-Za-z0-9_.-]+" credential != null) (builtins.attrNames migration.credentials);
-            message = "services.db-harbor.migrations.${name}: credential names must be safe systemd credential names";
+            message = "services.harbor-db.migrations.${name}: credential names must be safe systemd credential names";
           }
         ])
         enabledMigrations);
@@ -986,16 +986,16 @@ in {
         mkMerge
         [
           (lib.mapAttrs' (name: migration:
-            lib.nameValuePair "db-harbor-${name}" (migrationService name migration))
+            lib.nameValuePair "harbor-db-${name}" (migrationService name migration))
           enabledMigrations)
           (lib.mapAttrs' (name: migration:
-            lib.nameValuePair "db-harbor-${name}-check" (checkService name migration))
+            lib.nameValuePair "harbor-db-${name}-check" (checkService name migration))
           enabledMigrations)
           (lib.mapAttrs' (name: migration:
-            lib.nameValuePair "db-harbor-${name}-restore" (restoreService name migration))
+            lib.nameValuePair "harbor-db-${name}-restore" (restoreService name migration))
           (lib.filterAttrs (_: migration: migration.restoreCommand != null) enabledMigrations))
           (lib.mapAttrs' (name: migration:
-            lib.nameValuePair "db-harbor-${name}-activate" (runtimeActivationService name migration))
+            lib.nameValuePair "harbor-db-${name}-activate" (runtimeActivationService name migration))
           enabledMigrations)
         ];
     })

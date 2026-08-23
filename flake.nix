@@ -1,17 +1,19 @@
 {
-  description = "db-harbor - secure generic lifecycle plans and NixOS systemd wiring";
+  description = "harbor-db - secure generic lifecycle plans and NixOS systemd wiring";
 
   inputs = {
-    rs-harbor.url = "git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
+    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
+    rs-harbor.follows = "harbor-rs";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
   };
 
   outputs = {
     self,
-    rs-harbor,
+    harbor-rs,
     nixpkgs,
     crane,
+    ...
   }: let
     systems = [
       "x86_64-linux"
@@ -21,9 +23,9 @@
       nixpkgs.lib.genAttrs systems (system: let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [(import rs-harbor.inputs.rust-overlay)];
+          overlays = [(import harbor-rs.inputs.rust-overlay)];
         };
-        toolchain = rs-harbor.lib.mkToolchain {
+        toolchain = harbor-rs.lib.mkToolchain {
           inherit pkgs;
           toolchainProfile = "stable";
         };
@@ -33,16 +35,20 @@
           craneLib = toolchain.craneLib;
         });
   in {
-    nixosModules.db-harbor = {
+    nixosModules.harbor-db = {
       lib,
       pkgs,
       ...
     }: {
-      imports = [(import ./nix/module.nix)];
-      services.db-harbor.package = lib.mkDefault self.packages.${pkgs.system}.db-harbor;
+      imports = [
+        (import ./nix/module.nix)
+        (lib.mkAliasOptionModule ["services" "db-harbor"] ["services" "harbor-db"])
+      ];
+      services.harbor-db.package = lib.mkDefault self.packages.${pkgs.system}.harbor-db;
     };
     nixosModules.pg-backup = import ./nix/pg-backup.nix;
-    nixosModules.default = self.nixosModules.db-harbor;
+    nixosModules.db-harbor = self.nixosModules.harbor-db;
+    nixosModules.default = self.nixosModules.harbor-db;
 
     packages = forAllSystems ({
       pkgs,
@@ -51,39 +57,40 @@
     }: let
       commonArgs = {
         src = craneLib.cleanCargoSource ./.;
-        pname = "db-harbor";
+        pname = "harbor-db";
         version = "0.1.0";
         strictDeps = true;
         cargoExtraArgs = "--locked";
         meta = {
           description = "Secure generic lifecycle plans and deployment orchestration for services";
-          homepage = "https://github.com/caniko/db-harbor";
+          homepage = "https://github.com/caniko/harbor-db";
           license = pkgs.lib.licenses.asl20;
-          mainProgram = "db-harbor";
+          mainProgram = "harbor-db";
         };
       };
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-      buildCache = rs-harbor.lib.mkBuildCachePolicy {
+      buildCache = harbor-rs.lib.mkBuildCachePolicy {
         inherit pkgs;
-        sccachePackage = rs-harbor.packages.${pkgs.stdenv.hostPlatform.system}.sccache;
+        sccachePackage = harbor-rs.packages.${pkgs.stdenv.hostPlatform.system}.sccache;
         cacheRoot = null;
         namespaceScope = "canix-rust";
         namespaceGeneration = 5;
       };
-      db-harbor = buildCache.withRustCache {
+      harbor-db = buildCache.withRustCache {
         package = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
       };
     in {
-      inherit db-harbor;
-      # Same derivation: exports both db-harbor and the standalone
+      inherit harbor-db;
+      db-harbor = harbor-db;
+      # Same derivation: exports both harbor-db and the standalone
       # home-manager-backup bin. mainProgram lets `lib.getExe` resolve the
       # backup helper on both supported architectures.
       home-manager-backup =
-        db-harbor
+        harbor-db
         // {
-          meta = db-harbor.meta // {mainProgram = "home-manager-backup";};
+          meta = harbor-db.meta // {mainProgram = "home-manager-backup";};
         };
-      default = db-harbor;
+      default = harbor-db;
     });
 
     checks = forAllSystems ({
@@ -94,7 +101,7 @@
       src = craneLib.cleanCargoSource ./.;
       commonArgs = {
         inherit src;
-        pname = "db-harbor";
+        pname = "harbor-db";
         version = "0.1.0";
         strictDeps = true;
         cargoExtraArgs = "--locked";
@@ -108,10 +115,10 @@
         module = self.nixosModules.default;
       };
       pg-backup-eval = pkgs.callPackage ./nix/pg-backup-eval.nix {};
-      db-harbor = self.packages.${pkgs.stdenv.hostPlatform.system}.db-harbor;
+      harbor-db = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db;
       cargo-fmt = craneLib.cargoFmt {
         inherit src;
-        pname = "db-harbor";
+        pname = "harbor-db";
       };
       cargo-test = craneLib.cargoTest (commonArgs
         // {

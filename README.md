@@ -1,16 +1,16 @@
-# db-harbor
+# harbor-db
 
 <!-- simit:badges:start -->
 
-[![CI](https://img.shields.io/badge/CI-managed-2088ff)](.github/workflows/ci.yaml) [![Nix](https://img.shields.io/badge/Nix-managed-5277c3)](flake.nix) [![docs](https://img.shields.io/badge/docs-enabled-6f42c1)](https://docs.rs/db-harbor)
+[![CI](https://img.shields.io/badge/CI-managed-2088ff)](.github/workflows/ci.yaml) [![Nix](https://img.shields.io/badge/Nix-managed-5277c3)](flake.nix) [![docs](https://img.shields.io/badge/docs-enabled-6f42c1)](https://docs.rs/harbor-db)
 
 <!-- simit:badges:end -->
 
-`db-harbor` provides secure generic lifecycle-operation plans and NixOS
+`harbor-db` provides secure generic lifecycle-operation plans and NixOS
 systemd wiring for project-owned work.
 
 The flake does not know about a migration framework, database, or application.
-Projects keep their own idempotent ensure/check commands; `db-harbor` owns
+Projects keep their own idempotent ensure/check commands; `harbor-db` owns
 dependency ordering, confirmation policy, readiness checks, credentials, state
 directories, and the deployment envelope around those commands. Operations can
 cover schema changes, backfills, backups, maintenance, credential provisioning,
@@ -23,9 +23,9 @@ surface. It lowers into the raw migration units described below:
 
 ```nix
 {
-  imports = [inputs.db-harbor.nixosModules.default];
+  imports = [inputs.harbor-db.nixosModules.default];
 
-  services.db-harbor.projects.my-app = {
+  services.harbor-db.projects.my-app = {
     enable = true;
     description = "My App lifecycle operations";
 
@@ -55,22 +55,22 @@ surface. It lowers into the raw migration units described below:
 }
 ```
 
-The flake module injects its own `db-harbor` package. When importing
-`nix/module.nix` directly, set `services.db-harbor.package` to the package
+The flake module injects its own `harbor-db` package. When importing
+`nix/module.nix` directly, set `services.harbor-db.package` to the package
 output explicitly.
 
-This generates `db-harbor-my-app.service` and, when `checkArgs` or
-`checkCommand` is set, `db-harbor-my-app-check.service`. Runtime units are
+This generates `harbor-db-my-app.service` and, when `checkArgs` or
+`checkCommand` is set, `harbor-db-my-app-check.service`. Runtime units are
 ordered after the migration unit and require it, so each start can re-run the
 idempotent migration command.
 
 ### Pink Raven shape
 
 Pink Raven should keep SQLx migrations behind its `raven db migrate` CLI and
-let `db-harbor` own ordering, migration/runtime user separation, and grants:
+let `harbor-db` own ordering, migration/runtime user separation, and grants:
 
 ```nix
-services.db-harbor.projects.pink-raven = {
+services.harbor-db.projects.pink-raven = {
   enable = true;
   runner = {
     package = config.services.pink-raven.package;
@@ -97,11 +97,11 @@ services.db-harbor.projects.pink-raven = {
 ### SynDB shape
 
 SynDB exposes its SeaORM metadata migrator and ClickHouse lifecycle commands
-through `syndb migrate`. Register all four operations with `db-harbor`; only
+through `syndb migrate`. Register all four operations with `harbor-db`; only
 the Postgres and ClickHouse schema operations are automatic:
 
 ```nix
-services.db-harbor.projects.syndb = {
+services.harbor-db.projects.syndb = {
   enable = true;
   operations = {
     postgres = {
@@ -166,7 +166,7 @@ SynDB’s provenance command still requires its existing reason and journal
 preconditions. The generic invocation is:
 
 ```sh
-db-harbor apply --manifest /path/to/syndb-plan.json \
+harbor-db apply --manifest /path/to/syndb-plan.json \
   --operation mv-backfill --confirm
 ```
 
@@ -178,9 +178,9 @@ conventions:
 
 ```nix
 {
-  imports = [inputs.db-harbor.nixosModules.default];
+  imports = [inputs.harbor-db.nixosModules.default];
 
-  services.db-harbor.operations.my-app = {
+  services.harbor-db.operations.my-app = {
     enable = true;
     command = "${pkgs.my-app}/bin/my-app migrate";
     checkCommand = "${pkgs.my-app}/bin/my-app migrate --check";
@@ -193,9 +193,9 @@ conventions:
 }
 ```
 
-This generates `db-harbor-my-app.service`, a `Type=oneshot` unit without
+This generates `harbor-db-my-app.service`, a `Type=oneshot` unit without
 `RemainAfterExit`, so starting a dependent application unit can re-run the
-idempotent lifecycle command when needed. `services.db-harbor.migrations` is
+idempotent lifecycle command when needed. `services.harbor-db.migrations` is
 kept as the compatibility spelling.
 
 ## Credential-backed operations
@@ -206,7 +206,7 @@ command argument or environment value. Credential references resolve to paths
 under systemd's `CREDENTIALS_DIRECTORY`:
 
 ```nix
-services.db-harbor.projects.provision = {
+services.harbor-db.projects.provision = {
   enable = true;
   operations.ensure = {
     enable = true;
