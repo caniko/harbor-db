@@ -2,15 +2,22 @@
   description = "harbor-db - secure generic lifecycle plans and NixOS systemd wiring";
 
   inputs = {
-    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
+    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=fac8049316846e0ef1c1e6acd92aed7a337b333a";
     rs-harbor.follows = "harbor-rs";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
+    harbor-meta.follows = "harbor-rs/harbor-meta";
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = {
     self,
     harbor-rs,
+    harbor-meta,
+    treefmt-nix,
     nixpkgs,
     crane,
     ...
@@ -133,7 +140,16 @@
         });
     });
 
-    formatter = forAllSystems ({pkgs, ...}: pkgs.alejandra);
+    formatter = forAllSystems ({
+      pkgs,
+      toolchain,
+      ...
+    }:
+      (treefmt-nix.lib.evalModule pkgs {
+        imports = [harbor-meta.treefmtModules.nix harbor-meta.treefmtModules.toml harbor-rs.treefmtModules.rust];
+        projectRootFile = "flake.nix";
+        programs.rustfmt.package = toolchain.rustToolchain;
+      }).config.build.wrapper);
 
     devShells = forAllSystems ({pkgs, ...}: let
       packages = [
