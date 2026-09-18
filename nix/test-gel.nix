@@ -45,7 +45,7 @@ in
       virtualisation.docker.enable = true;
       virtualisation.oci-containers.backend = "docker";
 
-      environment.etc."gel-test-password".text = "${adminPassword}\n";
+      environment.etc."gel-test-password".text = adminPassword;
 
       services.harbor-db.gel.instances.test = {
         enable = true;
@@ -115,6 +115,10 @@ in
             executable = "bin/toy-chaosbox";
             args = ["db" "migrate" "--json"];
             checkArgs = ["db" "check" "--json"];
+            environment = {
+              TOY_STATE_DIR = "/var/lib/gel-test/state";
+              TOY_MIGRATIONS_DIR = "/var/lib/gel-test/migrations";
+            };
             credentialEnvironment.CHAOSBOX_GEL_CREDENTIALS_FILE = "gel-creds";
           };
           after = ["docker-harbor-db-gel-test.service" "gel-test-setup.service"];
@@ -157,6 +161,10 @@ in
             executable = "bin/toy-chaosbox";
             args = ["db" "migrate" "--json"];
             checkArgs = ["db" "check" "--json"];
+            environment = {
+              TOY_STATE_DIR = "/var/lib/gel-test/state";
+              TOY_MIGRATIONS_DIR = "/var/lib/gel-test/migrations";
+            };
             credentialEnvironment.CHAOSBOX_GEL_CREDENTIALS_FILE = "gel-reader-creds";
           };
           after = ["docker-harbor-db-gel-test.service"];
