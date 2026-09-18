@@ -106,6 +106,14 @@ in
           pkgs.coreutils
           pkgs.gnugrep
         ];
+        # Non-secret per-command configuration reaches generated apply/check
+        # units through project-level environment (there is no runner-level
+        # environment passthrough; the plan's CommandSpec.environment stays
+        # empty and the unit Environment= carries the values).
+        environment = {
+          TOY_STATE_DIR = "/var/lib/gel-test/state";
+          TOY_MIGRATIONS_DIR = "/var/lib/gel-test/migrations";
+        };
         operations.schema = {
           enable = true;
           backend = "gel";
@@ -115,10 +123,6 @@ in
             executable = "bin/toy-chaosbox";
             args = ["db" "migrate" "--json"];
             checkArgs = ["db" "check" "--json"];
-            environment = {
-              TOY_STATE_DIR = "/var/lib/gel-test/state";
-              TOY_MIGRATIONS_DIR = "/var/lib/gel-test/migrations";
-            };
             credentialEnvironment.CHAOSBOX_GEL_CREDENTIALS_FILE = "gel-creds";
           };
           after = ["docker-harbor-db-gel-test.service" "gel-test-setup.service"];
@@ -152,6 +156,10 @@ in
           pkgs.coreutils
           pkgs.gnugrep
         ];
+        environment = {
+          TOY_STATE_DIR = "/var/lib/gel-test/state";
+          TOY_MIGRATIONS_DIR = "/var/lib/gel-test/migrations";
+        };
         operations.schema = {
           enable = true;
           backend = "gel";
@@ -161,10 +169,6 @@ in
             executable = "bin/toy-chaosbox";
             args = ["db" "migrate" "--json"];
             checkArgs = ["db" "check" "--json"];
-            environment = {
-              TOY_STATE_DIR = "/var/lib/gel-test/state";
-              TOY_MIGRATIONS_DIR = "/var/lib/gel-test/migrations";
-            };
             credentialEnvironment.CHAOSBOX_GEL_CREDENTIALS_FILE = "gel-reader-creds";
           };
           after = ["docker-harbor-db-gel-test.service"];
