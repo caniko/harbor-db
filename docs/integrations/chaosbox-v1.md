@@ -187,15 +187,29 @@ stacks in parallel** (ports 56561/56562, isolated data dirs/passwords):
    `--operation wipe --confirm` runs; 21.–22. container + state dir cleaned
    up. Versions observed: CLI `7.10.2+feff35c`, server `7.1+08db576`.
 
-## 7. Not executed here (runs in CI via simit `nix flake check`)
+## 7. CI status (simit `nix flake check`, branch `gel-support`)
 
-- `checks.gel-eval`, `checks.gel-integration`, `checks.module-eval`,
-  `checks.module-smoke`: no local Nix builder in this session
-  (parse-checked only). The nixosTest needs ~4 GB RAM, 4 cores, and one
-  475 MB image pull.
-- `cargo clippy --deny warnings`: local clippy driver mismatches the
-  available rustc sysroot; the change adds no `match` on `Backend`
-  (verified by grep), so the new variant is warning-free by construction.
+- **Evaluation: green.** `nix flake check` evaluates all outputs: the
+  `gel-eval` derivation builds, and every Gel plan/unit derivation builds
+  (`harbor-db-geltoy-plan.json`, wipe apply/check scripts, setup unit).
+  Verified in CI run `35393490927` (and follow-ups).
+- **Formatter fix verified.** The `formatter` output referenced
+  `harbor-meta.treefmtModules.{nix,toml}`, which no longer exists at the
+  locked harbor-meta rev (fallout from the harbor GitHub input migration;
+  pre-existing, broke `nix flake check` before any check could run). Fixed
+  by inlining `programs.alejandra` + `programs.taplo` next to
+  `harbor-rs.treefmtModules.rust`; the check now proceeds past `formatter`.
+- **Blocked (pre-existing, not Gel-related): Rust builds fail inside
+  harbor-rs sccache.** `harbor-db-deps` fails with
+  `harbor-rs-sandbox-sccache rustc -vV (exit status: 75)`. The identical
+  failure occurs on `trunk` without any Gel changes (CI run `33169533667`,
+  2026-08-28; trunk has been red since the GitHub migration on 2026-08-15).
+  No Gel file influences this path (no new Rust deps, lockfile untouched).
+  Routed to harbor-rs/infra owners; unblocks `checks.harbor-db`,
+  `module-smoke`, `gel-integration` VM run, and the cargo test/clippy/docs
+  steps, which all short-circuit behind it.
+- `cargo clippy --deny warnings`: additionally unverified locally (driver/
+  sysroot mismatch); the change adds no `match` on `Backend` (grep-verified).
 
 ## 8. Limitations and re-pin prerequisites
 

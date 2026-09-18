@@ -7,6 +7,14 @@ All notable changes to harbor-db are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `formatter` output referenced `harbor-meta.treefmtModules.{nix,toml}`,
+  which no longer exists at the locked harbor-meta rev (fallout from the
+  harbor GitHub input migration; broke `nix flake check` evaluation as a
+  whole). Replaced with inline `programs.alejandra` + `programs.taplo`
+  next to `harbor-rs.treefmtModules.rust`.
+
 ### Added
 
 - `Backend::Gel` (`"gel"`) lifecycle-operation backend for Gel-backed Rust
