@@ -208,9 +208,9 @@
       };
 
       backend = mkOption {
-        type = types.enum ["generic" "postgres" "clickhouse"];
+        type = types.enum ["generic" "postgres" "clickhouse" "gel"];
         default = "generic";
-        description = "Database family owned by this operation.";
+        description = "Database family owned by this operation. Gel operations run project-owned Gel/EdgeQL commands; PostgreSQL grants and SQL helpers never apply to them.";
       };
 
       phase = mkOption {
@@ -949,6 +949,14 @@ in {
           {
             assertion = !project.postgres.grants.enable || project.postgres.grants.tablePrivileges != [];
             message = "services.harbor-db.projects.${name}: postgres.grants.tablePrivileges must not be empty";
+          }
+          {
+            # Grants emit PostgreSQL GRANT statements against
+            # postgres.databaseUrl. A Gel backend is not PostgreSQL: keep the
+            # grant operation on the postgres default operation so Gel
+            # settings are never silently reinterpreted as PostgreSQL ones.
+            assertion = !project.postgres.grants.enable || (operations.default.backend or "generic") == "postgres";
+            message = "services.harbor-db.projects.${name}: postgres grants require the default operation to use backend = \"postgres\" (Gel is not PostgreSQL)";
           }
           {
             assertion = !project.postgres.grants.enable || project.postgres.grants.sequencePrivileges != [];
