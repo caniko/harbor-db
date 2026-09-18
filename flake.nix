@@ -154,7 +154,12 @@
       ...
     }:
       (treefmt-nix.lib.evalModule pkgs {
-        imports = [harbor-meta.treefmtModules.nix harbor-meta.treefmtModules.toml harbor-rs.treefmtModules.rust];
+        # harbor-meta no longer ships treefmtModules (input follows
+        # harbor-rs/harbor-meta); keep the previous coverage inline:
+        # alejandra for Nix (repo standard), taplo for TOML.
+        imports = [harbor-rs.treefmtModules.rust];
+        programs.alejandra.enable = true;
+        programs.taplo.enable = true;
         projectRootFile = "flake.nix";
         programs.rustfmt.package = toolchain.rustToolchain;
       }).config.build.wrapper);
