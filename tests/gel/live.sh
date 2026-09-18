@@ -5,12 +5,12 @@
 # project-owned migration fixture via the generic harbor-db runner, and
 # asserts the full behavior matrix. Cleans up containers and state on exit.
 #
-# Usage: ./live.sh [--stacks 2] [--image docker.io/geldata/gel:7.1]
+# Usage: ./live.sh [--stacks 2] [--image <digest-pinned ref>]
 # Needs: podman, jq, sha256sum, repo-built ./target/debug/harbor-db.
 set -eu
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 STACKS=2
-IMAGE="docker.io/geldata/gel:7.1"
+IMAGE="docker.io/geldata/gel:7.1@sha256:b7270b0973da6950d01ae0d578c6d38cd8d87fabdd6c4b75a09b74291ad6f3a8"
 HARBOR_BIN="${HARBOR_BIN:-$REPO/target/debug/harbor-db}"
 while [ $# -gt 0 ]; do case "$1" in
   --stacks) STACKS="$2"; shift 2;;

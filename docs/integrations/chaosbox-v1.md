@@ -53,8 +53,10 @@ Nix:
   grants-guardrail negative case, `readyCheck` mechanism.
 - `checks.gel-integration` (`nix/test-gel.nix`): disposable nixosTest that
   boots the pinned server, applies the toy fixture through the generic
-  runner, and asserts §6 (single stack; parallel isolation is covered by
-  `tests/gel/live.sh`).
+  runner, and asserts the §6 matrix except parallel isolation (covered by
+  `tests/gel/live.sh`): pending→apply→current, idempotent re-apply, broken
+  and incompatible migrations blocking the dependent, reader credential
+  separation, wrong-password error, operator-wipe exclusion, secret hygiene.
 
 Test facility (`tests/gel/`, no Chaosbox content):
 
@@ -150,6 +152,12 @@ reuse the migration credential for runtime (§4).
 - Listeners are loopback by default; changing `bindAddress` requires
   reviewed TLS/auth. Password auth is mandatory (`passwordFile` is required;
   no trust-auth mode exists in this module).
+- State-directory ownership: the container entrypoint runs as root and
+  chowns `dataDir` to the server user itself (`edbdocker_ensure_dirs`),
+  so a `root:root 0700` host directory works for rootful runtimes
+  (verified in the image's entrypoint source). Rootless runtimes skip that
+  step — there the directory must already be writable by the mapped server
+  uid (the live test maps it with `--userns=keep-id`).
 
 ## 6. Real test results (executed 2026-09-18, atlas, x86_64-linux)
 

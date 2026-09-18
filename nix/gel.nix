@@ -4,7 +4,7 @@
   pkgs,
   ...
 }: let
-  inherit (lib) mkEnableOption mkIf mkOption optionalAttrs types;
+  inherit (lib) mkEnableOption mkIf mkOption types;
 
   cfg = config.services.harbor-db.gel;
 
@@ -30,7 +30,14 @@
       dataDir = mkOption {
         type = types.path;
         default = "/var/lib/harbor-db-gel/${name}";
-        description = "Persistent host directory for Gel instance data. Add it to services.harbor-db.dataDirectories for ownership handling.";
+        description = ''
+          Persistent host directory for Gel instance data. Add it to
+          services.harbor-db.dataDirectories for ownership handling.
+          The container entrypoint (running as root) chowns this directory
+          to the server user itself, so root-owned host directories work.
+          Rootless runtimes skip that step: there the directory must already
+          be writable by the mapped server uid.
+        '';
       };
 
       passwordFile = mkOption {

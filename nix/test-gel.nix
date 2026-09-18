@@ -10,6 +10,14 @@
     cp ${../tests/gel/migrations}/*.edgeql "$out/"
   '';
   adminPassword = "gel-test-admin-pw";
+  badCredsFile = pkgs.writeText "gel-test-bad-creds.json" (builtins.toJSON {
+    host = "127.0.0.1";
+    port = 5656;
+    user = "admin";
+    password = "wrong-pw";
+    branch = "main";
+    tls_security = "insecure";
+  });
   credsFile = pkgs.writeText "gel-test-creds.json" (builtins.toJSON {
     host = "127.0.0.1";
     port = 5656;
@@ -71,6 +79,11 @@ in
         wantedBy = ["multi-user.target"];
         serviceConfig = {
           Type = "oneshot";
+          # Single boot run even though the unit is wanted directly and also
+          # started by the migration's runtime-activation helper: without
+          # this, app-events would count 2 and the blocking assertions below
+          # could not use an exact count.
+          RemainAfterExit = true;
         };
         script = ''
           set -eu
@@ -86,6 +99,13 @@ in
       services.harbor-db.projects.geltoy = {
         enable = true;
         description = "Gel toy migration";
+        # The toy shell fixture needs the CLI plus text tools on PATH;
+        # generated units otherwise run with a minimal default PATH.
+        path = [
+          config.services.harbor-db.gel.cliPackage
+          pkgs.coreutils
+          pkgs.gnugrep
+        ];
         operations.schema = {
           enable = true;
           backend = "gel";
@@ -123,6 +143,11 @@ in
       services.harbor-db.projects.geltoy-reader = {
         enable = true;
         description = "Gel toy reader credentials";
+        path = [
+          config.services.harbor-db.gel.cliPackage
+          pkgs.coreutils
+          pkgs.gnugrep
+        ];
         operations.schema = {
           enable = true;
           backend = "gel";
@@ -142,7 +167,9 @@ in
     };
 
     testScript = ''
-      machine.wait_until_succeeds("systemctl show harbor-db-geltoy.service -p Result --value | grep -Fx success", timeout=600)
+      import datetime
+
+      machine.wait_until_succeeds("systemctl show harbor-db-geltoy.service -p Result --value | grep -Fx success", timeout=datetime.timedelta(seconds=600))
       machine.wait_until_succeeds("systemctl show geltoy-app.service -p Result --value | grep -Fx success")
       machine.succeed("test ! -e /var/lib/gel-test/wiped")
       machine.succeed("test $(wc -l < /var/lib/gel-test/app-events) -eq 1")
@@ -154,6 +181,16 @@ in
       machine.fail("systemctl start harbor-db-geltoy.service")
       machine.succeed("test $(wc -l < /var/lib/gel-test/app-events) -eq 1")
       machine.succeed("rm /var/lib/gel-test/migrations/0004-broken.edgeql")
+      machine.succeed("systemctl reset-failed harbor-db-geltoy.service")
+      machine.succeed("systemctl start harbor-db-geltoy.service")
+
+      # A migration requiring a newer server is incompatible (not pending) and
+      # blocks the dependent without applying anything.
+      machine.succeed("printf -- '-- REQUIRES-MAJOR: 99\\ncreate type ToyFuture { create required property name -> str; };\\n' > /var/lib/gel-test/migrations/0004-future.edgeql")
+      machine.fail("systemctl start harbor-db-geltoy.service")
+      machine.succeed("test $(wc -l < /var/lib/gel-test/app-events) -eq 1")
+      machine.succeed("rm /var/lib/gel-test/migrations/0004-future.edgeql")
+      machine.succeed("systemctl reset-failed harbor-db-geltoy.service")
       machine.succeed("systemctl start harbor-db-geltoy.service")
 
       # Reader credentials read but cannot migrate (Gel permission model).
@@ -165,6 +202,13 @@ in
         "query 'create type ToyNope { create required property name -> str; }' 2>&1")
       assert status != 0 and "permission" in output, f"reader DDL must be denied: {output!r}"
       machine.succeed("rm /var/lib/gel-test/migrations/0004-nope.edgeql")
+
+      # A wrong password is an authenticated error, never ready/pending.
+      status, output = machine.execute(
+        "CHAOSBOX_GEL_CREDENTIALS_FILE=${badCredsFile} "
+        "TOY_MIGRATIONS_DIR=/var/lib/gel-test/migrations TOY_STATE_DIR=/tmp/gel-bad-state "
+        "PATH=${pkgs.gel}/bin:$PATH ${toyPackage}/bin/toy-chaosbox db check --json 2>&1")
+      assert status == 1 and '"status":"error"' in output, f"bad password must be an error: {output!r}"
 
       # Secrets stay out of rendered plans and unit output.
       machine.succeed("! grep -R -n gel-test-admin-pw /nix/store/*geltoy-plan.json /nix/store/*geltoy-reader-plan.json")
