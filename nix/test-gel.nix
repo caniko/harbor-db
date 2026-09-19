@@ -196,42 +196,41 @@ in
     };
 
     testScript = ''
-      import datetime
+      import time
 
-      def dump(cmd):
+      def run(cmd):
           status, out = machine.execute(cmd + " 2>&1 || true")
-          print(f"--- {cmd} (status {status}) ---\n{out[-4000:]}")
+          return status, out.strip()
 
       # Environment sanity for the record: without KVM the VM runs under
       # TCG emulation and every budget below must be read accordingly.
-      _, kvm = machine.execute("test -e /dev/kvm && echo yes || echo no")
-      print(f"kvm available: {kvm.strip()}")
+      print("kvm available: " + run("test -e /dev/kvm && echo yes || echo no")[1])
 
-      # Stage 1: image pulled and container started. Waiting here (rather
-      # than only on the final artifact) distinguishes pull/network stalls
-      # from later bootstrap/migration failures by timeout location. The
-      # except branch dumps diagnostics because post-hoc VM logs are not
-      # available from CI log tails.
-      try:
-          machine.wait_until_succeeds("systemctl is-active docker-harbor-db-gel-test.service", timeout=datetime.timedelta(seconds=600))
-      except Exception:
-          dump("systemctl status docker-harbor-db-gel-test.service --no-pager")
-          dump("docker images")
-          dump("journalctl -u docker.service --no-pager | tail -30")
-          raise
-
-      # Concrete artifact wait: `systemctl show -p Result` reports success
-      # for units that never ran, so waiting on it passes immediately at
-      # boot. The app instead only runs after a successful migration
-      # (Requires/After via requiredByUnits) and appends exactly once
-      # (RemainAfterExit), so one line proves the whole boot chain.
-      try:
-          machine.wait_until_succeeds("test $(wc -l < /var/lib/gel-test/app-events 2>/dev/null || echo 0) -eq 1", timeout=datetime.timedelta(seconds=600))
-      except Exception:
-          dump("docker logs harbor-db-gel-test --tail 40")
-          dump("systemctl status harbor-db-geltoy.service --no-pager")
-          dump("journalctl -u harbor-db-geltoy.service --no-pager | tail -40")
-          raise
+      # Poll the boot chain in Python (not blind driver waits): every poll
+      # is logged, and on timeout the failure evidence prints AT THE END of
+      # the log, where CI tails survive. The app only runs after a
+      # successful migration (Requires/After via requiredByUnits) and
+      # appends exactly once (RemainAfterExit), so one line proves the chain.
+      deadline = time.time() + 900
+      while True:
+          _, count = run("wc -l < /var/lib/gel-test/app-events 2>/dev/null || echo 0")
+          if count == "1":
+              break
+          _, failed = run("systemctl --no-pager --failed --plain | head -8")
+          print(f"waiting: app-events={count} failed-units={failed!r}")
+          if "harbor-db-geltoy.service" in failed or "geltoy-app.service" in failed or "docker-harbor-db-gel-test.service" in failed:
+              print("CHAIN FAILED EARLY:")
+              print(run("systemctl status harbor-db-geltoy.service --no-pager | head -30")[1])
+              print(run("docker logs harbor-db-gel-test --tail 30")[1][-3000:])
+              print(run("journalctl -u harbor-db-geltoy.service --no-pager | tail -30")[1][-3000:])
+              raise AssertionError(f"boot chain unit failed: {failed!r}")
+          if time.time() > deadline:
+              print("TIMEOUT AFTER 900s:")
+              print(run("systemctl status docker-harbor-db-gel-test.service harbor-db-geltoy.service geltoy-app.service --no-pager | head -60")[1][-4000:])
+              print(run("docker logs harbor-db-gel-test --tail 40")[1][-3000:])
+              raise AssertionError("boot chain did not complete in 900s")
+          time.sleep(10)
+      print("boot chain complete")
       machine.succeed("test ! -e /var/lib/gel-test/wiped")
       machine.succeed("test $(wc -l < /var/lib/gel-test/app-events) -eq 1")
       machine.succeed("systemctl start harbor-db-geltoy.service")
