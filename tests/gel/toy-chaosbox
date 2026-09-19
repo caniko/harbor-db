@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Toy Gel project CLI used only by harbor-db integration tests.
+#
+# It mimics the shared Chaosbox contract v1 shape
+# (`db check --json` / `db migrate --json`, CHAOSBOX_GEL_CREDENTIALS_FILE)
+# against a tiny committed-migration fixture. It is NOT Chaosbox and owns no
+# graph schema, SDL, or Jev integration.
+#
+# Environment (paths only; no secrets in argv/env values):
+#   CHAOSBOX_GEL_CREDENTIALS_FILE  Gel credentials JSON (native --credentials-file)
+#   TOY_MIGRATIONS_DIR             committed *.edgeql files (sorted, applied once each)
+#   TOY_STATE_DIR                  applied-sha log (created as needed)
+#   GEL_BIN                        gel binary (default: gel on PATH)
+#
+# Exit codes: 0 ready, 2 pending, 3 incompatible, 1 error.
+set -eu
+
+OPERATION="${2:-check}"
+WANT_JSON="${3:-}"
+
+if [ "${1:-}" != "db" ] || { [ "$OPERATION" != "check" ] && [ "$OPERATION" != "migrate" ]; } || [ "$WANT_JSON" != "--json" ]; then
+  echo '{"contract_version":1,"backend":"gel","operation":"unknown","status":"error","diagnostics":"usage: toy-chaosbox db check|migrate --json"}'
+  exit 1
+fi
+
+GEL_BIN="${GEL_BIN:-gel}"
+CREDS="${CHAOSBOX_GEL_CREDENTIALS_FILE:-}"
+MIGRATIONS="${TOY_MIGRATIONS_DIR:-}"
+STATE="${TOY_STATE_DIR:-}"
+APPLIED="$STATE/applied"
+
+emit() { # status, diagnostics (safe chars only: [A-Za-z0-9 .,;:_()/-])
+  printf '{"contract_version":1,"backend":"gel","operation":"%s","status":"%s","diagnostics":"%s"}\n' "$OPERATION" "$1" "$2"
+}
+
+if [ -z "$CREDS" ] || [ ! -r "$CREDS" ]; then
+  emit error "missing credentials file"
+  exit 1
+fi
+if [ -z "$MIGRATIONS" ] || [ ! -d "$MIGRATIONS" ]; then
+  emit error "missing migrations dir"
+  exit 1
+fi
+mkdir -p "$STATE"
+touch "$APPLIED"
+
+if ! "$GEL_BIN" --credentials-file "$CREDS" --connect-timeout 5s query "select 1" >/dev/null 2>&1; then
+  emit error "gel unreachable or credentials refused"
+  exit 1
+fi
+
+SERVER_MAJOR="$("$GEL_BIN" --credentials-file "$CREDS" --connect-timeout 5s query --output-format json "select sys::get_version().major" 2>/dev/null | tr -cd '0-9')"
+if [ -z "$SERVER_MAJOR" ]; then
+  emit error "could not read server version"
+  exit 1
+fi
+
+pending_count=0
+for file in "$MIGRATIONS"/*.edgeql; do
+  [ -e "$file" ] || break
+  name="$(basename "$file")"
+  required="$(grep -m1 -o '^-- REQUIRES-MAJOR: [0-9]*' "$file" | grep -o '[0-9]*$' || true)"
+  if [ -n "$required" ] && [ "$required" != "$SERVER_MAJOR" ]; then
+    emit incompatible "migration $name requires server major $required, server is $SERVER_MAJOR"
+    exit 3
+  fi
+  sha="$(sha256sum "$file" | cut -d' ' -f1)"
+  if ! grep -qx "$sha" "$APPLIED" 2>/dev/null; then
+    pending_count=$((pending_count + 1))
+  fi
+done
+
+if [ "$OPERATION" = "check" ]; then
+  if [ "$pending_count" -gt 0 ]; then
+    emit pending "$pending_count committed migration(s) pending on server major $SERVER_MAJOR"
+    exit 2
+  fi
+  emit ready "all committed migrations applied on server major $SERVER_MAJOR"
+  exit 0
+fi
+
+# migrate: apply each pending committed migration once, in filename order.
+for file in "$MIGRATIONS"/*.edgeql; do
+  [ -e "$file" ] || break
+  name="$(basename "$file")"
+  sha="$(sha256sum "$file" | cut -d' ' -f1)"
+  if grep -qx "$sha" "$APPLIED" 2>/dev/null; then
+    continue
+  fi
+  if ! "$GEL_BIN" --credentials-file "$CREDS" --connect-timeout 10s query --file "$file" >/dev/null 2>"$STATE/last-error"; then
+    # Surface the server rejection (statement text only; credentials are never
+    # printed: the CLI received them as a file path) for redacted diagnostics.
+    cat "$STATE/last-error" >&2 || true
+    emit error "migration $name failed, dependent startup blocked"
+    exit 1
+  fi
+  printf '%s\n' "$sha" >>"$APPLIED"
+done
+
+# Re-verify: exit 0 only after readiness is confirmed.
+pending_count=0
+for file in "$MIGRATIONS"/*.edgeql; do
+  [ -e "$file" ] || break
+  sha="$(sha256sum "$file" | cut -d' ' -f1)"
+  if ! grep -qx "$sha" "$APPLIED" 2>/dev/null; then
+    pending_count=$((pending_count + 1))
+  fi
+done
+if [ "$pending_count" -gt 0 ]; then
+  emit error "migrate finished but $pending_count migration(s) still pending"
+  exit 1
+fi
+emit ready "migrations applied and verified on server major $SERVER_MAJOR"
+exit 0

@@ -47,6 +47,7 @@
       services.harbor-db.package = lib.mkDefault self.packages.${pkgs.system}.harbor-db;
     };
     nixosModules.pg-backup = import ./nix/pg-backup.nix;
+    nixosModules.gel = import ./nix/gel.nix;
     nixosModules.db-harbor = self.nixosModules.harbor-db;
     nixosModules.default = self.nixosModules.harbor-db;
 
@@ -69,16 +70,12 @@
         };
       };
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-      buildCache = harbor-rs.lib.mkBuildCachePolicy {
-        inherit pkgs;
-        sccachePackage = harbor-rs.packages.${pkgs.stdenv.hostPlatform.system}.sccache;
-        cacheRoot = null;
-        namespaceScope = "canix-rust";
-        namespaceGeneration = 5;
-      };
-      harbor-db = buildCache.withRustCache {
-        package = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
-      };
+      # Plain crane build, no sccache wrapper: the harbor-rs sandbox wrapper
+      # hard-fails (exit 75) on runners without the Canix-managed cache
+      # transport, which is every public CI runner. mkToolchain already
+      # defaults to an unwrapped craneLib and simit-generated flakes never
+      # wrap. Dev shells invoke cargo directly and are unaffected.
+      harbor-db = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
     in {
       inherit harbor-db;
       db-harbor = harbor-db;
@@ -115,6 +112,14 @@
         module = self.nixosModules.default;
       };
       pg-backup-eval = pkgs.callPackage ./nix/pg-backup-eval.nix {};
+      gel-eval = pkgs.callPackage ./nix/gel-eval.nix {
+        module = import ./nix/module.nix;
+        gelModule = self.nixosModules.gel;
+      };
+      gel-integration = pkgs.callPackage ./nix/test-gel.nix {
+        harborModule = self.nixosModules.default;
+        gelModule = self.nixosModules.gel;
+      };
       harbor-db = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db;
       cargo-fmt = craneLib.cargoFmt {
         inherit src;
