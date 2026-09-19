@@ -211,27 +211,31 @@ stacks in parallel** (ports 56561/56562, isolated data dirs/passwords):
 
 ## 7. CI status (simit `nix flake check`, branch `gel-support`)
 
-- **Evaluation: green.** `nix flake check` evaluates all outputs: the
-  `gel-eval` derivation builds, and every Gel plan/unit derivation builds
-  (`harbor-db-geltoy-plan.json`, wipe apply/check scripts, setup unit).
-  Verified in CI run `35393490927` (and follow-ups).
-- **Formatter fix verified.** The `formatter` output referenced
-  `harbor-meta.treefmtModules.{nix,toml}`, which no longer exists at the
-  locked harbor-meta rev (fallout from the harbor GitHub input migration;
-  pre-existing, broke `nix flake check` before any check could run). Fixed
-  by inlining `programs.alejandra` + `programs.taplo` next to
-  `harbor-rs.treefmtModules.rust`; the check now proceeds past `formatter`.
-- **Blocked (pre-existing, not Gel-related): Rust builds fail inside
-  harbor-rs sccache.** `harbor-db-deps` fails with
-  `harbor-rs-sandbox-sccache rustc -vV (exit status: 75)`. The identical
-  failure occurs on `trunk` without any Gel changes (CI run `33169533667`,
-  2026-08-28; trunk has been red since the GitHub migration on 2026-08-15).
-  No Gel file influences this path (no new Rust deps, lockfile untouched).
-  Routed to harbor-rs/infra owners; unblocks `checks.harbor-db`,
-  `module-smoke`, `gel-integration` VM run, and the cargo test/clippy/docs
-  steps, which all short-circuit behind it.
+**Green since run `35433009445`** (all steps: format, flake check with
+`gel-eval` + `gel-integration`, cargo test, docs, clippy). The VM test
+executes the full §6-equivalent matrix inside disposable NixOS guests:
+pending→apply→current, idempotent re-apply, broken/incompatible
+migrations blocking the dependent, reader credential separation,
+wrong-password error, operator-wipe exclusion, secret hygiene.
+
+Notable triage on the way there (kept for the record):
+
+- The `formatter` output referenced `harbor-meta.treefmtModules.*`,
+  removed upstream; inlined `alejandra`+`taplo` (house-standard shape).
+- Rust builds failed inside `harbor-rs-sandbox-sccache` (exit 75) on any
+  runner without the Canix-managed cache transport — pre-existing, byte-
+  identical on clean `trunk`. Fixed by building the package with plain
+  crane (dev shells invoke cargo directly; unaffected), matching what
+  simit-generated flakes already do.
+- The test guest has no registry egress, so the suite preloads the image
+  via `pullImage` and runs the tag form (see §2); the digest pin is
+  enforced by `gel-eval`, and `live.sh` pulls the digest ref for real.
+- `systemctl show -p Result` reads success for never-run units: the test
+  waits on the app-events artifact, not unit state.
+- Container-started ≠ server-ready: a dedicated `ready` probe operation
+  gates the schema migration (same pattern as §3).
 - `cargo clippy --deny warnings`: additionally unverified locally (driver/
-  sysroot mismatch); the change adds no `match` on `Backend` (grep-verified).
+  sysroot mismatch); green in CI.
 
 ## 8. Limitations and re-pin prerequisites
 

@@ -14,6 +14,10 @@ All notable changes to harbor-db are documented here. The format follows
   harbor GitHub input migration; broke `nix flake check` evaluation as a
   whole). Replaced with inline `programs.alejandra` + `programs.taplo`
   next to `harbor-rs.treefmtModules.rust`.
+- Rust package builds failed inside `harbor-rs-sandbox-sccache` (exit 75)
+  on runners without the Canix-managed cache transport (pre-existing,
+  red on clean trunk since the GitHub migration). Build with plain crane;
+  dev shells invoke cargo directly and are unaffected.
 
 ### Added
 
