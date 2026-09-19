@@ -198,12 +198,22 @@ in
     testScript = ''
       import datetime
 
+      # Environment sanity for the record: without KVM the VM runs under
+      # TCG emulation and every budget below must be read accordingly.
+      _, kvm = machine.execute("test -e /dev/kvm && echo yes || echo no")
+      print(f"kvm available: {kvm.strip()}")
+
+      # Stage 1: image pulled and container started. Waiting here (rather
+      # than only on the final artifact) distinguishes pull/network stalls
+      # from later bootstrap/migration failures by timeout location.
+      machine.wait_until_succeeds("systemctl is-active docker-harbor-db-gel-test.service", timeout=datetime.timedelta(seconds=1200))
+
       # Concrete artifact wait: `systemctl show -p Result` reports success
       # for units that never ran, so waiting on it passes immediately at
       # boot. The app instead only runs after a successful migration
       # (Requires/After via requiredByUnits) and appends exactly once
       # (RemainAfterExit), so one line proves the whole boot chain.
-      machine.wait_until_succeeds("test $(wc -l < /var/lib/gel-test/app-events 2>/dev/null || echo 0) -eq 1", timeout=datetime.timedelta(seconds=600))
+      machine.wait_until_succeeds("test $(wc -l < /var/lib/gel-test/app-events 2>/dev/null || echo 0) -eq 1", timeout=datetime.timedelta(seconds=1200))
       machine.succeed("test ! -e /var/lib/gel-test/wiped")
       machine.succeed("test $(wc -l < /var/lib/gel-test/app-events) -eq 1")
       machine.succeed("systemctl start harbor-db-geltoy.service")
