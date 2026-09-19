@@ -47,6 +47,7 @@
       services.harbor-db.package = lib.mkDefault self.packages.${pkgs.system}.harbor-db;
     };
     nixosModules.pg-backup = import ./nix/pg-backup.nix;
+    nixosModules.gel = import ./nix/gel.nix;
     nixosModules.db-harbor = self.nixosModules.harbor-db;
     nixosModules.default = self.nixosModules.harbor-db;
 
@@ -115,6 +116,14 @@
         module = self.nixosModules.default;
       };
       pg-backup-eval = pkgs.callPackage ./nix/pg-backup-eval.nix {};
+      gel-eval = pkgs.callPackage ./nix/gel-eval.nix {
+        module = import ./nix/module.nix;
+        gelModule = self.nixosModules.gel;
+      };
+      gel-integration = pkgs.callPackage ./nix/test-gel.nix {
+        harborModule = self.nixosModules.default;
+        gelModule = self.nixosModules.gel;
+      };
       harbor-db = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db;
       cargo-fmt = craneLib.cargoFmt {
         inherit src;
