@@ -42,6 +42,9 @@ in
       imports = [harborModule gelModule];
       virtualisation.memorySize = 4096;
       virtualisation.cores = 4;
+      # The preloaded server image unpacks ~1.5GB into /var/lib/docker on
+      # top of the system closure; the test-VM default disk is too small.
+      virtualisation.diskSize = 10240;
       virtualisation.docker.enable = true;
       virtualisation.oci-containers.backend = "docker";
       # Preload the server image through the Nix store instead of pulling
