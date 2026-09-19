@@ -147,6 +147,11 @@
         pkgs.cargo-nextest
         pkgs.clippy
         pkgs.gcc
+        # Pinned Gel CLI (same nixpkgs as the gel module's cliPackage
+        # default): consumers such as Chaosbox resolve `gel` from the shell
+        # instead of ambient PATH. Same-major with the pinned server image;
+        # record `gel --version` per the re-pin procedure when nixpkgs moves.
+        pkgs.gel
         pkgs.nixd
         pkgs.rustc
         pkgs.rustfmt
