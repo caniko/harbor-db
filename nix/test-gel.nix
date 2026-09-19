@@ -219,15 +219,15 @@ in
           _, failed = run("systemctl --no-pager --failed --plain | head -8")
           print(f"waiting: app-events={count} failed-units={failed!r}")
           if "harbor-db-geltoy.service" in failed or "geltoy-app.service" in failed or "docker-harbor-db-gel-test.service" in failed:
-              print("CHAIN FAILED EARLY:")
-              print(run("systemctl status harbor-db-geltoy.service --no-pager | head -30")[1])
-              print(run("docker logs harbor-db-gel-test --tail 30")[1][-3000:])
-              print(run("journalctl -u harbor-db-geltoy.service --no-pager | tail -30")[1][-3000:])
-              raise AssertionError(f"boot chain unit failed: {failed!r}")
+              # Embed the evidence IN the exception: CI tails truncate
+              # earlier prints, but the raise text survives.
+              evidence = []
+              evidence.append("STATUS:\n" + run("systemctl status docker-harbor-db-gel-test.service harbor-db-geltoy.service --no-pager | head -50")[1][-2500:])
+              evidence.append("IMAGES:\n" + run("docker images 2>&1 | head -10")[1][-500:])
+              evidence.append("JOURNAL:\n" + run("journalctl -u docker-harbor-db-gel-test.service --no-pager | tail -30")[1][-2500:])
+              evidence.append("GELTOY-JOURNAL:\n" + run("journalctl -u harbor-db-geltoy.service --no-pager | tail -30")[1][-2500:])
+              raise AssertionError("boot chain unit failed: " + failed + "\n" + "\n".join(evidence))
           if time.time() > deadline:
-              print("TIMEOUT AFTER 900s:")
-              print(run("systemctl status docker-harbor-db-gel-test.service harbor-db-geltoy.service geltoy-app.service --no-pager | head -60")[1][-4000:])
-              print(run("docker logs harbor-db-gel-test --tail 40")[1][-3000:])
               raise AssertionError("boot chain did not complete in 900s")
           time.sleep(10)
       print("boot chain complete")
