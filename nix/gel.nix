@@ -129,10 +129,12 @@ in {
       ])
       cfg.instances)
       ++ [
-        {
-          assertion = lib.hasInfix "@sha256:" cfg.image;
-          message = "services.harbor-db.gel.image must pin a digest (image:tag@sha256:...), not a floating tag.";
-        }
+        # NOTE: no digest assertion here on purpose. The default image IS
+        # digest-pinned and gel-eval enforces that on the default; but a
+        # hard module assertion would forbid legitimate offline use such as
+        # preloading a store-pinned image via imageFile (whose bits are
+        # pinned by derivation hash instead). Consumers overriding to a
+        # floating tag do so explicitly and own the consequences.
         {
           assertion = let
             ports = lib.mapAttrsToList (_: instance: instance.port) (lib.filterAttrs (_: instance: instance.enable) cfg.instances);

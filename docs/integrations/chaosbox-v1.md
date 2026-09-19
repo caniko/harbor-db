@@ -57,6 +57,10 @@ Nix:
   `tests/gel/live.sh`): pending→apply→current, idempotent re-apply, broken
   and incompatible migrations blocking the dependent, reader credential
   separation, wrong-password error, operator-wipe exclusion, secret hygiene.
+  The VM preloads the image via `pullImage` (test guests have no registry
+  egress) and therefore runs the tag form: `docker load` drops RepoDigests
+  so a digest ref cannot resolve locally. Bits are identical; the digest
+  pin itself is enforced by `gel-eval` on the module default.
 
 Test facility (`tests/gel/`, no Chaosbox content):
 
