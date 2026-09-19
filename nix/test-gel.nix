@@ -44,6 +44,21 @@ in
       virtualisation.cores = 4;
       virtualisation.docker.enable = true;
       virtualisation.oci-containers.backend = "docker";
+      # Preload the server image through the Nix store instead of pulling
+      # inside the VM: test guests have no working registry egress
+      # ("failed to do request" from dockerd), while the CI host pulls
+      # fine. oci-containers then loads from file and runs with
+      # --pull missing, so the registry is never contacted at test time.
+      # Product wiring is untouched: real hosts pull normally.
+      virtualisation.oci-containers.containers."harbor-db-gel-test".imageFile = pkgs.dockerTools.pullImage {
+        imageName = "geldata/gel";
+        imageDigest = "sha256:b7270b0973da6950d01ae0d578c6d38cd8d87fabdd6c4b75a09b74291ad6f3a8";
+        finalImageName = "geldata/gel";
+        finalImageTag = "7.1";
+        # Deliberate placeholder: this cycle reports the actual output
+        # hash, which the follow-up pins.
+        sha256 = lib.fakeHash;
+      };
 
       environment.etc."gel-test-password".text = adminPassword;
 
