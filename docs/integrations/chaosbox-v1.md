@@ -211,7 +211,7 @@ stacks in parallel** (ports 56561/56562, isolated data dirs/passwords):
 
 ## 7. CI status (simit `nix flake check`, branch `gel-support`)
 
-**Green since run `35433009445`** (all steps: format, flake check with
+**Green since run `35433009445`, confirmed by `35433542832`** (all steps: format, flake check with
 `gel-eval` + `gel-integration`, cargo test, docs, clippy). The VM test
 executes the full §6-equivalent matrix inside disposable NixOS guests:
 pending→apply→current, idempotent re-apply, broken/incompatible
