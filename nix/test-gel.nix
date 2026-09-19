@@ -181,8 +181,12 @@ in
     testScript = ''
       import datetime
 
-      machine.wait_until_succeeds("systemctl show harbor-db-geltoy.service -p Result --value | grep -Fx success", timeout=datetime.timedelta(seconds=600))
-      machine.wait_until_succeeds("systemctl show geltoy-app.service -p Result --value | grep -Fx success")
+      # Concrete artifact wait: `systemctl show -p Result` reports success
+      # for units that never ran, so waiting on it passes immediately at
+      # boot. The app instead only runs after a successful migration
+      # (Requires/After via requiredByUnits) and appends exactly once
+      # (RemainAfterExit), so one line proves the whole boot chain.
+      machine.wait_until_succeeds("test $(wc -l < /var/lib/gel-test/app-events 2>/dev/null || echo 0) -eq 1", timeout=datetime.timedelta(seconds=600))
       machine.succeed("test ! -e /var/lib/gel-test/wiped")
       machine.succeed("test $(wc -l < /var/lib/gel-test/app-events) -eq 1")
       machine.succeed("systemctl start harbor-db-geltoy.service")
