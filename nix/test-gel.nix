@@ -55,9 +55,7 @@ in
         imageDigest = "sha256:b7270b0973da6950d01ae0d578c6d38cd8d87fabdd6c4b75a09b74291ad6f3a8";
         finalImageName = "geldata/gel";
         finalImageTag = "7.1";
-        # Deliberate placeholder: this cycle reports the actual output
-        # hash, which the follow-up pins.
-        sha256 = lib.fakeHash;
+        sha256 = "sha256-LldSfgB6p/cFRcmyE+XFGDL5U/vhPchIEv7AadizzO4=";
       };
 
       environment.etc."gel-test-password".text = adminPassword;
