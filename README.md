@@ -170,6 +170,43 @@ harbor-db apply --manifest /path/to/syndb-plan.json \
   --operation mv-backfill --confirm
 ```
 
+### Gel shape
+
+Gel-backed Rust services (such as Chaosbox) register project-owned
+`db check`/`db migrate` commands with `backend = "gel"`. The project owns
+SDL, migrations, and roles; `harbor-db` owns ordering, confirmation policy,
+and credential delivery. Gel is not PostgreSQL: `postgres.grants` is rejected
+unless the default operation uses `backend = "postgres"`, and no SQL helper
+ever runs against a Gel operation.
+
+```nix
+services.harbor-db.projects.chaosbox = {
+  enable = true;
+  operations.schema = {
+    enable = true;
+    backend = "gel";
+    credentials.gel-creds = config.age.secrets.chaosbox-gel-creds.path;
+    runner = {
+      package = pkgs.chaosbox;
+      executable = "bin/chaosbox";
+      args = ["db" "migrate" "--json"];
+      checkArgs = ["db" "check" "--json"];
+      credentialEnvironment.CHAOSBOX_GEL_CREDENTIALS_FILE = "gel-creds";
+    };
+    after = ["podman-harbor-db-gel-chaosbox.service"];
+    requires = ["podman-harbor-db-gel-chaosbox.service"];
+  };
+  runtimeUnits = ["chaosbox.service"];
+};
+```
+
+`check` must be read-only: exit 0 means ready, exit 2 means pending, any
+other nonzero status blocks dependents with redacted diagnostics. `migrate`
+applies committed migrations idempotently and exits 0 only after readiness
+verification. See `docs/integrations/chaosbox-v1.md` for the pinned
+server/CLI versions, the `harbor-db.gel` server module, and the full
+credential/readiness contract.
+
 ## Raw migration surface
 
 Use the raw lifecycle surface when a project needs complete control over the

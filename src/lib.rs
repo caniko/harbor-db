@@ -48,6 +48,11 @@ pub enum Lifecycle {
 }
 
 /// A database family used by an operation.
+///
+/// Adding a variant is a minor (non-breaking) change for plan authors:
+/// serialized manifests keep decoding, and the default stays `generic`.
+/// Exhaustive `match` statements on this enum in downstream Rust code will
+/// need a new arm when upgrading.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
@@ -56,6 +61,13 @@ pub enum Backend {
     /// ClickHouse, including schema reconciliation and operational changes.
     #[serde(rename = "clickhouse")]
     ClickHouse,
+    /// Gel (EdgeQL), managed through project-owned `gel`/EdgeQL commands.
+    ///
+    /// Gel connections are not ordinary PostgreSQL connections: harbor-db
+    /// never applies PostgreSQL role grants or SQL migration logic to a
+    /// `gel` operation. The project owns SDL, migrations, and roles; this
+    /// backend only labels ordering and reporting.
+    Gel,
     /// A command that does not need database-specific semantics.
     #[default]
     Generic,
@@ -718,6 +730,38 @@ mod tests {
             serde_json::to_string(&Backend::ClickHouse).expect("backend serializes"),
             "\"clickhouse\""
         );
+    }
+
+    #[test]
+    fn gel_backend_serializes_as_gel_without_changing_defaults() {
+        assert_eq!(
+            serde_json::to_string(&Backend::Gel).expect("backend serializes"),
+            "\"gel\""
+        );
+        // Existing manifests and the default are untouched.
+        assert_eq!(Backend::default(), Backend::Generic);
+        assert_eq!(
+            serde_json::to_string(&Backend::Postgres).expect("backend serializes"),
+            "\"postgres\""
+        );
+    }
+
+    #[test]
+    fn gel_operations_decode_and_validate() {
+        let manifest = r#"{
+            "version": 1,
+            "name": "gel-app",
+            "operations": [{
+                "id": "schema",
+                "backend": "gel",
+                "phase": "schema",
+                "apply": {"program": "/bin/true"},
+                "check": {"program": "/bin/true"}
+            }]
+        }"#;
+        let decoded: MigrationPlan = serde_json::from_str(manifest).expect("gel plan decodes");
+        decoded.validate().expect("gel plan validates");
+        assert_eq!(decoded.operations[0].backend, Backend::Gel);
     }
 
     #[test]
