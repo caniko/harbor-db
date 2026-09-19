@@ -66,6 +66,13 @@ in
       services.harbor-db.gel.instances.test = {
         enable = true;
         passwordFile = "/etc/gel-test-password";
+        # Tag form, deliberately: `docker load` drops RepoDigests, so the
+        # module-default digest ref cannot resolve against a preloaded
+        # image and docker falls back to the (unreachable) registry. The
+        # tag resolves to the identical bits; digest-pin enforcement stays
+        # covered by gel-eval (default image contains @sha256:) and by
+        # live.sh, which pulls the digest ref from a real registry.
+        image = "docker.io/geldata/gel:7.1";
       };
       services.harbor-db.dataDirectories = [
         {
