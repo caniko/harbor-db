@@ -76,16 +76,13 @@
         };
       };
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-      buildCache = harbor-rs.lib.mkBuildCachePolicy {
-        inherit pkgs;
-        sccachePackage = harbor-rs.packages.${pkgs.stdenv.hostPlatform.system}.sccache;
-        cacheRoot = null;
-        namespaceScope = "canix-rust";
-        namespaceGeneration = 5;
-      };
-      harbor-db = buildCache.withRustCache {
-        package = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
-      };
+      # Plain crane build, no sccache wrapper: the harbor-rs sandbox wrapper
+      # hard-fails (exit 75) on runners without the Canix-managed cache
+      # transport (no Redis socket, no host cache root), which is every
+      # public CI runner. mkToolchain defaults to an unwrapped craneLib for
+      # the same reason; simit-generated flakes never wrap. Dev shells invoke
+      # cargo directly and are unaffected.
+      harbor-db = craneLib.buildPackage (commonArgs // {inherit cargoArtifacts;});
     in {
       inherit harbor-db;
       db-harbor = harbor-db;
