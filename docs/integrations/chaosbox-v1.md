@@ -83,6 +83,22 @@ Test facility (`tests/gel/`, no Chaosbox content):
 
   services.harbor-db.projects.chaosbox = {
     enable = true;
+    # Server availability is its own operation: the container unit being
+    # started does not mean Gel accepts connections yet, and neither the
+    # project command nor harbor-db retries on its own. The probe below
+    # (authenticated, bounded) gates the schema migration.
+    operations.ready = {
+      enable = true;
+      backend = "gel";
+      credentials.admin-pw = config.age.secrets.chaosbox-gel-admin.path;
+      runner = {
+        command = "${config.services.harbor-db.gel.readyCheck}/bin/harbor-db-gel-ready --host 127.0.0.1 --port 56561 --user admin --password-file \"$READY_PW_FILE\" --timeout 300s";
+        checkCommand = "${config.services.harbor-db.gel.readyCheck}/bin/harbor-db-gel-ready --host 127.0.0.1 --port 56561 --user admin --password-file \"$READY_PW_FILE\" --timeout 60s";
+        credentialEnvironment.READY_PW_FILE = "admin-pw";
+      };
+      after = [config.services.harbor-db.gel.instances.chaosbox.systemdUnit];
+      requires = [config.services.harbor-db.gel.instances.chaosbox.systemdUnit];
+    };
     operations.schema = {
       enable = true;
       backend = "gel";
@@ -96,6 +112,7 @@ Test facility (`tests/gel/`, no Chaosbox content):
       };
       after = [config.services.harbor-db.gel.instances.chaosbox.systemdUnit];
       requires = [config.services.harbor-db.gel.instances.chaosbox.systemdUnit];
+      dependsOn = ["ready"];
     };
     runtimeUnits = ["chaosbox.service" "chaosbox-worker.service"];
     serviceConfig.ReadWritePaths = ["/var/lib/chaosbox"];
@@ -103,7 +120,8 @@ Test facility (`tests/gel/`, no Chaosbox content):
 }
 ```
 
-Ordering enforced: Gel container ready → `harbor-db-chaosbox.service`
+Ordering enforced: Gel container started → `ready` probe succeeds
+(server accepting authenticated connections) → `harbor-db-chaosbox.service`
 (schema apply) → `chaosbox*.service`. Readers/consumers start only after a
 successful migration unit; a failed migration fails the unit and blocks them.
 Give readers their own credential with a non-superuser Gel role and never

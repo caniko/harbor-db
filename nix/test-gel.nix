@@ -114,6 +114,22 @@ in
           TOY_STATE_DIR = "/var/lib/gel-test/state";
           TOY_MIGRATIONS_DIR = "/var/lib/gel-test/migrations";
         };
+        # Server availability is its own gate: the container unit being
+        # started does not mean Gel accepts connections yet (bootstrap takes
+        # tens of seconds), and neither the toy nor harbor-db retries a
+        # command on its own. The schema migration must wait for this probe.
+        operations.ready = {
+          enable = true;
+          backend = "gel";
+          credentials.gel-admin-pw = "/etc/gel-test-password";
+          runner = {
+            command = ''${config.services.harbor-db.gel.readyCheck}/bin/harbor-db-gel-ready --host 127.0.0.1 --port 5656 --user admin --password-file "$READY_PW_FILE" --timeout 300s'';
+            checkCommand = ''${config.services.harbor-db.gel.readyCheck}/bin/harbor-db-gel-ready --host 127.0.0.1 --port 5656 --user admin --password-file "$READY_PW_FILE" --timeout 60s'';
+            credentialEnvironment.READY_PW_FILE = "gel-admin-pw";
+          };
+          after = ["docker-harbor-db-gel-test.service"];
+          requires = ["docker-harbor-db-gel-test.service"];
+        };
         operations.schema = {
           enable = true;
           backend = "gel";
@@ -127,6 +143,7 @@ in
           };
           after = ["docker-harbor-db-gel-test.service" "gel-test-setup.service"];
           requires = ["docker-harbor-db-gel-test.service" "gel-test-setup.service"];
+          dependsOn = ["ready"];
           runtimeUnits = ["geltoy-app.service"];
         };
         operations.wipe = {
