@@ -219,14 +219,11 @@ in
           _, failed = run("systemctl --no-pager --failed --plain | head -8")
           print(f"waiting: app-events={count} failed-units={failed!r}")
           if "harbor-db-geltoy.service" in failed or "geltoy-app.service" in failed or "docker-harbor-db-gel-test.service" in failed:
-              # Embed the evidence IN the exception: CI tails truncate
-              # earlier prints, but the raise text survives.
-              evidence = []
-              evidence.append("STATUS:\n" + run("systemctl status docker-harbor-db-gel-test.service harbor-db-geltoy.service --no-pager | head -50")[1][-2500:])
-              evidence.append("IMAGES:\n" + run("docker images 2>&1 | head -10")[1][-500:])
-              evidence.append("JOURNAL:\n" + run("journalctl -u docker-harbor-db-gel-test.service --no-pager | tail -30")[1][-2500:])
-              evidence.append("GELTOY-JOURNAL:\n" + run("journalctl -u harbor-db-geltoy.service --no-pager | tail -30")[1][-2500:])
-              raise AssertionError("boot chain unit failed: " + failed + "\n" + "\n".join(evidence))
+              # Evidence MUST fit ~12 short lines: nix only shows the last
+              # 25 build-log lines on failure, so few giant lines get cut.
+              # The container unit journal carries the pull/run error.
+              _, journal = run("journalctl -u docker-harbor-db-gel-test.service --no-pager --lines 10")
+              raise AssertionError("boot chain unit failed: " + failed + "\nCONTAINER-JOURNAL:\n" + journal)
           if time.time() > deadline:
               raise AssertionError("boot chain did not complete in 900s")
           time.sleep(10)
