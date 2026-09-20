@@ -208,7 +208,7 @@
       };
 
       backend = mkOption {
-        type = types.enum ["generic" "postgres" "clickhouse"];
+        type = types.enum ["generic" "postgres" "clickhouse" "typedb"];
         default = "generic";
         description = "Database family owned by this operation.";
       };

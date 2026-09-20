@@ -56,6 +56,12 @@ pub enum Backend {
     /// ClickHouse, including schema reconciliation and operational changes.
     #[serde(rename = "clickhouse")]
     ClickHouse,
+    /// TypeDB (strongly-typed graph database). Readiness, compatibility, and
+    /// schema semantics are owned by the application binaries, which report
+    /// through the exit-code contract (0 ready/current, 2 pending); harbor-db
+    /// provides ordering, credential delivery, and lifecycle modes only.
+    #[serde(rename = "typedb")]
+    Typedb,
     /// A command that does not need database-specific semantics.
     #[default]
     Generic,
@@ -718,6 +724,33 @@ mod tests {
             serde_json::to_string(&Backend::ClickHouse).expect("backend serializes"),
             "\"clickhouse\""
         );
+    }
+
+    #[test]
+    fn serializes_typedb_backend_name_used_by_nix_plans() {
+        assert_eq!(
+            serde_json::to_string(&Backend::Typedb).expect("backend serializes"),
+            "\"typedb\""
+        );
+    }
+
+    #[test]
+    fn typedb_operations_validate_and_keep_secrets_out_of_plans() {
+        let mut operation = operation("schema", &[]);
+        operation.backend = Backend::Typedb;
+        operation.phase = Phase::Schema;
+        operation.apply = CommandSpec::new("chaosbox", ["db", "migrate"]);
+        operation
+            .apply
+            .credential_environment
+            .insert("PASSWORD_FILE".to_owned(), "typedb-password".to_owned());
+        operation.check = Some(CommandSpec::new("chaosbox", ["db", "check"]));
+        let validated = plan(vec![operation]);
+        validated.validate().expect("typedb plan validates");
+        let serialized = serde_json::to_string(&validated).expect("plan serializes");
+        assert!(serialized.contains("\"backend\":\"typedb\""));
+        assert!(serialized.contains("\"typedb-password\""));
+        assert!(!serialized.contains("super-secret-value"));
     }
 
     #[test]
