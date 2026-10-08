@@ -39,6 +39,7 @@
     lib.postgresRecoveryPreparation = 1;
     lib.postgresWriterFence = 3;
     lib.applicationProvisioning = 1;
+    lib.applicationBackup = 1;
     lib.cutoverPreflight = 3;
     nixosModules.harbor-db = {
       lib,
@@ -127,6 +128,7 @@
       };
       application-provision-eval = pkgs.callPackage ./nix/application-provision-eval.nix {module = self.nixosModules.default;};
       application-provision = pkgs.callPackage ./nix/test-application-provision.nix {module = self.nixosModules.default;};
+      application-backup = pkgs.callPackage ./nix/test-application-backup.nix {module = self.nixosModules.default;};
       module-smoke = pkgs.callPackage ./nix/test-module.nix {
         module = self.nixosModules.default;
       };

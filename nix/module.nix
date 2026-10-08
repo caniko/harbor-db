@@ -821,6 +821,7 @@
 in {
   imports = [
     ./application-provision.nix
+    ./application-backup.nix
     (lib.mkAliasOptionModule ["services" "harbor-db" "operations"] ["services" "harbor-db" "migrations"])
   ];
 
@@ -936,7 +937,7 @@ in {
       in
         [
           {
-            assertion = operations != {} || project.postgres.provision.enable;
+            assertion = operations != {} || project.postgres.provision.enable || project.backup.enable;
             message = "services.harbor-db.projects.${name}: configure runner or at least one enabled operation";
           }
           {
