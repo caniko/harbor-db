@@ -24,13 +24,33 @@ class FenceRecoveryTest(unittest.TestCase):
         self.config = {
             "resource": "fixture", "state_dir": str(self.state),
             "data_dir": str(self.root / "primary"), "package": "/postgres18", "major": "18",
-            "recovery": {"require_writer_fence": True, "snapshot_file": str(self.snapshot)},
+            "recovery": {
+                "require_writer_fence": True, "system_identifier": "12345",
+                "snapshot_file": str(self.snapshot), "receipt_file": str(self.root / "receipt.json"),
+                "backup_root": str(self.root / "backup"), "max_age_seconds": 3600,
+                "record_checks": [{"name": "record", "database": "app", "sql": "SELECT 1"}],
+            },
         }
-        self.record = {"token": "a" * 32, "system_identifier": "12345"}
+        self.record = {"token": "a" * 32, "system_identifier": "12345", "hba_sha256": "c" * 64}
+        (self.root / "backup/locks").mkdir(parents=True)
+        (self.root / "backup/locks/mutate").touch(mode=0o600)
+        (self.root / "recovery.lock").touch(mode=0o600)
+        self.enterContext(patch.object(recovery, "backup", return_value=({}, {"recovery_target_lsn": "0/200"})))
+        self.enterContext(patch.object(recovery, "verify_backup"))
+
+    def publish_evidence(self, fence_token):
+        settings = self.config["recovery"]
+        source = {"version": 1, "completed_at": 100, "recovery_target_lsn": "0/200",
+                  "record_contract_sha256": recovery.contract(settings),
+                  "records": {"record": "c" * 64}, "writer_fence_token": fence_token}
+        write_json(self.snapshot, source)
+        receipt = source | {"status": "ready", "snapshot_sha256": recovery.digest(self.snapshot),
+                            "restored_data_dir": str(self.root / "restored"), "replay_lsn": "0/200"}
+        write_json(Path(settings["receipt_file"]), receipt)
 
     def test_missing_fence_cannot_authorize_bootstrap_capture(self):
         self.anchor.unlink()
-        with self.assertRaises(OSError), writer_fence.admission(self.config, "/run/postgresql", 5432, capture=True):
+        with self.assertRaisesRegex(postgres.LifecycleError, "writer fence"), recovery.writer_exclusion(self.config, "/run/postgresql", 5432):
             self.fail("missing fence authorized capture")
         self.assertFalse(self.anchor.exists())
 
@@ -38,23 +58,23 @@ class FenceRecoveryTest(unittest.TestCase):
         with patch.object(writer_fence, "startup", return_value=self.record), \
                 patch.object(writer_fence, "inspect_live", side_effect=postgres.LifecycleError("primary not restarted")), \
                 self.assertRaisesRegex(postgres.LifecycleError, "not restarted"), \
-                writer_fence.admission(self.config, "/run/postgresql", 5432, capture=True):
+                recovery.writer_exclusion(self.config, "/run/postgresql", 5432):
             self.fail("offline preparation authorized capture")
 
     def test_snapshot_from_another_epoch_cannot_authorize_adoption(self):
-        write_json(self.snapshot, {"writer_fence_token": "b" * 32})
+        self.publish_evidence("b" * 32)
         with patch.object(writer_fence, "startup", return_value=self.record), \
                 patch.object(writer_fence, "inspect_live", return_value={"status": "ready"}), \
-                self.assertRaisesRegex(postgres.LifecycleError, "snapshot"), \
-                writer_fence.admission(self.config, "/run/postgresql", 5432, snapshot=True):
+                self.assertRaisesRegex(ValueError, "snapshot"), \
+                recovery.admission(self.config, socket_dir="/run/postgresql", port=5432, now=100):
             self.fail("another fence snapshot authorized adoption")
 
     def test_admitted_window_prevents_explicit_offline_thaw(self):
-        write_json(self.snapshot, {"writer_fence_token": self.record["token"]})
+        self.publish_evidence(self.record["token"])
         with patch.object(writer_fence, "startup", return_value=self.record), \
                 patch.object(writer_fence, "inspect_live", return_value={"status": "ready"}), \
-                writer_fence.admission(self.config, "/run/postgresql", 5432, snapshot=True) as admitted:
-            self.assertEqual(admitted["token"], self.record["token"])
+                recovery.admission(self.config, socket_dir="/run/postgresql", port=5432, now=100) as admitted:
+            self.assertEqual(admitted["status"], "ready")
             with self.assertRaises(BlockingIOError), lock(self.anchor):
                 self.fail("thaw entered an accepted recovery window")
         # Leaving the window releases only its shared descriptor, not the HBA.
@@ -66,7 +86,7 @@ class FenceRecoveryTest(unittest.TestCase):
         writer_fence.marker(self.config).write_text("retained journal")
         with patch.object(writer_fence, "startup", side_effect=postgres.LifecycleError("unfinished thaw")), \
                 self.assertRaisesRegex(postgres.LifecycleError, "unfinished"), \
-                writer_fence.admission(self.config, "/run/postgresql", 5432):
+                recovery.writer_exclusion(self.config, "/run/postgresql", 5432):
             self.fail("retirement discarded unfinished writer exclusion")
         self.assertTrue(writer_fence.marker(self.config).exists())
 
@@ -74,26 +94,23 @@ class FenceRecoveryTest(unittest.TestCase):
         settings = {"backup_root": str(self.root / "backup"), "snapshot_file": str(self.snapshot),
                     "receipt_file": str(self.root / "receipt.json"), "max_age_seconds": 3600,
                     "record_checks": [{"name": "record", "database": "app", "sql": "SELECT 1"}]}
-        backup = Path(settings["backup_root"])
-        (backup / "locks").mkdir(parents=True)
-        (backup / "locks/mutate").touch()
         self.config["recovery"] = settings | {"require_writer_fence": True, "system_identifier": "12345"}
         entered = []
 
         @contextlib.contextmanager
         def admitted(*args, **kwargs):
-            entered.append(kwargs)
+            entered.append((args, kwargs))
             yield self.record
 
-        with patch.object(writer_fence, "admission", side_effect=admitted), \
+        with patch.object(recovery, "writer_exclusion", side_effect=admitted), \
                 patch.object(recovery, "backup", return_value=({}, {})), \
                 patch.object(recovery, "verify_backup"), patch.object(postgres, "inspect_live"), \
                 patch.object(recovery, "records", return_value={"record": "sha256"}):
             recovery.snapshot(self.config, "/run/postgresql", 5432, now=100)
-        self.assertEqual(entered, [{"capture": True}])
+        self.assertEqual(entered, [((self.config, "/run/postgresql", 5432), {})])
         self.assertEqual(json.loads(self.snapshot.read_text())["writer_fence_token"], self.record["token"])
         retained = self.snapshot.read_bytes()
-        with patch.object(writer_fence, "admission", side_effect=postgres.LifecycleError("fence unavailable")), \
+        with patch.object(recovery, "writer_exclusion", side_effect=postgres.LifecycleError("fence unavailable")), \
                 self.assertRaisesRegex(postgres.LifecycleError, "fence unavailable"):
             recovery.snapshot(self.config, "/run/postgresql", 5432, now=101)
         self.assertEqual(self.snapshot.read_bytes(), retained)

@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import postgres, recovery, resource, writer_fence
+from . import postgres, recovery, resource
 from .durable import read_json, write_json
 
 
@@ -283,7 +283,8 @@ def check_resource(config, *, phase, now=None):
                                           config.get("port", 5432), check["database"], check["sql"])
                 if observed.strip() != "t":
                     raise ValueError(f"candidate schema/recovery compatibility check failed: {check['database']}")
-        with writer_fence.admission(database, config.get("socket_dir", "/run/postgresql"), config.get("port", 5432), snapshot=True), recovery.admission(database, now=now, verify_contents=phase in ("activate", "certify")):
+        with recovery.admission(database, now=now, verify_contents=phase in ("activate", "certify"),
+                                socket_dir=config.get("socket_dir", "/run/postgresql"), port=config.get("port", 5432)):
             if phase == "certify" and recovery.records(database, settings, config.get("socket_dir", "/run/postgresql"),
                                                        config.get("port", 5432)) != read_json(settings["snapshot_file"])["records"]:
                 raise ValueError("live database records differ from the recovery snapshot")

@@ -138,13 +138,19 @@ in
       # Change back to the legacy unit while thaw is unfinished. NixOS unit
       # replacement and reboot must retain the system.control drop-in barrier.
       machine.succeed(f"{base}/bin/switch-to-configuration test")
+      # Unit reload does not evaluate an inactive setup unit's conditions.
+      machine.succeed("systemctl start postgresql-setup.service")
       machine.succeed("test \"$(systemctl show postgresql-setup.service -p ConditionResult --value)\" = no")
+      machine.fail("systemctl is-active postgresql")
+      machine.succeed("test ! -e ${data}/postmaster.pid")
       machine.crash()
       machine.start()
       machine.wait_for_unit("multi-user.target")
       machine.succeed("systemctl start postgresql")
       machine.fail("systemctl is-active postgresql")
       machine.succeed("test ! -e ${data}/postmaster.pid")
+      machine.succeed("systemctl start postgresql-setup.service")
+      machine.succeed("test \"$(systemctl show postgresql-setup.service -p ConditionResult --value)\" = no")
       machine.succeed(pg + f"fence-close --token {token}")
       machine.succeed(root + f"release-startup --token {held['token']} --fence-token {token} --phase closed")
       machine.succeed("systemctl start postgresql")

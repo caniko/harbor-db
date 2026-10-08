@@ -156,11 +156,11 @@ def reject_upgrade(config):
         raise LifecycleError("unfinished upgrade; explicit upgrade resume is required")
 
 
-def recovery_admission(config):
+def recovery_admission(config, **kwargs):
     if config.get("recovery") is None:
         return contextlib.nullcontext()
     from .recovery import admission
-    return admission(config)
+    return admission(config, **kwargs)
 
 
 def adopt(config, expected_identifier):
@@ -189,8 +189,7 @@ def adopt_live(config, expected_identifier, socket_dir, port):
     path = Path(config["state_dir"]) / "identity.json"
     # Later activations must coexist with the writer's shared lifetime lease.
     already_adopted = path.exists()
-    from . import writer_fence
-    with writer_fence.admission(config, socket_dir, port, snapshot=True), recovery_admission(config), lock(Path(config["state_dir"]) / "lock", shared=already_adopted, create=not already_adopted):
+    with recovery_admission(config, socket_dir=socket_dir, port=port), lock(Path(config["state_dir"]) / "lock", shared=already_adopted, create=not already_adopted):
         reject_upgrade(config)
         if already_adopted or path.exists():
             verify_identity(config)

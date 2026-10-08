@@ -12,7 +12,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harbor_db import postgres, writer_fence
+from harbor_db import postgres, recovery, writer_fence
+from harbor_db.durable import lock
 
 
 class WriterFenceTest(unittest.TestCase):
@@ -211,6 +212,13 @@ class RealWriterFenceTest(unittest.TestCase):
                     "CREATE ROLE replicator REPLICATION LOGIN PASSWORD 'disposable-replication-secret'; "
                     "CREATE TABLE retained(id integer primary key); INSERT INTO retained VALUES (1);")
                 identifier = sql(control, "SELECT system_identifier FROM pg_control_system();").stdout.strip()
+                recovery_config = config | {"recovery": {
+                    "system_identifier": identifier, "require_writer_fence": True,
+                    "snapshot_file": str(root / "records.json"), "receipt_file": str(root / "receipt.json"),
+                    "max_age_seconds": 3600, "record_checks": [{"name": "retained", "database": "postgres", "sql": "SELECT id FROM retained ORDER BY id"}],
+                }}
+                with self.assertRaisesRegex(postgres.LifecycleError, "writer fence"), recovery.writer_exclusion(recovery_config, str(socket_dir), port):
+                    self.fail("unfenced primary admitted")
                 original = (data / "postgresql.auto.conf").read_bytes()
                 with self.assertRaises(postgres.LifecycleError):
                     writer_fence.open_fence(config, identifier)
@@ -259,6 +267,10 @@ class RealWriterFenceTest(unittest.TestCase):
                 self.assertEqual(sql(control, "SELECT count(*) FROM pg_prepared_xacts;").stdout.strip(), "1")
                 sql(control, "ROLLBACK PREPARED 'retained-fixture';")
                 self.assertEqual(writer_fence.inspect_live(config, token, str(socket_dir), port)["status"], "ready")
+                with recovery.writer_exclusion(recovery_config, str(socket_dir), port) as accepted:
+                    self.assertEqual(accepted["token"], token)
+                    with self.assertRaises(BlockingIOError), lock(state / "writer-fence.lock"):
+                        self.fail("recovery consistency window was not pinned")
                 for _ in range(3):
                     self.assertNotEqual(sql("application", "INSERT INTO retained VALUES (2);", check=False).returncode, 0)
                     self.assertNotEqual(sql("replicator", "SELECT 1;", tcp=True, check=False).returncode, 0)

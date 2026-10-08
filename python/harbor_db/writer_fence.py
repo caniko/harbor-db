@@ -325,33 +325,3 @@ def inspect_live(config, token, socket_dir, port):
             raise postgres.LifecycleError(f"live writer fence is not exclusive at the bound primary: {differences}")
         return {"status": "ready", "token": token,
                 "system_identifier": record["system_identifier"], "hba_sha256": record["hba_sha256"]}
-
-
-@contextlib.contextmanager
-def admission(config, socket_dir, port, *, capture=False, snapshot=False):
-    """Pin live exclusion while capturing or consuming bootstrap evidence.
-
-Historical recovery after accepted enrollment retirement remains valid. An
-existing fence is still inspected, and startup always enforces its journal.
-Independent restored-endpoint certification never connects to the primary.
-"""
-    required = config.get("recovery", {}).get("require_writer_fence", False)
-    if type(required) is not bool:
-        raise postgres.LifecycleError("invalid required writer fence policy")
-    active = "state_dir" in config and os.path.lexists(marker(config))
-    if not required and not active:
-        yield None
-        return
-    with lock(Path(config["state_dir"]) / "writer-fence.lock", shared=True):
-        record = startup(config)
-        if record is None:
-            raise postgres.LifecycleError("required writer fence is absent")
-        inspected = inspect_live(config, record["token"], socket_dir, port)
-        if inspected.get("status") != "ready":
-            raise postgres.LifecycleError("writer fence is not live ready")
-        if snapshot and required:
-            from .recovery import absolute
-            accepted = json.loads(absolute(config["recovery"]["snapshot_file"]).read_text())
-            if accepted.get("writer_fence_token") != record["token"]:
-                raise postgres.LifecycleError("recovery snapshot has a different writer fence token")
-        yield record

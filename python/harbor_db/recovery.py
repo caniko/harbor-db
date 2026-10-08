@@ -42,6 +42,8 @@ def fresh(timestamp, now, max_age):
 
 def policy(config):
     settings = config["recovery"]
+    if type(settings.get("require_writer_fence", False)) is not bool:
+        raise ValueError("recovery writer fence requirement must be a boolean")
     paths = [settings["snapshot_file"], settings["receipt_file"]]
     if settings.get("off_host_receipt_file"):
         paths.append(settings["off_host_receipt_file"])
@@ -154,10 +156,44 @@ def evidence_lease(settings, *, inspect=False):
         yield
 
 
+@contextlib.contextmanager
+def writer_exclusion(config, socket_dir=None, port=5432):
+    """Pin the selected fence through evidence/authority publication.
+
+    Offline admission verifies the durable selector; primary operations also
+    inspect the running endpoint. Disposable certifiers use copied evidence.
+    """
+    settings = policy(config)
+    active = "state_dir" in config and os.path.lexists(writer_fence.marker(config))
+    if not settings.get("require_writer_fence", False) and not active:
+        yield None
+        return
+    postgres.validate_config(config)
+    anchor = Path(config["state_dir"]) / "writer-fence.lock"
+    if not anchor.exists():
+        raise postgres.LifecycleError("required writer fence is absent; acquire it before recovery")
+    with lock(anchor, shared=True):
+        record = writer_fence.startup(config)
+        if record is None or record["system_identifier"] != settings["system_identifier"]:
+            raise postgres.LifecycleError("required writer fence does not bind the declared primary")
+        if socket_dir is not None:
+            writer_fence.inspect_live(config, record["token"], socket_dir, port)
+        yield {key: record[key] for key in ("token", "system_identifier", "hba_sha256")}
+
+
+def source_fence(settings, source):
+    binding = source.get("writer_fence_token")
+    if binding is not None and (not isinstance(binding, str) or not re.fullmatch(r"[0-9a-f]{32}", binding)):
+        raise ValueError("record snapshot writer fence binding is invalid")
+    if settings.get("require_writer_fence", False) and binding is None:
+        raise ValueError("record snapshot has no required writer fence binding")
+    return binding
+
+
 def snapshot(config, socket_dir, port, *, now=None):
     settings = policy(config)
     now = int(time.time()) if now is None else now
-    with writer_fence.admission(config, socket_dir, port, capture=True) as fence, lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings):
+    with writer_exclusion(config, socket_dir, port) as fence, lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings):
         directory, binding = backup(config, settings, now)
         postgres.inspect_live(config, settings["system_identifier"], socket_dir, port)
         verify_backup(config, directory)
@@ -192,6 +228,7 @@ def certify(config, data_dir, socket_dir, port, *, now=None, hostname=None):
     with lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings):
         directory, binding = backup(config, settings, now)
         source = evidence(settings["snapshot_file"], "record snapshot", binding, settings, now)
+        source_fence(settings, source)
         verify_backup(config, directory)
         observed = inspect_restored(config, socket_dir, port)
         expected = {"data_dir": str(restored), "major": str(config["major"]),
@@ -218,15 +255,15 @@ def check(config, *, now=None):
 
 
 @contextlib.contextmanager
-def admission(config, *, now=None, verify_contents=True):
+def admission(config, *, now=None, verify_contents=True, socket_dir=None, port=5432):
     """Keep the accepted backup and evidence stable through authority publication."""
     settings = policy(config)
     now = int(time.time()) if now is None else now
     # Inspection never creates or replaces the persistent backup lock anchor.
-    with lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True):
+    with writer_exclusion(config, socket_dir, port) as fence, lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True):
         directory, binding = backup(config, settings, now)
         with evidence_lease(settings, inspect=True):
-            yield check_evidence(config, settings, directory, binding, now, verify_contents=verify_contents)
+            yield check_evidence(config, settings, directory, binding, now, verify_contents=verify_contents, fence=fence)
 
 
 def preflight(config, *, now=None):
@@ -235,8 +272,11 @@ def preflight(config, *, now=None):
         return result
 
 
-def check_evidence(config, settings, directory, binding, now, *, verify_contents=True):
+def check_evidence(config, settings, directory, binding, now, *, verify_contents=True, fence=None):
     source = evidence(settings["snapshot_file"], "record snapshot", binding, settings, now)
+    recorded_fence = source_fence(settings, source)
+    if settings.get("require_writer_fence", False) and (fence is None or recorded_fence != fence["token"]):
+        raise ValueError("record snapshot writer fence differs from the retained window")
     expected_names = {item["name"] for item in settings["record_checks"]}
     if set(source.get("records", {})) != expected_names or any(
         not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
@@ -277,10 +317,10 @@ def import_off_host(config, path, *, now=None):
     if not settings.get("off_host_receipt_file"):
         raise ValueError("off-host receipt import requires an off-host admission policy")
     now = int(time.time()) if now is None else now
-    with lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings):
+    with writer_exclusion(config) as fence, lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings):
         directory, binding = backup(config, settings, now)
         local = settings | {"off_host_receipt_file": None}
-        check_evidence(config, local, directory, binding, now)
+        check_evidence(config, local, directory, binding, now, fence=fence)
         source = evidence(settings["snapshot_file"], "record snapshot", binding, settings, now)
         receipt = evidence(path, "off-host restore acceptance", binding, settings, now)
         validate_receipt(config, settings, source, binding, receipt, "off-host restore acceptance")
@@ -299,8 +339,7 @@ def prepare(config, preparation, socket_dir, port):
         ) or not Path(argv[0]).is_absolute():
             raise ValueError(f"{key} must be explicit absolute executable argv")
     anchor = absolute(settings["snapshot_file"]).parent / "preparation.lock"
-    with writer_fence.admission(config, socket_dir, port, capture=True,
-                                snapshot=os.path.lexists(settings["snapshot_file"])), lock(anchor, create=True):
+    with writer_exclusion(config, socket_dir, port) as fence, lock(anchor, create=True):
         postgres.inspect_live(config, settings["system_identifier"], socket_dir, port)
         postgres.run(preparation["readiness_command"])
         # A published snapshot binds the selected backup. Never replace that
@@ -324,14 +363,16 @@ def prepare(config, preparation, socket_dir, port):
             now = int(time.time())
             with lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings, inspect=True):
                 directory, binding = backup(config, settings, now)
-                evidence(settings["snapshot_file"], "record snapshot", binding, settings, now)
+                source = evidence(settings["snapshot_file"], "record snapshot", binding, settings, now)
+                if settings.get("require_writer_fence", False) and source_fence(settings, source) != fence["token"]:
+                    raise ValueError("record snapshot writer fence differs from the retained window")
                 verify_backup(config, directory)
         if not Path(settings["receipt_file"]).exists():
             postgres.run(preparation["restore_command"])
         with lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings, inspect=True):
             now = int(time.time())
             directory, binding = backup(config, settings, now)
-            check_evidence(config, settings | {"off_host_receipt_file": None}, directory, binding, now)
+            check_evidence(config, settings | {"off_host_receipt_file": None}, directory, binding, now, fence=fence)
         # Transport orchestration belongs to the consumer. Its explicit export
         # command may publish a service-user-owned immutable copy for the
         # independent executor even when final off-host admission will abort.

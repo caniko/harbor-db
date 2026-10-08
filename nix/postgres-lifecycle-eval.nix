@@ -92,6 +92,14 @@ in
         message = "Explicit client gates must preserve existing conditions and leave PostgreSQL control/startup available; bootstrap recovery retains enforced fencing.";
       }
       {
+        name = "recovery-writer-fence-policy";
+        assertion = let
+          manifest = builtins.fromJSON (builtins.unsafeDiscardStringContext eval.config.environment.etc."harbor-db/postgresql.json".source.text);
+        in
+          manifest.recovery.require_writer_fence && manifest.writer_fence.control_role == "postgres";
+        message = "Explicit recovery enrollment must render its writer-fence requirement in the candidate manifest.";
+      }
+      {
         name = "startup-inhibits-setup-with-primary";
         assertion = let
           manifest = builtins.fromJSON (builtins.unsafeDiscardStringContext eval.config.environment.etc."harbor-db/postgresql.json".source.text);

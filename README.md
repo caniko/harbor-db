@@ -306,6 +306,15 @@ fence anchor is retained across those operations, blocking an offline thaw until
 their verification/publication finishes. Off-host certification remains bound
 to the source snapshot digest and never contacts the production primary.
 
+Read-only `inspect-recovery`, offline adoption and off-host receipt import also
+pin the retained fence and reject snapshots from an unfenced or replacement
+window. Their offline boundary verifies the durable selector and declared
+physical identity; live capture, adoption and cutover additionally inspect the
+running primary. Disposable certifiers validate the copied token format and
+snapshot binding without reading the primary's authority tree. The policy
+requirement is a strict boolean. Enrollment retirement permits ordinary
+historical acceptance, while an existing unfinished fence still fails closed.
+
 The consumer keeps its activation/campaign lease and stopped application writers
 through recovery, independent restore acceptance, adoption and deployment
 post-verification. It explicitly decides when a qualified deployment is accepted.
