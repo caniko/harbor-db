@@ -15,7 +15,7 @@ import socket
 import time
 from pathlib import Path
 
-from . import postgres
+from . import postgres, writer_fence
 from .durable import lock, read_json, write_json
 
 
@@ -157,13 +157,15 @@ def evidence_lease(settings, *, inspect=False):
 def snapshot(config, socket_dir, port, *, now=None):
     settings = policy(config)
     now = int(time.time()) if now is None else now
-    with lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings):
+    with writer_fence.admission(config, socket_dir, port, capture=True) as fence, lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings):
         directory, binding = backup(config, settings, now)
         postgres.inspect_live(config, settings["system_identifier"], socket_dir, port)
         verify_backup(config, directory)
         result = {"version": 1, **binding, "completed_at": now,
-                  "record_contract_sha256": contract(settings),
-                  "records": records(config, settings, socket_dir, port)}
+                   "record_contract_sha256": contract(settings),
+                   "records": records(config, settings, socket_dir, port)}
+        if fence is not None:
+            result["writer_fence_token"] = fence["token"]
         write_json(absolute(settings["snapshot_file"]), result)
     return result
 
@@ -297,7 +299,8 @@ def prepare(config, preparation, socket_dir, port):
         ) or not Path(argv[0]).is_absolute():
             raise ValueError(f"{key} must be explicit absolute executable argv")
     anchor = absolute(settings["snapshot_file"]).parent / "preparation.lock"
-    with lock(anchor, create=True):
+    with writer_fence.admission(config, socket_dir, port, capture=True,
+                                snapshot=os.path.lexists(settings["snapshot_file"])), lock(anchor, create=True):
         postgres.inspect_live(config, settings["system_identifier"], socket_dir, port)
         postgres.run(preparation["readiness_command"])
         # A published snapshot binds the selected backup. Never replace that

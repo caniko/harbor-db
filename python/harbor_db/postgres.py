@@ -189,7 +189,8 @@ def adopt_live(config, expected_identifier, socket_dir, port):
     path = Path(config["state_dir"]) / "identity.json"
     # Later activations must coexist with the writer's shared lifetime lease.
     already_adopted = path.exists()
-    with recovery_admission(config), lock(Path(config["state_dir"]) / "lock", shared=already_adopted, create=not already_adopted):
+    from . import writer_fence
+    with writer_fence.admission(config, socket_dir, port, snapshot=True), recovery_admission(config), lock(Path(config["state_dir"]) / "lock", shared=already_adopted, create=not already_adopted):
         reject_upgrade(config)
         if already_adopted or path.exists():
             verify_identity(config)
@@ -210,6 +211,8 @@ def check(config):
     with lock(Path(config["state_dir"]) / "lock", shared=True):
         reject_upgrade(config)
         verify_identity(config)
+        from . import writer_fence
+        writer_fence.startup(config)
 
 
 def serve(config):
@@ -225,6 +228,8 @@ def serve(config):
         verify_identity(config)
         os.set_inheritable(lease, True)
         executable = str(Path(config["package"]) / "bin/postgres")
+        from . import writer_fence
+        fence = writer_fence.startup(config)
         # PGDATA or data_directory in postgresql.conf must never select a
         # different cluster from the one just checked under the authority lease.
         os.execv(executable, [
@@ -233,6 +238,7 @@ def serve(config):
             # configuration. Server-wide durability must outrank those settings.
             "-c", "fsync=on", "-c", "full_page_writes=on",
             "-c", "synchronous_commit=on",
+            *(["-c", f"hba_file={fence['hba_file']}"] if fence is not None else []),
         ])
 
 
@@ -415,6 +421,23 @@ def main():
         live.add_argument("--socket-dir", default="/run/postgresql")
         live.add_argument("--port", type=int, default=5432)
     commands.add_parser("inspect-recovery", help="read-only backup and record-level recovery admission")
+    fence_open = commands.add_parser("fence-open", help="prepare a durable writer fence while the primary is stopped")
+    fence_open.add_argument("--system-identifier", required=True)
+    fence_close = commands.add_parser("fence-close", help="explicitly thaw a stopped primary; never starts PostgreSQL")
+    fence_close.add_argument("--token", required=True)
+    offline_fence = commands.add_parser("inspect-offline-fence", help="verify a stopped fence transition before startup release")
+    offline_fence.add_argument("--token", required=True)
+    offline_fence.add_argument("--phase", choices=["prepared", "closed"], required=True)
+    inhibit = commands.add_parser("inhibit-startup", help="root-owned persistent systemd gate before offline fence transitions")
+    inhibit.add_argument("--system-identifier", required=True)
+    release = commands.add_parser("release-startup", help="explicitly release startup after a verified stopped transition; never starts PostgreSQL")
+    release.add_argument("--token", required=True)
+    release.add_argument("--fence-token", required=True)
+    release.add_argument("--phase", choices=["prepared", "closed"], required=True)
+    fence_live = commands.add_parser("inspect-fence", help="verify the restarted primary excludes application SQL writers")
+    fence_live.add_argument("--token", required=True)
+    fence_live.add_argument("--socket-dir", default="/run/postgresql")
+    fence_live.add_argument("--port", type=int, default=5432)
     preparation = commands.add_parser("prepare-recovery", help="explicit managed backup/snapshot/restore preparation before adoption")
     preparation.add_argument("--preparation-config", type=Path, required=True)
     preparation.add_argument("--socket-dir", required=True)
@@ -439,6 +462,31 @@ def main():
             check(config)
         elif args.command == "serve":
             return serve(config)
+        elif args.command in ("inhibit-startup", "release-startup"):
+            from . import startup_inhibition
+            # The privileged adapter/runuser argv must come from immutable,
+            # root-owned policy, never a service-user-writable manifest.
+            path = args.config.resolve()
+            info = path.stat()
+            if not str(path).startswith("/nix/store/") or info.st_uid != 0 or info.st_mode & 0o022:
+                raise LifecycleError("startup inhibition requires immutable root-owned policy")
+            config = json.loads(path.read_text())
+            if args.command == "inhibit-startup":
+                result = startup_inhibition.inhibit(config, args.system_identifier)
+            else:
+                result = startup_inhibition.release(config, path, args.token, args.fence_token, args.phase)
+            print(json.dumps(result, sort_keys=True))
+        elif args.command in ("fence-open", "fence-close", "inspect-fence", "inspect-offline-fence"):
+            from . import writer_fence
+            if args.command == "fence-open":
+                result = writer_fence.open_fence(config, args.system_identifier)
+            elif args.command == "fence-close":
+                result = writer_fence.close_fence(config, args.token)
+            elif args.command == "inspect-offline-fence":
+                result = writer_fence.inspect_offline(config, args.token, args.phase)
+            else:
+                result = writer_fence.inspect_live(config, args.token, args.socket_dir, args.port)
+            print(json.dumps(result, sort_keys=True))
         elif args.command in ("inspect-recovery", "snapshot-records", "certify-recovery", "prepare-recovery"):
             from . import recovery
             if args.command == "inspect-recovery":
@@ -453,7 +501,7 @@ def main():
             print(json.dumps(result, sort_keys=True))
         else:
             upgrade(config, retry_incomplete=args.retry_incomplete)
-    except (LifecycleError, OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+    except (LifecycleError, OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
         print(f"harbor-db-postgres: {error}", file=sys.stderr)
         return 1
     return 0

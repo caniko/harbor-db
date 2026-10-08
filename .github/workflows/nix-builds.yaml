@@ -30,6 +30,7 @@ jobs:
           - ".#checks.x86_64-linux.postgres-crash-rollback"
           - ".#checks.x86_64-linux.postgres-interrupted-upgrade"
           - ".#checks.x86_64-linux.postgres-recovery-acceptance"
+          - ".#checks.x86_64-linux.postgres-writer-fence"
           - ".#checks.x86_64-linux.pg-backup-eval"
           - ".#checks.x86_64-linux.module-eval"
           - ".#checks.x86_64-linux.module-smoke"

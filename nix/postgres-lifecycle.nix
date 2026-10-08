@@ -14,10 +14,25 @@
       package = toString pg.finalPackage;
       state_dir = cfg.stateDir;
       required_mounts = cfg.requiredMounts;
+      writer_fence = {
+        control_role = "postgres";
+        replication_roles = cfg.writerFence.replicationRoles;
+        allowed_preload_libraries = cfg.writerFence.allowedPreloadLibraries;
+      };
+      startup_inhibition = {
+        state_dir = cfg.writerFence.startupStateDir;
+        unit = "postgresql.service";
+        drop_in_root = "/etc/systemd/system.control";
+        systemctl = "${pkgs.systemd}/bin/systemctl";
+        busctl = "${pkgs.systemd}/bin/busctl";
+        runuser = "${pkgs.util-linux}/bin/runuser";
+        adapter = lib.getExe cfg.package;
+      };
     }
     // lib.optionalAttrs (cfg.recovery != null) {
       recovery = {
         system_identifier = cfg.recovery.systemIdentifier;
+        require_writer_fence = cfg.recovery.requireWriterFence;
         backup_root = cfg.recovery.backupRoot;
         snapshot_file = cfg.recovery.snapshotFile;
         receipt_file = cfg.recovery.receiptFile;
@@ -62,6 +77,7 @@
     export_command = preparation.exportCommand;
   });
 in {
+  imports = [./postgres-writer-clients.nix];
   options.services.harbor-db.postgresql = {
     enable = mkEnableOption "adopted PostgreSQL identity guards and staged upgrades";
     package = mkOption {
@@ -96,6 +112,11 @@ in {
       type = types.nullOr (types.submodule {
         options = {
           systemIdentifier = mkOption {type = types.strMatching "[1-9][0-9]*";};
+          requireWriterFence = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Require confirmed writer exclusion and the same fence token in the source snapshot before live adoption and cutover. Disable only when retiring accepted bootstrap enrollment; active fencing remains enforced at startup.";
+          };
           backupRoot = mkOption {type = types.strMatching "/.*";};
           snapshotFile = mkOption {type = types.strMatching "/.*";};
           receiptFile = mkOption {type = types.strMatching "/.*";};
@@ -130,6 +151,23 @@ in {
           };
         };
       });
+    };
+    writerFence = {
+      startupStateDir = mkOption {
+        type = types.strMatching "/.*";
+        default = "/var/lib/harbor-db/postgresql-startup";
+        description = "Separate root-owned persistent systemd startup-inhibition state. Explicit inhibit-startup provisions it; PostgreSQL never writes it.";
+      };
+      replicationRoles = mkOption {
+        type = types.listOf (types.strMatching "[a-z_][a-z0-9_]*");
+        default = [];
+        description = "Physical-only localhost SCRAM replication roles admitted during an explicit writer fence. They cannot open SQL connections.";
+      };
+      allowedPreloadLibraries = mkOption {
+        type = types.listOf (types.strMatching "[A-Za-z0-9_.-]+");
+        default = [];
+        description = "Audited non-application-writer preload libraries allowed by live fence inspection; unknown libraries block readiness.";
+      };
     };
     recoveryPreparation = mkOption {
       default = null;

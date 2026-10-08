@@ -24,8 +24,10 @@
           enable = true;
           stateDir = "/srv/postgres/authority";
           requiredMounts = ["/srv"];
+          writerFence.blockedUnits = ["fixture-client.service"];
           switchAdoption.systemIdentifier = "12345";
           recovery = {
+            requireWriterFence = true;
             systemIdentifier = "12345";
             backupRoot = "/srv/backups";
             snapshotFile = "/srv/backups/records.json";
@@ -41,6 +43,10 @@
             oldDataDir = "/srv/postgres/17";
             validateCommand = ["/bin/validate-upgrade"];
           };
+        };
+        systemd.services.fixture-client = {
+          unitConfig.ConditionPathExists = ["/fixture/ready"];
+          serviceConfig.ExecStart = "/fixture/client";
         };
       }
     ];
@@ -75,6 +81,16 @@ in
         ${pkgs.systemd}/bin/systemd-run ${pkgs.systemd}/bin/systemctl
     '';
     assertions = [
+      {
+        name = "writer-fence-client-startup";
+        assertion =
+          eval.config.systemd.services.fixture-client.unitConfig.ConditionPathExists
+          == ["/fixture/ready" "!/srv/postgres/authority/writer-fence.json"]
+          && !(eval.config.systemd.services.postgresql.unitConfig ? ConditionPathExists)
+          && !(eval.config.systemd.services.postgresql-setup.unitConfig ? ConditionPathExists)
+          && eval.config.services.harbor-db.postgresql.recovery.requireWriterFence;
+        message = "Explicit client gates must preserve existing conditions and leave PostgreSQL control/startup available; bootstrap recovery retains enforced fencing.";
+      }
       {
         name = "managed-preactivation-preparation";
         assertion = let

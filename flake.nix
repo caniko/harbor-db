@@ -37,6 +37,7 @@
   in {
     lib.postgresRecoveryReadiness = 1;
     lib.postgresRecoveryPreparation = 1;
+    lib.postgresWriterFence = 3;
     lib.cutoverPreflight = 3;
     nixosModules.harbor-db = {
       lib,
@@ -137,9 +138,11 @@
       postgres-crash-rollback = pkgs.callPackage ./nix/test-postgres-lifecycle.nix {};
       postgres-interrupted-upgrade = pkgs.callPackage ./nix/test-postgres-upgrade.nix {};
       postgres-recovery-acceptance = pkgs.callPackage ./nix/test-postgres-recovery.nix {};
+      postgres-writer-fence = pkgs.callPackage ./nix/test-postgres-writer-fence.nix {};
       postgres-lifecycle-test =
         pkgs.runCommand "harbor-db-postgres-lifecycle-test" {
-          nativeBuildInputs = [pkgs.python3 pkgs.gitMinimal];
+          nativeBuildInputs = [pkgs.python3 pkgs.gitMinimal pkgs.postgresql_18];
+          HARBOR_DB_TEST_POSTGRES = pkgs.postgresql_18;
         } ''
           PYTHONPATH=${./python} python3 -B -m unittest discover -s ${./tests} -p 'test_*.py'
           touch "$out"
