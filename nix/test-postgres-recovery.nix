@@ -81,6 +81,15 @@ in
           print(primary.execute("systemctl status postgresql.service --no-pager -l; journalctl -u postgresql.service --no-pager -n 80"))
           raise
       remote.wait_for_unit("multi-user.target")
+      # Independent VM clocks can advance at different rates under hosted QEMU.
+      # Disable time synchronisation and move only the receiving fixture clock
+      # forward at each evidence handoff; do not relax production freshness or
+      # alter any receipt timestamp.
+      for host in (primary, remote):
+          host.succeed("systemctl stop systemd-timesyncd.service")
+      def align_receiver(receiver, sender):
+          seconds = max(int(host.succeed("date +%s").strip()) for host in (receiver, sender))
+          receiver.succeed(f"date --set=@{seconds}")
       primary.succeed("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c \"CREATE TABLE saves (mutation text PRIMARY KEY, geometry jsonb, review text, revision bigint); INSERT INTO saves VALUES ('ack-1', '{\\\"circle\\\":[10,20,30]}', 'reviewed', 42)\"")
       identifier = primary.succeed("runuser -u postgres -- psql -Atqc 'SELECT system_identifier FROM pg_control_system()'").strip()
       for host in (primary, remote):
@@ -125,6 +134,7 @@ in
       primary.copy_from_machine("/tmp/recovery.tar", "recovery-transfer")
       remote.copy_from_host(str(primary.out_dir / "recovery-transfer/recovery.tar"), "/tmp/recovery.tar")
       remote.succeed("tar -C /srv -xf /tmp/recovery.tar; chown -R can:users /srv/backup /srv/recovered /srv/restore-wal /srv/recovery-socket")
+      align_receiver(remote, primary)
       # A can-owned restore cannot inherit Atlas's peer auth (can -> can), and
       # its socket is private. Keep authentication/config overrides disposable.
       remote.succeed("printf 'local all postgres peer map=recovery\\n' > /srv/recovered/pg_hba.conf; printf 'recovery can postgres\\n' > /srv/recovered/pg_ident.conf; chown can:users /srv/recovered/pg_*.conf; chmod 0600 /srv/recovered/pg_*.conf")
@@ -139,6 +149,7 @@ in
       remote.copy_from_machine("/srv/backup/evidence/off-host.json", "recovery-transfer")
       primary.copy_from_host(str(remote.out_dir / "recovery-transfer/off-host.json"), "/srv/incoming/recovery-off-host")
       primary.succeed("chown -R postgres:postgres /srv/incoming")
+      align_receiver(primary, remote)
       primary.succeed("runuser -u postgres -- env CREDENTIALS_DIRECTORY=/srv/incoming harbor-db-postgres --config /srv/config.json prepare-recovery --preparation-config /srv/preparation.json --socket-dir /run/postgresql --port 5432")
       primary.succeed(f"{command} inspect-recovery")
       primary.succeed(f"{command} adopt-live --system-identifier {identifier}")
