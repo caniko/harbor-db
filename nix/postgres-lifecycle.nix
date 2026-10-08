@@ -22,6 +22,7 @@
       startup_inhibition = {
         state_dir = cfg.writerFence.startupStateDir;
         unit = "postgresql.service";
+        setup_units = cfg.writerFence.setupUnits;
         drop_in_root = "/etc/systemd/system.control";
         systemctl = "${pkgs.systemd}/bin/systemctl";
         busctl = "${pkgs.systemd}/bin/busctl";
@@ -153,6 +154,11 @@ in {
       });
     };
     writerFence = {
+      setupUnits = mkOption {
+        type = types.listOf (types.strMatching "[a-zA-Z0-9_-]+\\.service");
+        default = ["postgresql-setup.service"];
+        description = "Setup services inhibited with primary startup during stopped fence transitions, including across legacy generations. The persistent root-owned gate is read back for every unit before stopping the primary.";
+      };
       startupStateDir = mkOption {
         type = types.strMatching "/.*";
         default = "/var/lib/harbor-db/postgresql-startup";

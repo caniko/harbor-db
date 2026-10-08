@@ -62,7 +62,12 @@ def owned_ancestors(path):
 def settings(config):
     postgres.validate_config(config)
     policy = config["startup_inhibition"]
-    if not re.fullmatch(r"[a-zA-Z0-9_-]+\.service", policy["unit"]):
+    setup_units = policy.get("setup_units", [])
+    if not isinstance(setup_units, list):
+        raise postgres.LifecycleError("invalid startup inhibition service units")
+    units = [policy["unit"], *setup_units]
+    if (any(not isinstance(unit, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+\.service", unit)
+            for unit in units) or len(set(units)) != len(units)):
         raise postgres.LifecycleError("invalid startup inhibition service unit")
     for key in ("state_dir", "drop_in_root", "systemctl", "busctl", "runuser", "adapter"):
         path = Path(policy[key])
@@ -78,6 +83,13 @@ def settings(config):
         if state == protected or state.is_relative_to(protected) or protected.is_relative_to(state):
             raise postgres.LifecycleError("startup inhibition must have separate root-owned storage")
     return policy, state, Path(policy["drop_in_root"]) / (policy["unit"] + ".d") / "zzzz-harbor-db-startup-inhibition.conf"
+
+
+def drop_ins(policy, primary):
+    return [(policy["unit"], primary), *[
+        (unit, Path(policy["drop_in_root"]) / (unit + ".d") / primary.name)
+        for unit in policy.get("setup_units", [])
+    ]]
 
 
 def content(state):
@@ -101,12 +113,13 @@ def record(config, policy, state, identifier):
     return value
 
 
-def loaded(policy, drop_in, state):
-    result = postgres.run([policy["systemctl"], "show", policy["unit"], "--property=DropInPaths", "--value"],
+def loaded(policy, drop_in, state, unit=None):
+    unit = policy["unit"] if unit is None else unit
+    result = postgres.run([policy["systemctl"], "show", unit, "--property=DropInPaths", "--value"],
                           capture_output=True, text=True, timeout=30)
     if str(drop_in) not in shlex.split(result.stdout):
         raise postgres.LifecycleError("startup inhibition drop-in is not loaded by systemd")
-    escaped = "".join(character if character.isascii() and character.isalnum() else f"_{ord(character):02x}" for character in policy["unit"])
+    escaped = "".join(character if character.isascii() and character.isalnum() else f"_{ord(character):02x}" for character in unit)
     result = postgres.run([policy["busctl"], "--json=short", "get-property", "org.freedesktop.systemd1",
                            "/org/freedesktop/systemd1/unit/" + escaped, "org.freedesktop.systemd1.Unit", "Conditions"],
                           capture_output=True, text=True, timeout=30)
@@ -148,19 +161,21 @@ def inhibit(config, identifier):
     with lock(state / "lock", create=True):
         # Publish the persistent drop-in FIRST. A reboot after the later marker
         # commit must already see it, even before this manager has reloaded.
-        provision_directory(drop_in.parent, 0o755)
-        owned(drop_in.parent.parent, directory=True)
-        if os.path.lexists(drop_in):
-            check_drop_in(drop_in, state)
-        else:
-            atomic_write(drop_in, content(state))
+        for _, barrier in drop_ins(policy, drop_in):
+            provision_directory(barrier.parent, 0o755)
+            owned(barrier.parent.parent, directory=True)
+            if os.path.lexists(barrier):
+                check_drop_in(barrier, state)
+            else:
+                atomic_write(barrier, content(state))
         if os.path.lexists(state / "inhibited.json"):
             held = record(config, policy, state, identifier)
         else:
             held = {**binding(config, policy, identifier), "token": secrets.token_hex(16)}
             write_json(state / "inhibited.json", held)
         postgres.run([policy["systemctl"], "daemon-reload"], timeout=30)
-        loaded(policy, drop_in, state)
+        for unit, barrier in drop_ins(policy, drop_in):
+            loaded(policy, barrier, state, unit)
         return {"status": "startup-inhibited", "token": held["token"], "unit": policy["unit"]}
 
 
@@ -175,8 +190,9 @@ def release(config, manifest, token, fence_token, phase):
             raise postgres.LifecycleError("startup inhibition token differs")
         if phase not in ("prepared", "closed"):
             raise postgres.LifecycleError("unknown startup release boundary")
-        check_drop_in(drop_in, state)
-        loaded(policy, drop_in, state)
+        for unit, barrier in drop_ins(policy, drop_in):
+            check_drop_in(barrier, state)
+            loaded(policy, barrier, state, unit)
         # The service identity verifies stoppedness and its own private journal,
         # hashes, receipt and cluster. Root never writes PostgreSQL-owned history.
         result = postgres.run([policy["runuser"], "-u", "postgres", "--", policy["adapter"],

@@ -92,6 +92,14 @@ in
         message = "Explicit client gates must preserve existing conditions and leave PostgreSQL control/startup available; bootstrap recovery retains enforced fencing.";
       }
       {
+        name = "startup-inhibits-setup-with-primary";
+        assertion = let
+          manifest = builtins.fromJSON (builtins.unsafeDiscardStringContext eval.config.environment.etc."harbor-db/postgresql.json".source.text);
+        in
+          manifest.startup_inhibition.setup_units == ["postgresql-setup.service"];
+        message = "Persistent startup inhibition must cover setup so a legacy switch cannot run setup SQL against the inhibited primary.";
+      }
+      {
         name = "managed-preactivation-preparation";
         assertion = let
           checks = withPreparation.config.system.preSwitchChecks;

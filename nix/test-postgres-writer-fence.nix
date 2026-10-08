@@ -17,6 +17,7 @@
     startup_inhibition = {
       state_dir = startup;
       unit = "postgresql.service";
+      setup_units = ["postgresql-setup.service"];
       drop_in_root = "/etc/systemd/system.control";
       systemctl = "${pkgs.systemd}/bin/systemctl";
       busctl = "${pkgs.systemd}/bin/busctl";
@@ -102,6 +103,8 @@ in
       machine.succeed("systemctl start postgresql")
       machine.fail("systemctl is-active postgresql")
       machine.succeed("test ! -e ${data}/postmaster.pid")
+      machine.succeed("systemctl start postgresql-setup.service")
+      machine.succeed("test \"$(systemctl show postgresql-setup.service -p ConditionResult --value)\" = no")
       opened = json.loads(machine.succeed(pg + f"fence-open --system-identifier {identifier}"))
       token = opened["token"]
       machine.succeed(root + f"release-startup --token {held['token']} --fence-token {token} --phase prepared")
@@ -135,6 +138,7 @@ in
       # Change back to the legacy unit while thaw is unfinished. NixOS unit
       # replacement and reboot must retain the system.control drop-in barrier.
       machine.succeed(f"{base}/bin/switch-to-configuration test")
+      machine.succeed("test \"$(systemctl show postgresql-setup.service -p ConditionResult --value)\" = no")
       machine.crash()
       machine.start()
       machine.wait_for_unit("multi-user.target")

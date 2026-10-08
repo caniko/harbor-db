@@ -287,7 +287,11 @@ named migration/runtime clients while retaining their existing conditions.
 
 Before stopping the primary, root runs `inhibit-startup --system-identifier ID`
 using the immutable manifest. The persistent root-owned gate must be installed
-and read back from systemd before stopping the service. Then the PostgreSQL OS
+and read back from systemd before stopping the service. `writerFence.setupUnits`
+defaults to `postgresql-setup.service`; its persistent gate is installed before
+the inhibition marker and read back alongside the primary gate. This prevents
+legacy activation from running setup SQL while the primary is deliberately
+inhibited, including after an interrupted thaw. Then the PostgreSQL OS
 identity runs `fence-open --system-identifier ID`. It returns `prepared-offline`,
 never live readiness. Root releases only the startup gate with
 `release-startup --token STARTUP_TOKEN --fence-token FENCE_TOKEN --phase prepared`

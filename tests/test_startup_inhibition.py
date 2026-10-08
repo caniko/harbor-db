@@ -23,12 +23,14 @@ class StartupInhibitionTest(unittest.TestCase):
             "state_dir": str(self.root / "authority"), "package": "/postgres18",
             "startup_inhibition": {
                 "state_dir": str(self.root / "inhibition"), "unit": "postgresql.service",
+                "setup_units": ["postgresql-setup.service"],
                 "drop_in_root": str(self.root / "system.control"),
                 "systemctl": "/systemctl", "busctl": "/busctl", "runuser": "/runuser", "adapter": "/adapter",
             },
         }
         self.gate = self.root / "inhibition" / "inhibited.json"
         self.drop_in = self.root / "system.control/postgresql.service.d/zzzz-harbor-db-startup-inhibition.conf"
+        self.setup_drop_in = self.root / "system.control/postgresql-setup.service.d/zzzz-harbor-db-startup-inhibition.conf"
         self.authority = self.root / "authority"
         self.authority.mkdir()
         self.fence_lock = self.authority / "writer-fence.lock"
@@ -55,7 +57,7 @@ class StartupInhibitionTest(unittest.TestCase):
 
         def run(argv, **kwargs):
             if argv[0] == "/systemctl":
-                output = str(self.drop_in) if "show" in argv else ""
+                output = str(self.setup_drop_in if argv[2:3] == ["postgresql-setup.service"] else self.drop_in) if "show" in argv else ""
             elif argv[0] == "/busctl":
                 output = json.dumps({"type": "a(sbbsi)", "data": [["ConditionPathExists", False, True, str(self.gate), 0]]})
             else:
@@ -89,6 +91,7 @@ class StartupInhibitionTest(unittest.TestCase):
         def interrupt(path, value):
             if Path(path) == self.gate:
                 self.assertTrue(self.drop_in.exists())
+                self.assertTrue(self.setup_drop_in.exists())
                 raise OSError("marker publication interrupted")
             durable.write_json(path, value)
         with patch.object(startup_inhibition, "write_json", side_effect=interrupt), self.assertRaisesRegex(OSError, "interrupted"):
@@ -110,7 +113,8 @@ class StartupInhibitionTest(unittest.TestCase):
         identifier = "99999"
         def observe(argv, **kwargs):
             if argv[0] == "/systemctl":
-                return subprocess.CompletedProcess(argv, 0, str(self.drop_in), "")
+                barrier = self.setup_drop_in if argv[2:3] == ["postgresql-setup.service"] else self.drop_in
+                return subprocess.CompletedProcess(argv, 0, str(barrier), "")
             if argv[0] == "/busctl":
                 return subprocess.CompletedProcess(argv, 0, json.dumps({"type": "a(sbbsi)", "data": [["ConditionPathExists", False, True, str(self.gate), 0]]}), "")
             return subprocess.CompletedProcess(argv, 0, json.dumps({
@@ -125,6 +129,7 @@ class StartupInhibitionTest(unittest.TestCase):
         released = startup_inhibition.release(self.config, self.root / "manifest", held["token"], "a" * 32, "prepared")
         self.assertFalse(self.gate.exists())
         self.assertTrue(self.drop_in.exists())
+        self.assertTrue(self.setup_drop_in.exists())
         self.assertTrue(Path(released["receipt"]).exists())
 
     def test_loaded_drop_in_without_effective_condition_cannot_release(self):
@@ -155,6 +160,36 @@ class StartupInhibitionTest(unittest.TestCase):
             durable.write_json(path, value)
         with patch.object(startup_inhibition, "write_json", side_effect=competing_transition):
             startup_inhibition.release(self.config, self.root / "manifest", held["token"], "a" * 32, "prepared")
+        self.assertFalse(self.gate.exists())
+
+    def test_missing_setup_readback_keeps_primary_and_setup_inhibited(self):
+        from harbor_db import startup_inhibition
+        runner = self.helpers()
+        observe = runner.side_effect
+
+        def missing_setup(argv, **kwargs):
+            if argv[:3] == ["/systemctl", "show", "postgresql-setup.service"]:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return observe(argv, **kwargs)
+        runner.side_effect = missing_setup
+        with self.assertRaisesRegex(postgres.LifecycleError, "not loaded"):
+            startup_inhibition.inhibit(self.config, "12345")
+        self.assertTrue(self.gate.exists())
+        self.assertEqual(self.drop_in.read_bytes(), self.setup_drop_in.read_bytes())
+        runner.side_effect = observe
+        held = startup_inhibition.inhibit(self.config, "12345")
+        runner.side_effect = missing_setup
+        with self.assertRaisesRegex(postgres.LifecycleError, "not loaded"):
+            startup_inhibition.release(self.config, self.root / "manifest", held["token"], "a" * 32, "prepared")
+        self.assertTrue(self.gate.exists())
+
+    def test_setup_unit_cannot_escape_or_repeat_the_primary_gate(self):
+        from harbor_db import startup_inhibition
+        self.helpers()
+        for units in (["postgresql.service"], ["../foreign.service"], ["setup.service", "setup.service"], "setup.service", [{}]):
+            self.config["startup_inhibition"]["setup_units"] = units
+            with self.assertRaisesRegex(postgres.LifecycleError, "service unit"):
+                startup_inhibition.inhibit(self.config, "12345")
         self.assertFalse(self.gate.exists())
 
     def test_missing_or_exclusively_held_fence_anchor_keeps_startup_inhibited(self):
