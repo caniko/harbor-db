@@ -18,6 +18,8 @@ pkgs.runCommand "harbor-db-postgres" {
     --set PYTHONPATH "$out/lib" --add-flags '-B -m harbor_db.backup'
   makeWrapper ${pkgs.python3}/bin/python3 "$out/bin/harbor-db-resource" \
     --set PYTHONPATH "$out/lib" --add-flags '-B -m harbor_db.resource'
+  makeWrapper ${pkgs.python3}/bin/python3 "$out/bin/harbor-db-provision" \
+    --set PYTHONPATH "$out/lib" --add-flags '-B -m harbor_db.provision'
   makeWrapper ${pkgs.python3}/bin/python3 "$out/bin/harbor-db-cutover" \
     --set PYTHONPATH "$out/lib" --prefix PATH : ${pkgs.systemd}/bin --add-flags '-B -m harbor_db.cutover'
   makeWrapper ${pkgs.python3}/bin/python3 "$out/bin/harbor-db-cutover-shell" \
