@@ -27,6 +27,9 @@
   });
   node = {pkgs, ...}: {
     virtualisation.memorySize = 1024;
+    # The driver owns fixture clock alignment; no network time writer may reset
+    # a receiving guest behind transported certification timestamps.
+    services.timesyncd.enable = pkgs.lib.mkForce false;
     environment.systemPackages = [tool pkgs.postgresql_18 pkgs.python3 pkgs.jq];
     environment.etc."recovery-template.json".source = template;
     users.users.postgres = {
@@ -82,11 +85,9 @@ in
           raise
       remote.wait_for_unit("multi-user.target")
       # Independent VM clocks can advance at different rates under hosted QEMU.
-      # Disable time synchronisation and move only the receiving fixture clock
+      # Time synchronisation is disabled in the node policy. Move the receiving clock
       # forward at each evidence handoff; do not relax production freshness or
       # alter any receipt timestamp.
-      for host in (primary, remote):
-          host.succeed("systemctl stop systemd-timesyncd.service")
       def align_receiver(receiver, sender):
           seconds = max(int(host.succeed("date +%s").strip()) for host in (receiver, sender))
           receiver.succeed(f"date --set=@{seconds}")
