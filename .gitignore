@@ -1,3 +1,7 @@
 /target/
 /result
 /result-*
+/.direnv/
+/.nix-results/
+__pycache__/
+*.py[cod]
