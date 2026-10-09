@@ -26,9 +26,17 @@ def candidate_path(candidate, config):
         return "contract"
     if not Path(candidate).is_dir():
         raise ValueError("transition candidate is not realized")
-    if read_json(Path(candidate) / "etc/harbor-db" / (config["resource"] + "-transition.json")) != config:
+    if generation_contract(candidate, config["resource"]) != config:
         raise ValueError("candidate generation does not declare the exact transition contract")
     return "generation"
+
+
+def generation_contract(candidate, resource_name, *, store_root="/nix/store"):
+    """Resolve NixOS's immutable etc links without admitting a runtime contract."""
+    path = (Path(candidate) / "etc/harbor-db" / (resource_name + "-transition.json")).resolve(strict=True)
+    if not path.is_relative_to(store_root):
+        raise ValueError("candidate transition contract escapes the immutable store")
+    return read_json(path)
 
 
 def generation():

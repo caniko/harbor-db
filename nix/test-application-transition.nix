@@ -202,6 +202,7 @@ in
           "d /var/lib/demo-primary-backup/locks 0700 postgres postgres -"
           "f /var/lib/demo-primary-backup/locks/mutate 0600 postgres postgres -"
           "d /var/lib/demo-primary-backup/evidence 0700 postgres postgres -"
+          "f /var/lib/demo-primary-backup/evidence/recovery.lock 0600 postgres postgres -"
           "d /var/lib/demo-recovered 0700 postgres postgres -"
           "d /var/lib/demo-restore-wal 0700 postgres postgres -"
           "d /var/lib/demo-recovery-socket 0700 postgres postgres -"

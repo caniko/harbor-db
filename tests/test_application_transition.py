@@ -268,6 +268,29 @@ print(json.dumps({"version":1,"status":"verified","semantic_sha256":"a"*64}))
         cutover.check_resource(source, phase="startup")
 
 
+class GenerationContractTest(unittest.TestCase):
+    def test_nixos_etc_links_resolve_only_within_the_immutable_store(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = root / "store"
+            candidate, etc = store / "candidate", store / "etc-bundle"
+            candidate.mkdir(parents=True)
+            (etc / "harbor-db").mkdir(parents=True)
+            (candidate / "etc").symlink_to(etc)
+            manifest = store / "manifest.json"
+            write_json(manifest, {"resource": "demo", "version": 1})
+            link = etc / "harbor-db/demo-transition.json"
+            link.symlink_to(manifest)
+            self.assertEqual(transition_manifest.generation_contract(candidate, "demo", store_root=store),
+                             {"resource": "demo", "version": 1})
+            outside = root / "mutable-runtime.json"
+            write_json(outside, {"resource": "demo", "version": 1})
+            link.unlink()
+            link.symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, "escapes the immutable store"):
+                transition_manifest.generation_contract(candidate, "demo", store_root=store)
+
+
 class TransitionWorkerLeaseTest(unittest.TestCase):
     def test_surviving_worker_keeps_the_authority_lease_after_coordinator_death(self):
         from harbor_db.durable import lock
