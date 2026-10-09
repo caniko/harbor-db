@@ -56,7 +56,8 @@ in
       system.stateVersion = "26.05";
     };
     testScript = ''
-      start_all()
+      # reboot() reconnects only when QEMU was started with reboot support.
+      machine.start(allow_reboot=True)
       machine.wait_for_unit("multi-user.target")
       machine.succeed("systemctl start harbor-db-demo-backup.service")
       point = machine.succeed("python3 -c 'import json; print(json.load(open(\"/var/lib/demo-backup/LAST_SUCCESS\"))[\"attempt\"])'").strip()

@@ -83,6 +83,8 @@ The coordinator forwards its leases to every adapter through inherited descripto
 listed in `HARBOR_DB_LEASE_FDS`; adapters forwarding work must retain them too.
 Receipt output is bounded in memory; diagnostic output is discarded rather than
 spooled into persistent files. This does not authorize secrets in artifact dumps.
+Operator commands use canonical manifest paths. Resolve generated `/etc/harbor-db`
+convenience links to their store paths before passing them to a no-follow reader.
 
 An interrupted point may be retried explicitly with `--retry-incomplete`. Its
 manifest and executable hashes must match the original attempt. Cleanup drains

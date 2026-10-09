@@ -50,7 +50,8 @@ pkgs.testers.runNixOSTest {
     system.stateVersion = "26.05";
   };
   testScript = ''
-    start_all()
+    # reboot() reconnects only when QEMU was started with reboot support.
+    machine.start(allow_reboot=True)
     machine.wait_for_unit("demo.service")
     machine.fail("runuser -u demo -- psql -X -w -v ON_ERROR_STOP=1 -d demo -U demo_runtime -c 'UPDATE history SET id=2'")
     machine.fail("runuser -u demo -- psql -X -w -v ON_ERROR_STOP=1 -d demo -U demo_owner -c 'SELECT 1'")
