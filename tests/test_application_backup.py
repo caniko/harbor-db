@@ -17,6 +17,14 @@ class ApplicationBackupTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        machine = self.root / "machine-id"
+        machine.write_text("0123456789abcdef0123456789abcdef\n")
+        real_digest = application_backup.digest
+        # Native Nix builders have no host machine-id. Model this one host's
+        # identity while hashing every artifact and executable normally; the
+        # two-machine VM gate verifies actual independent-host execution.
+        self.enterContext(mock.patch.object(application_backup, "digest", side_effect=lambda path:
+            real_digest(machine if str(path) == "/etc/machine-id" else path)))
         self.backups = self.root / "backups"
         self.backups.mkdir(mode=0o700)
         (self.backups / "lock").touch(mode=0o600)

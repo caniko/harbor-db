@@ -11,11 +11,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from harbor_db import application_transition, resource
 from harbor_db import cutover
 from harbor_db import transition_manifest
+from harbor_db import postgres, startup_inhibition
 from harbor_db.application_backup import digest, identity
 from harbor_db.durable import read_json, write_json
 
@@ -25,6 +27,14 @@ class ApplicationTransitionTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        inspect_ancestors = startup_inhibition.owned_ancestors
+        def fixture_ancestors(path):
+            # Model root inside the private fixture, as in the startup-inhibition
+            # tests. Nix's writable /build is outside that model. Keep the real
+            # ownership/mode checks on all fixture ancestors; VMs cover the host.
+            inspect_ancestors(SimpleNamespace(parents=[parent for parent in path.parents
+                if parent == self.root or parent.is_relative_to(self.root)]))
+        self.enterContext(mock.patch.object(startup_inhibition, "owned_ancestors", side_effect=fixture_ancestors))
         self.state, self.old, self.new, self.barrier = [self.root / name for name in ("authority", "old", "new", "barrier")]
         for path in (self.state, self.old, self.new, self.barrier):
             path.mkdir(mode=0o700)
@@ -127,6 +137,15 @@ print(json.dumps({"version":1,"status":"verified","semantic_sha256":"a"*64}))
         # Health after write-enable must not demand equality with old records.
         self.actions.return_value = {"version": 1, "status": "healthy"}
         application_transition.complete(self.config)
+
+    def test_writable_fixture_ancestor_cannot_authorize_a_transition(self):
+        self.root.chmod(0o777)
+        try:
+            with self.assertRaisesRegex(postgres.LifecycleError, "untrusted ancestor"):
+                application_transition.plan(self.config, self.candidate, None)
+            self.assertFalse((self.state / "transition.json").exists())
+        finally:
+            self.root.chmod(0o700)
 
     def test_failed_import_retains_source_and_exact_resume_identity(self):
         application_transition.plan(self.config, self.candidate, None)
