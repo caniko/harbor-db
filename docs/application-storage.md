@@ -154,7 +154,14 @@ startup continues through the existing resource/cutover guard. Database-owned
 corpus references are queried read-only and validated against complete target bytes.
 
 Qualification retains all existing Harbor DB gates and adds dedicated provisioning
-evaluation and three systemd/VM application gates. Native regressions cover changed
+evaluation and four systemd/VM application gates. Native regressions cover changed
 ownership/default/column privileges, real PostgreSQL restores, failed publication,
 changed evidence, surviving child leases, interrupted authority commit, generation
 binding, source-preserving abort and forbidden rollback after writer enablement.
+The PostgreSQL transition gate executes a real importer under the borrowed fence,
+retains a successful import while whole-primary acceptance is pending, performs a
+physical restore at the same fence token, and rejects record drift. Aborting the
+application transition leaves that primary fence intact for its owner's explicit
+stopped-primary release. Independent application restoration executes on a second
+machine; the filesystem transition gate separately exercises exact-generation
+activation, client release, post-write health and retained legacy startup policy.

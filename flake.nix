@@ -131,6 +131,10 @@
       application-provision = pkgs.callPackage ./nix/test-application-provision.nix {module = self.nixosModules.default;};
       application-backup = pkgs.callPackage ./nix/test-application-backup.nix {module = self.nixosModules.default;};
       application-transition = pkgs.callPackage ./nix/test-application-transition.nix {module = self.nixosModules.default;};
+      application-postgres-transition = pkgs.callPackage ./nix/test-application-transition.nix {
+        module = self.nixosModules.default;
+        withPostgres = true;
+      };
       module-smoke = pkgs.callPackage ./nix/test-module.nix {
         module = self.nixosModules.default;
       };
