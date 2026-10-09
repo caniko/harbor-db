@@ -4,6 +4,7 @@
   pkgs,
 }:
 pkgs.testers.nixosTest {
+  extraDriverArgs = ["--junit-xml" "junit.xml"];
   name = "harbor-db-module-smoke";
 
   nodes.machine = {pkgs, ...}: let

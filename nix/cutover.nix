@@ -3,6 +3,7 @@
   lib,
   options,
   pkgs,
+  harborDbStoragePackage ? null,
   ...
 }: let
   inherit (lib) mkOption types;
@@ -86,6 +87,7 @@
         else wrap command)
       commands;
 in {
+  imports = [./storage-package-argument.nix];
   # Application modules often emit boot-only `d` rules with no initialization
   # option. Enforced historical roots retain permission repair, never creation.
   options.systemd.tmpfiles.rules = mkOption {apply = rules: map requireExisting rules;};
@@ -98,7 +100,10 @@ in {
     enable = lib.mkEnableOption "mandatory rebuild and activation cutover admission";
     package = mkOption {
       type = types.package;
-      default = import ./postgres-package.nix {inherit pkgs;};
+      default = import ./postgres-package.nix {
+        inherit pkgs;
+        nativePackage = harborDbStoragePackage;
+      };
       description = "Harbor-DB cutover and existing storage/recovery engines.";
     };
     timeoutSeconds = mkOption {

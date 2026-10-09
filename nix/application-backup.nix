@@ -2,22 +2,27 @@
   config,
   lib,
   pkgs,
+  harborDbStoragePackage ? null,
   ...
 }: let
   inherit (lib) mkOption types;
   projects = lib.filterAttrs (_: p: p.backup.enable) config.services.harbor-db.projects;
-  package = import ./postgres-package.nix {inherit pkgs;};
+  package = import ./postgres-package.nix {
+    inherit pkgs;
+    nativePackage = harborDbStoragePackage;
+  };
   manifest = name: backup:
     pkgs.writeText "harbor-db-${name}-backup.json" (builtins.toJSON {
       version = 1;
       resource = name;
       root = backup.directory;
-      commands = backup.commands;
+      inherit (backup) commands;
       executable_files = backup.executableFiles;
       timeout_seconds = backup.timeoutSeconds;
       maximum_age_seconds = backup.maximumAgeSeconds;
     });
 in {
+  imports = [./storage-package-argument.nix];
   options.services.harbor-db.projects = mkOption {
     type = types.attrsOf (types.submodule {
       options.backup = {

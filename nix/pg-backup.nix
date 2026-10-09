@@ -2,12 +2,17 @@
   config,
   lib,
   pkgs,
+  harborDbStoragePackage ? null,
   ...
 }: let
   inherit (lib) mkEnableOption mkIf mkMerge mkOption types;
   cfg = config.services.harbor-db.pgBackup;
-  durable = "${import ./postgres-package.nix {inherit pkgs;}}/bin/harbor-db-durable";
-  pruneTool = "${import ./postgres-package.nix {inherit pkgs;}}/bin/harbor-db-backup-prune";
+  storagePackage = import ./postgres-package.nix {
+    inherit pkgs;
+    nativePackage = harborDbStoragePackage;
+  };
+  durable = "${storagePackage}/bin/harbor-db-durable";
+  pruneTool = "${storagePackage}/bin/harbor-db-backup-prune";
 
   # A hostname is also used as a directory component. Keep the legacy IPv4
   # paths stable while preventing IPv6 / URI punctuation from becoming path
@@ -168,6 +173,7 @@
     };
   };
 in {
+  imports = [./storage-package-argument.nix];
   options.services.harbor-db.pgBackup = {
     enable = mkEnableOption "PostgreSQL backup replication (source or target)";
 

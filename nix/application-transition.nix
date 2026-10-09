@@ -2,11 +2,15 @@
   config,
   lib,
   pkgs,
+  harborDbStoragePackage ? null,
   ...
 }: let
   inherit (lib) mkOption types;
   projects = lib.filterAttrs (_: p: p.transition.enable) config.services.harbor-db.projects;
-  package = import ./postgres-package.nix {inherit pkgs;};
+  package = import ./postgres-package.nix {
+    inherit pkgs;
+    nativePackage = harborDbStoragePackage;
+  };
   manifest = name: p:
     pkgs.writeText "harbor-db-${name}-transition.json" (builtins.toJSON {
       version = 1;
@@ -27,11 +31,12 @@
       storage_package = "${package}/bin";
       units = p.runtimeUnits;
       retired_units = p.retiredUnits;
-      commands = p.commands;
+      inherit (p) commands;
       executable_files = p.executableFiles;
       timeout_seconds = p.timeoutSeconds;
     });
 in {
+  imports = [./storage-package-argument.nix];
   options.services.harbor-db.projects = mkOption {
     type = types.attrsOf (types.submodule ({
       name,

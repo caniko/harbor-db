@@ -4,7 +4,7 @@
 }: let
   evaluate = additional:
     import "${pkgs.path}/nixos/lib/eval-config.nix" {
-      system = pkgs.system;
+      inherit (pkgs) system;
       modules = [
         module
         {

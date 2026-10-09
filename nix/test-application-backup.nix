@@ -20,6 +20,7 @@
   '';
 in
   pkgs.testers.runNixOSTest {
+    extraDriverArgs = ["--junit-xml" "junit.xml"];
     name = "harbor-db-application-backup";
     nodes.machine = {lib, ...}: {
       imports = [module];

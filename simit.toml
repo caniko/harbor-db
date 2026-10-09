@@ -7,6 +7,21 @@ with_docs = true
 provider = "actions"
 platform = "github"
 nix_builds = [
+  ".#packages.x86_64-linux.storage-lifecycle-rust",
+  ".#packages.x86_64-linux.harbor-db-test",
+  ".#checks.x86_64-linux.native-package-eval",
+  ".#checks.x86_64-linux.native-storage-eval",
+  ".#checks.x86_64-linux.native-cli-smoke",
+  ".#checks.x86_64-linux.native-supervisor",
+  ".#checks.x86_64-linux.native-postgres-backup-service",
+  ".#checks.x86_64-linux.native-postgres-crash-rollback",
+  ".#checks.x86_64-linux.native-postgres-interrupted-upgrade",
+  ".#checks.x86_64-linux.native-postgres-recovery-acceptance",
+  ".#checks.x86_64-linux.native-postgres-writer-fence",
+  ".#checks.x86_64-linux.native-application-provision",
+  ".#checks.x86_64-linux.native-application-backup",
+  ".#checks.x86_64-linux.native-application-transition",
+  ".#checks.x86_64-linux.native-application-postgres-transition",
   ".#packages.x86_64-linux.storage-lifecycle",
   ".#checks.x86_64-linux.postgres-lifecycle-test",
   ".#checks.x86_64-linux.cutover-eval",
@@ -31,6 +46,23 @@ nix_builds = [
   ".#checks.x86_64-linux.cargo-clippy",
 ]
 
+# cargo-test already realizes all-targets/all-features native storage and harness tests.
+# AArch64 qualification is BLOCKED, not covered by the x86 hosted matrix:
+# producer: flake.nix packages/checks for aarch64-linux;
+# packages: .#packages.aarch64-linux.storage-lifecycle-rust,
+#           .#packages.aarch64-linux.harbor-db-test;
+# role checks: .#checks.aarch64-linux.native-package-eval,
+#              .#checks.aarch64-linux.native-storage-eval,
+#              .#checks.aarch64-linux.native-cli-smoke.
+# These must be realized by a qualified native AArch64 runner, a configured remote
+# builder, or registered AArch64 emulation before claiming build/role acceptance.
+# simit 0.19.0 nix_build.only rejects nix_system_runners and has one matrix runner.
+# Upstream producer: simit qualification renderer/config must support per-system
+# runners (or an explicitly qualified remote/emulated builder) and x86-only KVM.
+# Then add the five installables, regenerate with `simit init ci --platform github
+# --ci-provider actions --runtime nix`, and verify using the same command with
+# --check --diff plus retained AArch64 build evidence from the qualified runner.
+# The ten native VM checks are exported only on x86_64-linux and require KVM.
 [ci.nix_build]
 only = true
 timeout_minutes = 90
