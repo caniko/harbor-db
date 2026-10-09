@@ -146,6 +146,11 @@ in {
             description = "Database-owned corpus paths: read-only SQL returns a JSON array of {path, directory} entries relative to the indexed authority root.";
           };
           custody_file = mkOption {type = types.strMatching "/.*";};
+          transition_manifest = mkOption {
+            type = types.nullOr (types.strMatching "/nix/store/.*");
+            default = null;
+            description = "Prepared backend transition admission; ordinary startup still requires committed authority and explicit writer release.";
+          };
           max_age_seconds = mkOption {
             type = types.ints.positive;
             default = 172800;
@@ -162,6 +167,14 @@ in {
                 binding = mkOption {type = types.attrsOf types.str;};
                 required_files = mkOption {
                   type = types.listOf (types.strMatching "/.*");
+                  default = [];
+                };
+                required_mounts = mkOption {
+                  type = types.listOf types.str;
+                  default = [];
+                };
+                consumer_command = mkOption {
+                  type = types.listOf types.str;
                   default = [];
                 };
               };
@@ -229,7 +242,7 @@ in {
       environment.etc."harbor-db/cutover.json".source = manifest;
       environment.systemPackages = [cfg.package];
       system.preSwitchChecks."00---harbor-db-cutover" = ''
-        ${cfg.package}/bin/harbor-db-cutover check --contract ${manifest} --host ${lib.escapeShellArg config.networking.hostName} --phase activate || exit $?
+        ${cfg.package}/bin/harbor-db-cutover check --contract ${manifest} --host ${lib.escapeShellArg config.networking.hostName} --phase activate --candidate "$1" || exit $?
       '';
       systemd.services = lib.mkMerge (lib.mapAttrsToList (_: entry:
         lib.genAttrs (map (lib.removeSuffix ".service") entry.runtime_units) (_: {

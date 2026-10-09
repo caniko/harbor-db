@@ -254,6 +254,16 @@ def check(config, *, now=None):
         return result
 
 
+def live_check(config, socket_dir, port, *, now=None):
+    """Read-only whole-primary acceptance at the current fenced record boundary."""
+    settings = policy(config)
+    with admission(config, now=now, socket_dir=socket_dir, port=port) as result:
+        source = read_json(settings["snapshot_file"])
+        if records(config, settings, socket_dir, port) != source["records"]:
+            raise ValueError("live primary records differ from the accepted recovery snapshot")
+        return {**result, "snapshot_sha256": digest(settings["snapshot_file"])}
+
+
 @contextlib.contextmanager
 def admission(config, *, now=None, verify_contents=True, socket_dir=None, port=5432):
     """Keep the accepted backup and evidence stable through authority publication."""

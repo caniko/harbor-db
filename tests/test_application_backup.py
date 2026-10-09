@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from harbor_db import application_backup
@@ -93,6 +94,24 @@ elif operation == "fail":
         (state / "lock").touch(mode=0o600)
         with self.assertRaisesRegex(ValueError, "different machine"):
             application_backup.certify(self.config, self.backups / "good", state)
+
+    def test_interrupted_capture_retries_only_the_same_intent_and_retains_partial_evidence(self):
+        execute = application_backup.execute
+        def fail_restore(config, stage, *args):
+            if stage == "restore":
+                raise ValueError("interrupted restore")
+            return execute(config, stage, *args)
+        with mock.patch.object(application_backup, "execute", side_effect=fail_restore):
+            with self.assertRaises(ValueError):
+                application_backup.capture(self.config, "interrupted")
+        changed = self.config | {"maximum_age_seconds": 7200}
+        with self.assertRaisesRegex(ValueError, "intent changed"):
+            application_backup.capture(changed, "interrupted", retry_incomplete=True)
+        application_backup.capture(self.config, "interrupted", retry_incomplete=True)
+        self.assertEqual(read_json(self.backups / "LAST_SUCCESS")["attempt"], "interrupted")
+        retained = list(self.backups.glob("interrupted.abandoned-*"))
+        self.assertEqual(len(retained), 1)
+        self.assertTrue((retained[0] / "interrupted.partial/records.json").is_file())
 
 
 if __name__ == "__main__":

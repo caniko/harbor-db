@@ -64,7 +64,7 @@ def query(endpoint, database, sql):
         "-U", role, "-d", database, "-f", "-"], input=sql, text=True,
         capture_output=True, timeout=60, env=environment | {"PGOPTIONS": "-c lock_timeout=5000 -c statement_timeout=30000"})
     if result.returncode:
-        raise ValueError("application provisioning SQL failed: " + result.stderr.strip())
+        raise ValueError("application provisioning SQL failed; diagnostics suppressed")
     return result.stdout.strip()
 
 
@@ -87,7 +87,7 @@ def _apply(config, endpoint):
     database, owner, runtime, schema = [identifier(policy[key]) for key in
                                         ("database", "owner_role", "runtime_role", "schema")]
     membership = query(endpoint, "postgres", "SELECT EXISTS (SELECT 1 FROM pg_auth_members m "
-                       "JOIN pg_roles r ON r.oid=m.member WHERE r.rolname IN "
+                       "JOIN pg_roles r ON r.oid=m.member OR r.oid=m.roleid WHERE r.rolname IN "
                        f"('{policy['owner_role']}','{policy['runtime_role']}'));")
     if membership == "t":
         raise ValueError("dedicated application roles have unexpected role membership")
@@ -118,10 +118,15 @@ def _apply(config, endpoint):
     unsafe_objects = query(endpoint, policy["database"], "SELECT EXISTS (SELECT 1 FROM pg_class c "
                            "JOIN pg_namespace n ON n.oid=c.relnamespace "
                            f"WHERE n.nspname='{policy['schema']}' AND c.relkind IN ('r','p','v','m','f','S') "
-                           f"AND pg_get_userbyid(c.relowner)<>'{policy['owner_role']}');")
+                           f"AND pg_get_userbyid(c.relowner)<>'{policy['owner_role']}') "
+                           "OR EXISTS (SELECT 1 FROM pg_namespace "
+                           f"WHERE nspname='{policy['schema']}' AND pg_get_userbyid(nspowner)<>'{policy['owner_role']}' "
+                           "AND NOT (nspname='public' AND pg_get_userbyid(nspowner)='pg_database_owner'));")
     if unsafe_objects == "t":
         raise ValueError("conflicting application object ownership; explicit adoption is required")
     sql = ["BEGIN;", f"SELECT pg_advisory_xact_lock(hashtextextended('harbor-db:{policy['database']}',0));",
+           f"REVOKE ALL ON DATABASE {database} FROM PUBLIC, {runtime};",
+           f"GRANT CONNECT ON DATABASE {database} TO {runtime};",
            f"CREATE SCHEMA IF NOT EXISTS {schema} AUTHORIZATION {owner};",
            f"ALTER SCHEMA {schema} OWNER TO {owner};",
            f"REVOKE ALL ON SCHEMA {schema} FROM PUBLIC, {runtime};",
@@ -161,8 +166,11 @@ def check(config, endpoint):
     checks = [f"(SELECT pg_get_userbyid(datdba)='{owner}' FROM pg_database WHERE datname='{database}')",
               f"(SELECT pg_get_userbyid(nspowner)='{owner}' FROM pg_namespace WHERE nspname='{schema}')",
               f"has_schema_privilege('{runtime}','{schema}','USAGE')",
-              f"NOT has_schema_privilege('{runtime}','{schema}','CREATE')",
-              "NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member "
+               f"NOT has_schema_privilege('{runtime}','{schema}','CREATE')",
+               f"has_database_privilege('{runtime}','{database}','CONNECT')",
+               f"NOT has_database_privilege('{runtime}','{database}','CREATE')",
+               f"NOT has_database_privilege('{runtime}','{database}','TEMP')",
+               "NOT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid=m.member OR r.oid=m.roleid "
               f"WHERE r.rolname IN ('{runtime}','{owner}'))"]
     checks.extend([
         "NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "

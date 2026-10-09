@@ -6,7 +6,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import socket
 import stat
 import subprocess
@@ -16,6 +15,7 @@ import time
 from pathlib import Path
 
 from .durable import lock, read_json, sync_directory, sync_tree, write_json
+from . import process
 
 
 def digest(path):
@@ -76,27 +76,16 @@ def execute(config, stage, backup, workspace, lease):
     argv = [substitutions.get(arg, arg) for arg in config["commands"][stage]]
     allowed = {"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "CREDENTIALS_DIRECTORY"}
     environment = {key: value for key, value in os.environ.items() if key in allowed}
+    inherited = [int(value) for value in os.environ.get("HARBOR_DB_LEASE_FDS", "").split(",") if value]
+    if any(value < 3 for value in inherited):
+        raise ValueError("invalid inherited Harbor DB lease")
+    for descriptor in inherited:
+        os.fstat(descriptor)
+    retained = tuple(sorted(set([lease, *inherited])))
+    environment["HARBOR_DB_LEASE_FDS"] = ",".join(map(str, retained))
     # Adapter output is a bounded receipt, never copied into diagnostics. Each
     # child retains the persistent lease if its coordinator dies unexpectedly.
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
-                                   env=environment, cwd=workspace, pass_fds=(lease,), start_new_session=True)
-        try:
-            status = process.wait(timeout=config["timeout_seconds"])
-        except BaseException:
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=5)
-            raise
-        if status:
-            raise ValueError(f"application {stage} failed; restore point remains unpublished")
-        if stdout.tell() > 1024 * 1024:
-            raise ValueError("application verifier receipt exceeds the size limit")
-        stdout.seek(0)
-        return stdout.read()
+    return process.execute(argv, timeout=config["timeout_seconds"], environment=environment, leases=retained, cwd=workspace)
 
 
 def certification(config, backup, workspace, lease, artifacts):
@@ -117,19 +106,36 @@ def certification(config, backup, workspace, lease, artifacts):
             "artifacts": artifacts, "consistency": captured["consistency"]}
 
 
-def capture(config, attempt):
+def capture(config, attempt, *, retry_incomplete=False):
     root = validate(config)
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", attempt):
         raise ValueError("invalid backup attempt")
     with lock(root / "lock") as lease:
         partial, destination = root / f"{attempt}.partial", root / attempt
-        if partial.exists() or destination.exists() or partial.is_symlink() or destination.is_symlink():
+        if destination.exists() or partial.is_symlink() or destination.is_symlink():
             raise ValueError("backup attempt already exists; never overwrite a restore point")
         tools = executables(config)
+        attempt_intent = {"manifest_sha256": identity(config), "executables": tools}
+        intent_file = root / f"{attempt}.intent.json"
+        workspace = root / f"{attempt}.restore-workspace"
+        if intent_file.exists() or partial.exists() or workspace.exists():
+            if not retry_incomplete or read_json(intent_file) != attempt_intent:
+                raise ValueError("backup attempt already exists or its immutable intent changed")
+            if workspace.exists():
+                if workspace.is_symlink() or not workspace.is_dir():
+                    raise ValueError("incomplete restore workspace is redirected")
+                execute(config, "cleanup", partial, workspace, lease)
+            abandoned = root / f"{attempt}.abandoned-{time.time_ns()}"
+            abandoned.mkdir(mode=0o700)
+            for entry in (partial, workspace, intent_file):
+                if entry.exists():
+                    entry.rename(abandoned / entry.name)
+            sync_directory(abandoned)
+            sync_directory(root)
+        write_json(intent_file, attempt_intent)
         captured_at = int(time.time())
         # The capture adapter must create a new destination; its entire output
         # remains as a partial attempt on failure for investigation.
-        workspace = root / f"{attempt}.restore-workspace"
         workspace.mkdir(mode=0o700)
         try:
             execute(config, "capture", partial, workspace, lease)
@@ -224,6 +230,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     capture_parser = sub.add_parser("capture")
     capture_parser.add_argument("--attempt", default=None)
+    capture_parser.add_argument("--retry-incomplete", action="store_true", help="drain and retain an interrupted attempt with unchanged immutable intent")
     inspection = sub.add_parser("inspect")
     inspection.add_argument("backup", type=Path)
     certifier = sub.add_parser("certify")
@@ -233,7 +240,8 @@ def main():
     try:
         config = read_json(args.config)
         if args.command == "capture":
-            result = capture(config, args.attempt or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}")
+            result = capture(config, args.attempt or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}",
+                             retry_incomplete=args.retry_incomplete)
         elif args.command == "certify":
             result = certify(config, args.backup, args.state)
         else:

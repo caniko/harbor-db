@@ -419,7 +419,9 @@ def main():
         live.add_argument("--system-identifier", required=True)
         live.add_argument("--socket-dir", default="/run/postgresql")
         live.add_argument("--port", type=int, default=5432)
-    commands.add_parser("inspect-recovery", help="read-only backup and record-level recovery admission")
+    recovery_inspection = commands.add_parser("inspect-recovery", help="read-only backup and record-level recovery admission")
+    recovery_inspection.add_argument("--socket-dir")
+    recovery_inspection.add_argument("--port", type=int)
     fence_open = commands.add_parser("fence-open", help="prepare a durable writer fence while the primary is stopped")
     fence_open.add_argument("--system-identifier", required=True)
     fence_close = commands.add_parser("fence-close", help="explicitly thaw a stopped primary; never starts PostgreSQL")
@@ -489,7 +491,9 @@ def main():
         elif args.command in ("inspect-recovery", "snapshot-records", "certify-recovery", "prepare-recovery"):
             from . import recovery
             if args.command == "inspect-recovery":
-                result = recovery.check(config)
+                if (args.socket_dir is None) != (args.port is None):
+                    raise LifecycleError("live recovery inspection requires both local socket and port")
+                result = recovery.check(config) if args.socket_dir is None else recovery.live_check(config, args.socket_dir, args.port)
             elif args.command == "prepare-recovery":
                 result = recovery.prepare(config, json.loads(args.preparation_config.read_text()), args.socket_dir, args.port)
             elif args.command == "snapshot-records":

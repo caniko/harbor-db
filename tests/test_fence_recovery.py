@@ -81,6 +81,19 @@ class FenceRecoveryTest(unittest.TestCase):
         with lock(self.anchor):
             self.assertTrue(self.anchor.exists())
 
+    def test_live_recovery_inspection_rejects_records_changed_after_snapshot(self):
+        self.publish_evidence(self.record["token"])
+        with patch.object(writer_fence, "startup", return_value=self.record), \
+                patch.object(writer_fence, "inspect_live", return_value={"status": "ready"}), \
+                patch.object(recovery, "records", return_value={"record": "c" * 64}):
+            result = recovery.live_check(self.config, "/run/postgresql", 5432, now=100)
+            self.assertEqual(result["snapshot_sha256"], recovery.digest(self.snapshot))
+        with patch.object(writer_fence, "startup", return_value=self.record), \
+                patch.object(writer_fence, "inspect_live", return_value={"status": "ready"}), \
+                patch.object(recovery, "records", return_value={"record": "d" * 64}), \
+                self.assertRaisesRegex(ValueError, "live primary records differ"):
+            recovery.live_check(self.config, "/run/postgresql", 5432, now=100)
+
     def test_retirement_does_not_remove_or_ignore_an_existing_fence(self):
         self.config["recovery"]["require_writer_fence"] = False
         writer_fence.marker(self.config).write_text("retained journal")

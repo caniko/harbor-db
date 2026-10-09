@@ -24,6 +24,10 @@ pkgs.runCommand "harbor-db-postgres" {
     --set PYTHONPATH "$out/lib" --add-flags '-B -m harbor_db.application_backup'
   makeWrapper ${pkgs.python3}/bin/python3 "$out/bin/harbor-db-postgres-drill" \
     --set PYTHONPATH "$out/lib" --add-flags '-B -m harbor_db.postgres_drill'
+  makeWrapper ${pkgs.python3}/bin/python3 "$out/bin/harbor-db-transition" \
+    --set PYTHONPATH "$out/lib" --add-flags '-B -m harbor_db.application_transition'
+  makeWrapper ${pkgs.python3}/bin/python3 "$out/bin/harbor-db-transition-start" \
+    --set PYTHONPATH "$out/lib" --add-flags '-B -m harbor_db.transition_manifest'
   makeWrapper ${pkgs.python3}/bin/python3 "$out/bin/harbor-db-cutover" \
     --set PYTHONPATH "$out/lib" --prefix PATH : ${pkgs.systemd}/bin --add-flags '-B -m harbor_db.cutover'
   makeWrapper ${pkgs.python3}/bin/python3 "$out/bin/harbor-db-cutover-shell" \

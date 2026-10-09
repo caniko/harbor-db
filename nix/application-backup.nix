@@ -83,7 +83,7 @@ in {
     users.groups = lib.listToAttrs (map (p: lib.nameValuePair p.backup.group {}) (lib.attrValues projects));
     users.users = lib.mkMerge (lib.concatMap (p: map (reader: {${reader}.extraGroups = [p.backup.group];}) p.backup.readers) (lib.attrValues projects));
     systemd.tmpfiles.rules = lib.concatMap (p: [
-      "d ${p.backup.directory} 0750 ${p.backup.user} ${p.backup.group} -"
+      "d ${p.backup.directory} 2750 ${p.backup.user} ${p.backup.group} -"
       "f ${p.backup.directory}/lock 0640 ${p.backup.user} ${p.backup.group} -"
     ]) (lib.attrValues projects);
     systemd.services = lib.mapAttrs' (name: p:

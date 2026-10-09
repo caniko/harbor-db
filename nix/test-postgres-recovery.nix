@@ -155,6 +155,11 @@ in
       primary.succeed(f"{command} inspect-recovery")
       primary.succeed(f"{command} adopt-live --system-identifier {identifier}")
       primary.succeed("test -s /srv/authority/identity.json")
+      primary.succeed(f"{command} inspect-recovery --socket-dir /run/postgresql --port 5432")
+      primary.succeed("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c 'UPDATE saves SET revision=43'")
+      primary.fail(f"{command} inspect-recovery --socket-dir /run/postgresql --port 5432")
+      primary.succeed("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c 'UPDATE saves SET revision=42'")
+      primary.succeed(f"{command} inspect-recovery --socket-dir /run/postgresql --port 5432")
 
       # Execute the mandatory dispatcher with real service-user PostgreSQL and
       # the same independently restored database evidence. Corpus initialization

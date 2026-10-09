@@ -112,6 +112,30 @@ class ApplicationProvisionTest(unittest.TestCase):
         finally:
             self.sql("DROP DATABASE foreign_database", database="postgres")
 
+    def test_foreign_schema_is_not_taken_over_and_database_create_drift_is_detected(self):
+        provision.apply(self.config, self.endpoint)
+        self.sql("CREATE SCHEMA foreign_schema")
+        try:
+            with self.assertRaisesRegex(ValueError, "ownership"):
+                provision.apply(self.config | {"schema": "foreign_schema"}, self.endpoint)
+            self.assertEqual(self.sql("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='foreign_schema'").stdout.strip(), self.user)
+        finally:
+            self.sql("DROP SCHEMA foreign_schema")
+        self.sql("GRANT CREATE ON DATABASE demo TO demo_runtime")
+        self.assertFalse(provision.check(self.config, self.endpoint))
+        provision.apply(self.config, self.endpoint)
+        self.assertTrue(provision.check(self.config, self.endpoint))
+
+    def test_owner_role_membership_cannot_be_granted_to_another_login(self):
+        provision.apply(self.config, self.endpoint)
+        self.sql("CREATE ROLE outsider LOGIN; GRANT demo_owner TO outsider")
+        try:
+            self.assertFalse(provision.check(self.config, self.endpoint))
+            with self.assertRaisesRegex(ValueError, "membership"):
+                provision.apply(self.config, self.endpoint)
+        finally:
+            self.sql("REVOKE demo_owner FROM outsider; DROP ROLE outsider")
+
     def test_preexisting_runtime_role_membership_is_rejected(self):
         provision.apply(self.config, self.endpoint)
         self.sql("GRANT demo_owner TO demo_runtime", database="postgres")
