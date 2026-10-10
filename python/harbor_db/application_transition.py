@@ -158,10 +158,13 @@ def primary_evidence(config, record, leases):
                     "--port", str(config["postgres_port"])]}, {}, leases)
     if result["status"] != "ready":
         raise ValueError("the whole primary recovery boundary is not accepted")
-    settings = read_json(config["postgres_manifest"])["recovery"]
-    snapshot = read_json(settings["snapshot_file"])
+    from . import recovery
+    database = read_json(config["postgres_manifest"])
+    settings = database["recovery"]
+    snapshot_path = recovery.source_snapshot_path(database, settings)
+    snapshot = read_json(snapshot_path)
     if (snapshot.get("writer_fence_token") != record["writer_fence_token"]
-            or application_backup.digest(settings["snapshot_file"]) != result["snapshot_sha256"]):
+            or application_backup.digest(snapshot_path) != result["snapshot_sha256"]):
         raise ValueError("primary snapshot does not bind the same held writer fence")
     if record.get("primary_snapshot_sha256") is not None and record["primary_snapshot_sha256"] != result["snapshot_sha256"]:
         raise ValueError("primary recovery snapshot changed during transition resume")

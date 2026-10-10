@@ -2,6 +2,7 @@
 use super::{Result, codec, invalid};
 use serde_json::Value;
 use std::{
+    ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     mem::ManuallyDrop,
@@ -36,6 +37,31 @@ pub fn sync_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn temporary_file(parent: &Path, name: &OsStr) -> Result<(PathBuf, File)> {
+    for _ in 0..128 {
+        let temporary = parent.join(format!(
+            ".{}.{}-{}",
+            name.to_string_lossy(),
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&temporary)
+        {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(invalid(
+        "publication temporary name collision limit exceeded",
+    ))
+}
+
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
@@ -43,19 +69,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let name = path
         .file_name()
         .ok_or_else(|| invalid("publication has no filename"))?;
-    let temporary = parent.join(format!(
-        ".{}.{}-{}",
-        name.to_string_lossy(),
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    // Never remove an occupied name: it may be another writer's interrupted intent.
+    let (temporary, mut file) = temporary_file(parent, name)?;
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;

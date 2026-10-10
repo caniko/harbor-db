@@ -429,8 +429,7 @@ pub fn finalize(
     verify.leases = leases.to_vec();
     process::execute(&verify)?;
     let manifest_path = strict(&base.join("backup_manifest"))?;
-    let manifest_bytes = bytes(&manifest_path)?;
-    let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
+    let (manifest, manifest_digest) = super::backup_manifest::read(&manifest_path)?;
     let ranges = ranges(&manifest)?;
     let observed = query_json(
         config,
@@ -482,7 +481,7 @@ pub fn finalize(
     let stop_text = format!("{:X}/{:X}", stop >> 32, stop & 0xFFFF_FFFF);
     let mut metadata = json!({"version":1,"capture_id":capture_id,"backup_id":backup_id,"pg_major":writer_fence::major(config)?.parse::<u32>().map_err(|_| invalid("invalid major"))?,
         "system_identifier":settings["system_identifier"],"epoch_id":token,"writer_fence_token":token,
-        "manifest_sha256":codec::digest(&manifest_bytes),"record_contract_sha256":recovery::contract(settings)?,
+        "manifest_sha256":manifest_digest,"record_contract_sha256":recovery::contract(settings)?,
         "record_hashes":records,"backup_stop_lsn":stop_text,"wal_segment_bytes":segment,"timeline":timeline,"completed_at":captured_at});
     let pin = strict(&local.join("pins").join(format!("{capture_id}.json")))?;
     let content = if let Some(content) = optional_bytes(&pin)? {

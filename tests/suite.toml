@@ -1008,7 +1008,7 @@ argv_prefix = ["cargo", "test", "--locked", "--features", "testing", "--test", "
 argv_suffix = ["--", "--exact"]
 profile = "fast"
 maturity = "crystallized"
-selectors = ["candidate_redirects_and_duplicate_publication_fail_closed", "retained_candidate_contains_edits_and_new_sources_but_no_build_or_private_state"]
+selectors = ["candidate_redirects_and_duplicate_publication_fail_closed", "retained_candidate_contains_edits_and_new_sources_but_no_build_or_private_state", "generated_hook_link_is_excluded_with_present_or_absent_store_target", "dangling_source_symlink_is_rejected_instead_of_silently_omitted"]
 
 [[inventories]]
 origin = "rust"
@@ -3883,7 +3883,7 @@ profile = "integration"
 maturity = "crystallized"
 deadline_seconds = 120
 resources = { cpu = 2, memory_mib = 512, disk_mib = 512, exclusive = [] }
-selectors = ["concurrent_native_file_publishers_acknowledge_one_complete_winner_and_refuse_repeat", "python_and_native_preserve_published_files_and_trees_then_retry_retained_intent"]
+selectors = ["concurrent_native_file_publishers_acknowledge_one_complete_winner_and_refuse_repeat", "python_and_native_preserve_published_files_and_trees_then_retry_retained_intent", "atomic_write_survives_stale_pid_temporary_without_deleting_it"]
 
 [[coverage]]
 case = "native.durable-publication.concurrent_native_file_publishers_acknowledge_one_complete_winner_and_refuse_repeat"
@@ -4135,7 +4135,21 @@ maturity = "crystallized"
 platforms = ["x86_64-linux", "aarch64-linux"]
 deadline_seconds = 120
 resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
-selectors = ["invalid_repository_protocol_is_rejected_before_mutation_in_both_readers", "generated_timestamp_is_not_a_legacy_completed_identifier", "identical_metadata_carriers_preserve_complete_legacy_and_selected_bindings", "capture_drift_and_invalid_metadata_are_rejected_without_writes", "unsafe_selectors_and_redirected_carriers_are_rejected_without_writes", "protocol_and_exact_immutable_pin_carrier_are_required", "actual_manifest_ranges_bind_timeline_stop_and_target", "forged_source_records_or_token_never_certify_admit_import_or_prepare", "selected_generation_ignores_global_snapshot_and_uncommitted_capture", "primary_snapshot_retry_returns_frozen_generation_without_republishing", "preparation_without_selected_capture_requires_explicit_producer_without_writes", "source_local_primary_snapshot_requires_fence_before_evidence_mutation"]
+selectors = ["invalid_repository_protocol_is_rejected_before_mutation_in_both_readers", "generated_timestamp_is_not_a_legacy_completed_identifier", "identical_metadata_carriers_preserve_complete_legacy_and_selected_bindings", "capture_drift_and_invalid_metadata_are_rejected_without_writes", "unsafe_selectors_and_redirected_carriers_are_rejected_without_writes", "protocol_and_exact_immutable_pin_carrier_are_required", "actual_manifest_ranges_bind_timeline_stop_and_target", "forged_source_records_or_token_never_certify_admit_import_or_prepare", "selected_generation_ignores_global_snapshot_and_uncommitted_capture", "primary_snapshot_retry_returns_frozen_generation_without_republishing", "preparation_without_selected_capture_requires_explicit_producer_without_writes", "source_local_primary_snapshot_requires_fence_before_evidence_mutation", "source_local_cutover_hashes_selected_snapshot_with_absent_or_unrelated_legacy_carrier", "source_local_transition_binds_selected_snapshot_and_rejects_changed_resume"]
+
+[[inventories]]
+origin = "rust"
+id_prefix = "native.backup-manifest."
+selector_prefix = "storage::backup_manifest::tests::"
+source = "src/storage/backup_manifest.rs"
+argv_prefix = ["cargo", "test", "--locked", "--all-features", "--lib"]
+argv_suffix = ["--", "--exact"]
+profile = "integration"
+maturity = "crystallized"
+platforms = ["x86_64-linux", "aarch64-linux"]
+deadline_seconds = 120
+resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
+selectors = ["large_file_inventory_preserves_complete_byte_digest_and_wal_ranges", "rejects_malformed_inventory_and_trailing_bytes"]
 
 [[inventories]]
 origin = "rust"

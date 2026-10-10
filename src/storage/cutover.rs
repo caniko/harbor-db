@@ -309,7 +309,7 @@ pub fn check_resource(
         }
         let _held = accepted;
         Ok(
-            json!({"database_snapshot_sha256":digest(Path::new(string(settings,"snapshot_file")?))?,"corpus_requirements":requirements}),
+            json!({"database_snapshot_sha256":digest(&recovery::source_snapshot_path(&database, settings)?)?,"corpus_requirements":requirements}),
         )
     }
 }

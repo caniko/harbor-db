@@ -296,8 +296,9 @@ def check_resource(config, *, phase, now=None, candidate=None):
                     raise ValueError(f"candidate schema/recovery compatibility check failed: {check['database']}")
         with recovery.admission(database, now=now, verify_contents=phase in ("activate", "certify"),
                                 socket_dir=config.get("socket_dir", "/run/postgresql"), port=config.get("port", 5432)):
+            snapshot_path = recovery.source_snapshot_path(database, settings)
             if phase == "certify" and recovery.records(database, settings, config.get("socket_dir", "/run/postgresql"),
-                                                       config.get("port", 5432)) != read_json(settings["snapshot_file"])["records"]:
+                                                       config.get("port", 5432)) != read_json(snapshot_path)["records"]:
                 raise ValueError("live database records differ from the recovery snapshot")
             requirements = {}
             for name, checks in config.get("corpus_checks", {}).items():
@@ -308,7 +309,7 @@ def check_resource(config, *, phase, now=None, candidate=None):
                     if not isinstance(paths, list):
                         raise TypeError("database corpus query must return a JSON array of paths")
                     requirements[name].extend({"root": check["root"], **item} for item in paths)
-            return {"database_snapshot_sha256": digest(settings["snapshot_file"]), "corpus_requirements": requirements}
+            return {"database_snapshot_sha256": digest(snapshot_path), "corpus_requirements": requirements}
 
 
 def execute_worker(path, name, config, phase, timeout, extra=(), *, command_name="check", as_root=False):

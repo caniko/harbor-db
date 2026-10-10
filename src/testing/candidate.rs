@@ -23,6 +23,7 @@ pub struct Candidate {
 
 fn selected(path: &Path) -> bool {
     !path.components().any(|c| matches!(c, Component::Normal(n) if n == "target" || n == "__pycache__" || n == ".git" || n == ".direnv" || n == ".nix-results")) &&
+        path != Path::new(".pre-commit-config.yaml") &&
         path.file_name().is_some_and(|n| n != ".envrc") && path.extension().is_none_or(|e| e != "pyc")
 }
 
@@ -64,8 +65,14 @@ pub fn retain(source: &Path, destination: &Path) -> Result<Candidate> {
         {
             return Err(supervisor::error("invalid candidate source path"));
         }
-        if selected(&name) && source.join(&name).try_exists()? {
-            names.insert(name);
+        if selected(&name) {
+            match fs::symlink_metadata(source.join(&name)) {
+                Ok(_) => {
+                    names.insert(name);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
+            }
         }
     }
     let mut files = Vec::new();

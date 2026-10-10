@@ -1,5 +1,7 @@
 //! Reader fixtures only: these binaries do not qualify a physical WAL producer.
-use harbor_db::storage::{codec, durable, process, recovery, recovery_repository, writer_fence};
+use harbor_db::storage::{
+    codec, cutover, durable, pg_core, process, recovery, recovery_repository, writer_fence,
+};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -648,4 +650,100 @@ fn source_local_primary_snapshot_requires_fence_before_evidence_mutation() {
         // Independent certification policy intentionally permits false.
         assert!(recovery::policy(&f.config).is_ok());
     }
+}
+
+impl Fixture {
+    fn cutover_resource(&self) -> Value {
+        durable::write_json(
+            &self.p("state/identity.json"),
+            &pg_core::identity(&self.config, "12345").unwrap(),
+        )
+        .unwrap();
+        fs::write(self.p("state/lock"), "").unwrap();
+        durable::write_json(&self.p("database.json"), &self.config).unwrap();
+        json!({"kind":"postgres", "config":self.p("database.json"), "socket_dir":"/run/postgresql", "port":5432})
+    }
+    fn python_check(&self, script: &str, arguments: Vec<String>) -> Value {
+        let mut argv = vec!["python3".into(), "-B".into(), "-c".into(), script.into()];
+        argv.extend(arguments);
+        let mut spec = process::CommandSpec::new(argv);
+        spec.environment = Some(std::collections::BTreeMap::from([
+            (
+                "PYTHONPATH".into(),
+                format!("{}/python", env!("CARGO_MANIFEST_DIR")),
+            ),
+            ("PATH".into(), std::env::var("PATH").unwrap()),
+        ]));
+        serde_json::from_slice(&process::execute(&spec).unwrap()).unwrap()
+    }
+}
+
+#[test]
+fn source_local_cutover_hashes_selected_snapshot_with_absent_or_unrelated_legacy_carrier() {
+    let mut f = Fixture::new();
+    f.copied_source();
+    let config = f.cutover_resource();
+    let expected = codec::file_digest(&f.snapshot_path()).unwrap();
+    for legacy in [
+        None,
+        Some(json!({"writer_fence_token":"unrelated", "records":{}})),
+    ] {
+        if let Some(value) = legacy {
+            durable::write_json(&f.p("backup/evidence/snapshot.json"), &value).unwrap();
+        }
+        let before = unchanged_files(f.root.path());
+        for phase in ["preflight", "activate", "certify"] {
+            let native = cutover::check_resource(&config, phase, Some(f.now), None).unwrap();
+            assert_eq!(native["database_snapshot_sha256"], expected);
+            let script = "import json,sys; from harbor_db import cutover\ntry: print(json.dumps(cutover.check_resource(json.loads(sys.argv[1]),phase=sys.argv[2],now=int(sys.argv[3]))))\nexcept Exception as e: print(json.dumps({'error':str(e)}))";
+            let python = f.python_check(
+                script,
+                vec![config.to_string(), phase.into(), f.now.to_string()],
+            );
+            assert_eq!(python, native, "{phase}: {python}");
+        }
+        assert_eq!(unchanged_files(f.root.path()), before);
+    }
+}
+
+#[test]
+fn source_local_transition_binds_selected_snapshot_and_rejects_changed_resume() {
+    let mut f = Fixture::new();
+    f.copied_source();
+    durable::write_json(&f.p("database.json"), &f.config).unwrap();
+    let admitted = recovery::live_check(
+        &f.config,
+        std::path::Path::new("/run/postgresql"),
+        5432,
+        Some(f.now),
+    )
+    .unwrap();
+    let expected = codec::file_digest(&f.snapshot_path()).unwrap();
+    let config = json!({"postgres_manifest":f.p("database.json"),"storage_package":"/unused","postgres_socket":"/run/postgresql","postgres_port":5432});
+    let mut record = json!({"writer_fence_token":f.meta["writer_fence_token"]});
+    let script = "import json,sys; from unittest.mock import patch; from harbor_db import application_transition\nc,r,accepted=map(json.loads,sys.argv[1:])\ntry:\n with patch.object(application_transition,'worker',return_value=accepted): print(json.dumps(application_transition.primary_evidence(c,r,[])))\nexcept Exception as e: print(json.dumps({'error':str(e)}))";
+    for legacy in [
+        None,
+        Some(json!({"writer_fence_token":"unrelated", "records":{}})),
+    ] {
+        if let Some(value) = legacy {
+            durable::write_json(&f.p("backup/evidence/snapshot.json"), &value).unwrap();
+        }
+        let result = f.python_check(
+            script,
+            vec![config.to_string(), record.to_string(), admitted.to_string()],
+        );
+        assert_eq!(result, expected);
+    }
+    record["primary_snapshot_sha256"] = json!("0".repeat(64));
+    let result = f.python_check(
+        script,
+        vec![config.to_string(), record.to_string(), admitted.to_string()],
+    );
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("changed during transition resume")
+    );
 }

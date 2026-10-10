@@ -306,10 +306,10 @@ pub fn primary_evidence(config: &Value, record: &Value, leases: &[RawFd]) -> Res
         ));
     }
     let database = durable::read_config_json(Path::new(string(config, "postgres_manifest")?))?;
-    let path = Path::new(string(&database["recovery"], "snapshot_file")?);
-    let snapshot = durable::read_json(path)?;
+    let path = super::recovery::source_snapshot_path(&database, &database["recovery"])?;
+    let snapshot = durable::read_json(&path)?;
     if snapshot["writer_fence_token"] != record["writer_fence_token"]
-        || result["snapshot_sha256"] != codec::file_digest(path)?
+        || result["snapshot_sha256"] != codec::file_digest(&path)?
     {
         return Err(invalid(
             "primary snapshot does not bind the same held writer fence",

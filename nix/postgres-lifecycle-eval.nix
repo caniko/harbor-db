@@ -71,6 +71,28 @@
     ];
   };
   preparationHook = pkgs.writeText "recovery-preparation-hook" withPreparation.config.system.preSwitchChecks."00-0-harbor-db-postgresql-prepare";
+  sourceLocalPolicy = {
+    prepare,
+    fenced,
+  }:
+    eval.extendModules {
+      modules = [
+        {
+          services.harbor-db.postgresql = {
+            recovery.repositoryProtocol = "source-local-v1";
+            recovery.requireWriterFence = lib.mkForce fenced;
+            recoveryPreparation =
+              if prepare
+              then withPreparation.config.services.harbor-db.postgresql.recoveryPreparation
+              else null;
+          };
+        }
+      ];
+    };
+  sourceLocalFenceRejected = policy:
+    lib.any (entry:
+      !entry.assertion && entry.message == "Managed source-local recovery preparation requires writer fencing; read-only certification and retired enrollment may remain unfenced.")
+    policy.config.assertions;
 in
   mkEvalCheck {
     name = "harbor-db-postgres-lifecycle-eval";
@@ -81,6 +103,23 @@ in
         ${pkgs.systemd}/bin/systemd-run ${pkgs.systemd}/bin/systemctl
     '';
     assertions = [
+      {
+        name = "source-local-producer-fence-policy";
+        assertion =
+          sourceLocalFenceRejected (sourceLocalPolicy {
+            prepare = true;
+            fenced = false;
+          })
+          && !(sourceLocalFenceRejected (sourceLocalPolicy {
+            prepare = true;
+            fenced = true;
+          }))
+          && !(sourceLocalFenceRejected (sourceLocalPolicy {
+            prepare = false;
+            fenced = false;
+          }));
+        message = "Managed source-local capture rejects an unfenced policy without banning read-only certification or retired enrollment.";
+      }
       {
         name = "writer-fence-client-startup";
         assertion =

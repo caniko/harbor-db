@@ -64,3 +64,73 @@ fn candidate_redirects_and_duplicate_publication_fail_closed() {
     candidate::retain(&source, &destination).unwrap();
     assert!(candidate::retain(&source, &destination).is_err());
 }
+
+#[test]
+fn generated_hook_link_is_excluded_with_present_or_absent_store_target() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&source)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(source.join("source.rs"), "candidate source").unwrap();
+    let hook = source.join(".pre-commit-config.yaml");
+    for (index, target) in [
+        temp.path().join("generated-hook"),
+        temp.path().join("absent-hook"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index == 0 {
+            fs::write(&target, "generated hook").unwrap();
+        }
+        std::os::unix::fs::symlink(target, &hook).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "."])
+                .current_dir(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let retained =
+            candidate::retain(&source, &temp.path().join(format!("retained-{index}"))).unwrap();
+        assert_eq!(
+            fs::read(retained.source.join("source.rs")).unwrap(),
+            b"candidate source"
+        );
+        assert!(
+            retained
+                .source
+                .join(".pre-commit-config.yaml")
+                .symlink_metadata()
+                .is_err()
+        );
+        candidate::verify(&retained).unwrap();
+        fs::remove_file(&hook).unwrap();
+    }
+}
+
+#[test]
+fn dangling_source_symlink_is_rejected_instead_of_silently_omitted() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&source)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(source.join("source.rs"), "candidate source").unwrap();
+    std::os::unix::fs::symlink("absent", source.join("redirect.rs")).unwrap();
+    assert!(candidate::retain(&source, &temp.path().join("rejected")).is_err());
+}

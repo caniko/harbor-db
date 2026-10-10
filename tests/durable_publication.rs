@@ -88,7 +88,7 @@ fn occupied(output: &Output, native: bool) {
 }
 
 // Only a launch barrier: publication is executed by the unmodified public CLI.
-const BARRIER: &str = "import os,sys\nprint('ready',flush=True)\nassert sys.stdin.buffer.read(1)==b'G'\nos.execv(sys.argv[1],sys.argv[1:])\n";
+const BARRIER: &str = "import os,sys\nprint('ready',flush=True)\nassert os.read(0,1)==b'G'\nos.execv(sys.argv[1],sys.argv[1:])\n";
 
 struct Worker {
     child: Child,
@@ -131,17 +131,19 @@ impl Worker {
     }
 
     fn start(source: &Path, destination: &Path) -> Self {
+        Self::start_argv(&[
+            env!("CARGO_BIN_EXE_harbor-db-durable"),
+            "publish-file",
+            source.to_str().unwrap(),
+            destination.to_str().unwrap(),
+        ])
+    }
+
+    fn start_argv(argv: &[&str]) -> Self {
         let mut command = Command::new(python());
         command
-            .args([
-                "-B",
-                "-c",
-                BARRIER,
-                env!("CARGO_BIN_EXE_harbor-db-durable"),
-                "publish-file",
-            ])
-            .arg(source)
-            .arg(destination)
+            .args(["-B", "-c", BARRIER])
+            .args(argv)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -191,6 +193,41 @@ impl Drop for Worker {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+#[test]
+fn atomic_write_survives_stale_pid_temporary_without_deleting_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let destination = temp.path().join("receipt.json");
+    fs::write(&destination, b"previous accepted receipt\n").unwrap();
+    let mut worker = Worker::start_argv(&[
+        env!("CARGO_BIN_EXE_harbor-db-durable"),
+        "write",
+        destination.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        worker.ready.recv_timeout(Duration::from_secs(15)).unwrap(),
+        "ready\n"
+    );
+    let stale = temp
+        .path()
+        .join(format!(".receipt.json.{}-0", worker.child.id()));
+    fs::write(&stale, b"interrupted publication\n").unwrap();
+    let before = snapshot(&stale);
+    worker
+        .child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"Gcomplete replacement receipt\n")
+        .unwrap();
+    let output = worker.finish();
+    accepted(&output);
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        b"complete replacement receipt\n"
+    );
+    assert_eq!(snapshot(&stale), before);
 }
 
 #[test]

@@ -319,6 +319,7 @@ pattern = re.compile(r'#\[(?:tokio::)?test(?:\([^\]]*\))?\](?:\s*#\[[^\]]*\])*\s
 sources = list(pathlib.Path('tests').rglob('*.rs'))
 prefixes = {'src/planner/tests.rs': 'tests::',
             'src/bin/home-manager-backup.rs': 'tests::',
+            'src/storage/backup_manifest.rs': 'storage::backup_manifest::tests::',
             'src/storage/recovery_capture.rs': 'storage::recovery_capture::tests::'}
 sources += [pathlib.Path(path) for path in prefixes]
 tests = []

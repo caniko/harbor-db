@@ -135,10 +135,7 @@ pub fn select(config: &Value, settings: &Value, now: i64) -> Result<SelectedCapt
     }
     let directory = recovery::absolute(&root.join("base").join(backup_id))?;
     let manifest = recovery::absolute(&directory.join("backup_manifest"))?;
-    let mut manifest_bytes = Vec::new();
-    durable::open_regular(&manifest, false)?.read_to_end(&mut manifest_bytes)?;
-    let manifest_digest = codec::digest(&manifest_bytes);
-    let manifest_value: Value = serde_json::from_slice(&manifest_bytes)?;
+    let (manifest_value, manifest_digest) = super::backup_manifest::read(&manifest)?;
     let ranges = manifest_value["WAL-Ranges"]
         .as_array()
         .filter(|ranges| !ranges.is_empty())

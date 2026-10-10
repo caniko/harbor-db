@@ -339,6 +339,10 @@ in {
         message = "Managed recovery preparation requires a recovery policy and absolute executable argv.";
       }
       {
+        assertion = preparation == null || cfg.recovery == null || cfg.recovery.repositoryProtocol != "source-local-v1" || cfg.recovery.requireWriterFence;
+        message = "Managed source-local recovery preparation requires writer fencing; read-only certification and retired enrollment may remain unfenced.";
+      }
+      {
         assertion =
           preparation
           == null
