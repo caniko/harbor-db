@@ -371,8 +371,9 @@ For catalog runs, `--base` must be an absolute private storage path outside the
 checkout, and `--id` must be a new ASCII alphanumeric/hyphen/underscore identity.
 The runner retains tracked and nonignored untracked regular sources, including
 local edits, under `BASE/ID-candidate/source`. It excludes `.git`, `.direnv`,
-`.envrc`, build targets, `.nix-results` output/GC-root state, and Python bytecode.
-Symlinks/special sources are rejected.
+`.envrc`, build targets, `.nix-results` output/GC-root state, Python bytecode, and
+the root `.pre-commit-config.yaml` generated development-shell link. Other
+symlinks/special sources, including dangling links, are rejected.
 The retained inventory covers the entire snapshot, not just selected test files.
 Candidate and run identity reuse is rejected.
 

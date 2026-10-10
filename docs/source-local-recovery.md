@@ -20,6 +20,9 @@ preserve their bytes and the original completion timestamp. Recovery readers
 consume the selected generation's snapshot. The configured legacy snapshot path
 continues to locate the evidence lease and legacy-protocol snapshot.
 Recovery metadata and retention pins are outside `base/`.
+Managed source-local preparation requires `requireWriterFence = true` at module
+evaluation. Read-only independent certification and retired bootstrap enrollment
+can disable the local fence requirement while consuming the same bound capture.
 
 A capture references a verified service-produced physical backup and its actual
 manifest digest, primary identity, major, timeline and stop LSN. Its fenced record

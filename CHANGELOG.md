@@ -26,6 +26,19 @@
   fields while validating required fields before deleting recovery data.
 - Isolate disposable physical recovery authentication from primary-local fence
   selectors while retaining copied configuration bytes and explicit thaw.
+- Resolve the selected immutable snapshot during source-local cutover and
+  application transitions in both runtimes, including transition resume.
+- Stream physical backup manifests without imposing the small metadata-carrier
+  limit, and preserve interrupted atomic writes when temporary names collide.
+- Exclude the generated development-shell hook link from candidate retention
+  while rejecting dangling source links. Synchronize the reboot fence fixture
+  with completion of PostgreSQL setup before strict live-session inspection.
+- Reject unfenced managed source-local preparation during evaluation while
+  preserving read-only certification and retired enrollment policies.
+- Capture the expected source-local WAL rejection diagnostic in the fixture and
+  read host identity through the available kernel interface.
+- Keep all features enabled once in the documentation build and use the supported
+  NixOS test interface for the module smoke gate and its JUnit output.
 
 ### Compatibility
 
