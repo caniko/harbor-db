@@ -27,6 +27,8 @@
   owning-deadline fixture while still requiring its delayed restore to time out.
 - Publish the controlled restore worker's complete PID atomically before exposing
   the cancellation barrier, eliminating an observed empty-carrier race.
+- Coordinate the oversized detached-launcher fixture's exec with parallel workers
+  so inherited writable descriptors cannot cause a transient text-busy failure.
 - Reject enabled backup project names that cannot be represented by the runtime
   resource contract, including dotted, at-sign and overlength names.
 - Give logical restoration the owning backup contract's complete bounded budget

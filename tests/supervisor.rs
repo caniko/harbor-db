@@ -565,12 +565,19 @@ os.execv(cli, [cli, role, run] + (['--once'] if role == 'observe' else []))
 #[test]
 fn detached_nix_case_retains_launcher_path_without_service_manager_environment() {
     use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
     let tmp = tempfile::tempdir().unwrap();
     let stub = tmp.path().join("wrapper-bin");
     fs::create_dir(&stub).unwrap();
-    let python = std::process::Command::new("python3")
+    let mut command = std::process::Command::new("python3");
+    command
         .args(["-c", "import sys; print(sys.executable)"])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let python = process::spawn(&mut command)
+        .unwrap()
+        .wait_with_output()
         .unwrap();
     assert!(python.status.success());
     let python = String::from_utf8(python.stdout).unwrap();
@@ -624,7 +631,8 @@ if role == 'worker':
     )
     .unwrap();
     drop(file);
-    let output = std::process::Command::new(&launcher)
+    let mut command = std::process::Command::new(&launcher);
+    command
         .args(["run", "--spec"])
         .arg(spec_path)
         .arg("--base")
@@ -632,7 +640,14 @@ if role == 'worker':
         .args(["--id", "detached-nix-path"])
         .env("PATH", &stub)
         .env("STUB_LOG", &log)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Unrelated forks may have copied the writable launcher descriptor before
+    // drop(file). Wait for their coordinated exec handshakes before executing it.
+    let output = process::spawn(&mut command)
+        .unwrap()
+        .wait_with_output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let run = tmp.path().join("detached-nix-path");

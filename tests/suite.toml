@@ -6,7 +6,7 @@ case = "native.supervisor.detached_nix_case_retains_launcher_path_without_servic
 capability = "suite-cli"
 operation = "harbor-db-test.run"
 dimension = "compatibility"
-evidence = "The actual detached CLI runs from an executable forced beyond 16 MiB, retains identical complete bytes, and qualifies a controlled Nix case with a missing service-manager PATH by using the retained launcher environment in both service roles."
+evidence = "The actual detached CLI runs from an executable forced beyond 16 MiB through the coordinated fork/exec path, retains identical complete bytes, and qualifies a controlled Nix case with a missing service-manager PATH by using the retained launcher environment in both service roles."
 
 [[coverage]]
 case = "nix.x86_64-linux.native-storage-eval"
