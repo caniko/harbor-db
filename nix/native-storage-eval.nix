@@ -4,6 +4,9 @@
   defaultModule ? module,
   nativePackage,
 }: let
+  backupCommands =
+    pkgs.lib.genAttrs ["capture" "restore" "verify" "cleanup"] (stage:
+      ["${pkgs.coreutils}/bin/true" "{backup}"] ++ pkgs.lib.optional (stage != "capture") "{workspace}");
   adapterFixture = {config, ...}: {
     imports = [./pg-backup.nix];
     system.stateVersion = "26.05";
@@ -33,7 +36,7 @@
         user = "fixture";
         group = "fixture";
         directory = "/var/lib/fixture-backup";
-        commands = pkgs.lib.genAttrs ["capture" "restore" "verify" "cleanup"] (_: ["${pkgs.coreutils}/bin/true"]);
+        commands = backupCommands;
       };
       transition = {
         enable = true;
@@ -65,7 +68,7 @@
           user = "fixture";
           group = "fixture";
           directory = "/var/lib/fixture-backup";
-          commands = pkgs.lib.genAttrs ["capture" "restore" "verify" "cleanup"] (_: ["${pkgs.coreutils}/bin/true"]);
+          commands = backupCommands;
         };
       }
     ];
@@ -73,6 +76,13 @@
   in
     rejected == [];
   boundaryName = count: pkgs.lib.concatStrings (builtins.genList (_: "a") count);
+  backupPolicyAccepted = backup: let
+    configured = evaluate [module {services.harbor-db.projects.fixture.backup = backup;}];
+    rejected = builtins.filter (assertion: !assertion.assertion && pkgs.lib.hasPrefix "Harbor DB fixture backup " assertion.message) configured.config.assertions;
+  in
+    rejected == [];
+  withoutPlaceholder = stage: placeholder:
+    backupCommands // {${stage} = builtins.filter (arg: arg != placeholder) backupCommands.${stage};};
   directEval = evaluate [
     ./module.nix
     ./postgres-lifecycle.nix
@@ -99,6 +109,22 @@ in
     name = "harbor-db-native-storage-eval";
     resultMessage = "Native storage package is selected through the module argument";
     assertions = [
+      {
+        name = "backup-command-placeholder-boundaries";
+        message = "All stages require a literal backup argument, and restore/verify/cleanup also require a literal workspace argument.";
+        assertion =
+          backupPolicyAccepted {commands = pkgs.lib.mkForce backupCommands;}
+          && pkgs.lib.all (stage: !backupPolicyAccepted {commands = pkgs.lib.mkForce (withoutPlaceholder stage "{backup}");}) ["capture" "restore" "verify" "cleanup"]
+          && pkgs.lib.all (stage: !backupPolicyAccepted {commands = pkgs.lib.mkForce (withoutPlaceholder stage "{workspace}");}) ["restore" "verify" "cleanup"]
+          && !backupPolicyAccepted {commands = pkgs.lib.mkForce (backupCommands // {capture = ["${pkgs.coreutils}/bin/true" "--backup={backup}"];});};
+      }
+      {
+        name = "backup-credential-name-boundaries";
+        message = "Credential IDs must be bounded filename-safe ASCII names before generating LoadCredential.";
+        assertion =
+          pkgs.lib.all (name: backupPolicyAccepted {credentials.${name} = "/run/fixture-secret";}) ["A_0-z.token" (boundaryName 255)]
+          && pkgs.lib.all (name: !backupPolicyAccepted {credentials.${name} = "/run/fixture-secret";}) ["" "." ".." "a:b" "a/b" "a b" "a\n" (boundaryName 256)];
+      }
       {
         name = "backup-resource-name-boundaries";
         message = "Enabled backup project names must match the runtime resource alphabet and 1..128-byte boundary.";

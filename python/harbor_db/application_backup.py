@@ -60,12 +60,19 @@ def inventory(path):
     if path.is_symlink() or not path.is_dir():
         raise ValueError("backup directory is missing or redirected")
     for entry in sorted(path.rglob("*")):
+        relative = str(entry.relative_to(path))
+        try:
+            relative.encode("utf-8")
+        except UnicodeError:
+            raise ValueError("backup artifact path is not UTF-8") from None
         mode = entry.lstat().st_mode
         if stat.S_ISDIR(mode):
             continue
         if not stat.S_ISREG(mode):
             raise ValueError("backup contains redirected or special files")
-        result[str(entry.relative_to(path))] = digest(entry)
+        if relative in result:
+            raise ValueError("backup artifact path is duplicated")
+        result[relative] = digest(entry)
     if not result:
         raise ValueError("application capture produced no artifacts")
     return result

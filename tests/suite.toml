@@ -13,7 +13,7 @@ case = "nix.x86_64-linux.native-storage-eval"
 capability = "nixos"
 operation = "nixos.application-backup"
 dimension = "rejection"
-evidence = "nix/native-storage-eval.nix backup-resource-name-boundaries admits the mixed ASCII resource alphabet and a 128-byte name; it requires the actual NixOS backup-name assertion to reject dotted, at-sign, empty and 129-byte enabled project names."
+evidence = "nix/native-storage-eval.nix checks the actual backup module assertions: mixed ASCII resource names and the 128-byte boundary, required literal stage-specific placeholders, and bounded filename-safe credential IDs. Dotted/at-sign/empty/overlength resources, missing or embedded placeholders, and invalid credential IDs are rejected."
 
 [[inventories]]
 origin = "rust"
@@ -1387,7 +1387,21 @@ source = "tests/application_storage.rs"
 argv_prefix = ["cargo", "test", "--locked", "--features", "testing", "--test", "application_storage"]
 argv_suffix = ["--", "--exact"]
 maturity = "crystallized"
-selectors = ["backup_success_preserves_prior_point_after_failure_and_detects_hash_age_and_tools", "redirected_mutating_or_incomplete_capture_cannot_publish", "missing_anchor_is_never_recreated_and_cleanup_failure_retains_private_workspace", "interrupted_capture_resumes_only_immutable_intent_and_retains_evidence", "backup_children_retain_coordinator_and_inherited_leases", "independent_certification_checks_host_privacy_hashes_and_retains_receipts", "provisioning_validation", "inventory_rejects_redirects"]
+selectors = ["backup_success_preserves_prior_point_after_failure_and_detects_hash_age_and_tools", "redirected_mutating_or_incomplete_capture_cannot_publish", "missing_anchor_is_never_recreated_and_cleanup_failure_retains_private_workspace", "interrupted_capture_resumes_only_immutable_intent_and_retains_evidence", "backup_children_retain_coordinator_and_inherited_leases", "independent_certification_checks_host_privacy_hashes_and_retains_receipts", "provisioning_validation", "inventory_rejects_redirects", "artifact_inventory_rejects_non_utf8_files_and_directories_without_collapsing_valid_names", "lossy_capture_paths_cannot_publish_or_replace_the_previous_restore_point_in_either_engine"]
+
+[[coverage]]
+case = "native.application_storage.lossy_capture_paths_cannot_publish_or_replace_the_previous_restore_point_in_either_engine"
+capability = "application-backup"
+operation = "harbor-db-application-backup.capture"
+dimension = "rejection"
+evidence = "Each actual engine rejects a capture containing colliding lossy 0xff/0xfe filenames, leaves no published point or acceptance envelope, cleans its workspace and preserves the prior LAST_SUCCESS/acceptance bytes and successful inspection."
+
+[[coverage]]
+case = "native.application_storage.artifact_inventory_rejects_non_utf8_files_and_directories_without_collapsing_valid_names"
+capability = "application-backup"
+operation = "harbor-db-application-backup.inspect"
+dimension = "rejection"
+evidence = "The real inventory rejects raw non-UTF-8 file and directory names; literal replacement characters and distinct composed/decomposed UTF-8 names retain separate exact digests. Removing rejected paths restores the identical valid inventory."
 
 [[inventories]]
 origin = "rust"

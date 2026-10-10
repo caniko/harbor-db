@@ -64,6 +64,13 @@ the interface. Physical cluster backups remain a separate `pgBackup` contract.
 Enabled backup project names must match `[A-Za-z0-9_-]{1,128}`, the runtime
 resource contract. Invalid names fail NixOS evaluation before a timer is installed.
 
+Backup inventories require UTF-8 relative artifact paths; non-UTF-8 file or
+directory names are rejected before acceptance publication. Every stage requires
+a literal `{backup}` argument; restore, verify and cleanup also require `{workspace}`.
+Embedded fragments such as `--backup={backup}` do not satisfy this contract.
+Credential IDs use `[A-Za-z0-9_.-]{1,255}`, excluding `.` and `..`, and credential
+paths remain runtime paths outside the Nix store.
+
 Arguments equal to `{backup}` and `{workspace}` are substituted as single argv
 elements, without a shell. Capture creates a new directory and writes all artifacts,
 plus `capture.json` with exactly `version = 1`, `consistency` (`quiesced` or

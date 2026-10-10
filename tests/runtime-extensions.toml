@@ -41,7 +41,7 @@ sha256 = "958f1c84f67fd46f7eab054c334dd312c851b74559c032036c08e5e5653bcc69"
 
 [[extensions]]
 path = "python/harbor_db/application_backup.py"
-sha256 = "e7ad0a32af72b27e94e2505595f34f9eee02f2f8734b01a2e9a0d4e5c6a43e27"
+sha256 = "482acd0a54052039701ad1173e4271e435246dc37291cdcc17d69bbfbc21e1f4"
 
 [[extensions]]
 path = "python/harbor_db/postgres_drill.py"

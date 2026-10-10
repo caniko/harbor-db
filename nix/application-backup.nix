@@ -79,6 +79,19 @@ in {
           message = "Harbor DB ${name} backup commands must be absolute.";
         }
         {
+          assertion = lib.all (stage: let
+            argv = p.backup.commands.${stage} or [];
+          in
+            lib.elem "{backup}" argv && (stage == "capture" || lib.elem "{workspace}" argv)) ["capture" "restore" "verify" "cleanup"];
+          message = "Harbor DB ${name} backup command placeholders require a literal {backup} argument in every stage and {workspace} in restore, verify and cleanup.";
+        }
+        {
+          assertion =
+            lib.all (credential:
+              builtins.match "[A-Za-z0-9_.-]{1,255}" credential != null && !(lib.elem credential ["." ".."])) (builtins.attrNames p.backup.credentials);
+          message = "Harbor DB ${name} backup credential names must be filename-safe ASCII IDs of 1..255 bytes, excluding '.' and '..'.";
+        }
+        {
           assertion = lib.all (path: lib.hasPrefix "/" path && !(lib.hasPrefix "/nix/store/" path)) (lib.attrValues p.backup.credentials);
           message = "Harbor DB backup credentials must be runtime paths outside the store.";
         }

@@ -108,16 +108,21 @@ fn walk(root: &Path, path: &Path, result: &mut serde_json::Map<String, Value>) -
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let kind = entry.file_type()?;
+        let entry_path = entry.path();
+        let relative = entry_path
+            .strip_prefix(root)
+            .map_err(|_| invalid("invalid artifact path"))?
+            .to_str()
+            .ok_or_else(|| invalid("backup artifact path is not UTF-8"))?;
         if kind.is_dir() {
-            walk(root, &entry.path(), result)?;
+            walk(root, &entry_path, result)?;
         } else if kind.is_file() {
-            let relative = entry
-                .path()
-                .strip_prefix(root)
-                .map_err(|_| invalid("invalid artifact path"))?
-                .to_string_lossy()
-                .into_owned();
-            result.insert(relative, json!(codec::file_digest(&entry.path())?));
+            if result
+                .insert(relative.into(), json!(codec::file_digest(&entry_path)?))
+                .is_some()
+            {
+                return Err(invalid("backup artifact path is duplicated"));
+            }
         } else {
             return Err(invalid("backup contains redirected or special files"));
         }

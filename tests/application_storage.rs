@@ -29,6 +29,9 @@ if operation=='capture':
     if (base/'symlink').exists(): (backup/'redirect').symlink_to('/etc/passwd')
     if (base/'self_accept').exists(): (backup/'acceptance.json').write_text('{}')
     if (base/'incomplete_semantic').exists(): (backup/'capture.json').write_text('{}')
+    if (base/'non_utf8').exists():
+        for suffix in (b'\xff', b'\xfe'):
+            with open(os.fsencode(backup) + b'/artifact-' + suffix, 'wb') as artifact: artifact.write(suffix)
 elif operation=='restore':
     if (base/'fail_restore').exists(): sys.exit(1)
     (workspace/'restored.json').write_bytes((backup/'records.json').read_bytes())
@@ -224,6 +227,81 @@ fn redirected_mutating_or_incomplete_capture_cannot_publish() {
         );
         assert!(!t.path().join("backups/LAST_SUCCESS").exists());
         assert!(!t.path().join("backups/bad").exists());
+    }
+}
+
+#[test]
+fn artifact_inventory_rejects_non_utf8_files_and_directories_without_collapsing_valid_names() {
+    use std::os::unix::ffi::OsStringExt;
+    let t = tempfile::tempdir().unwrap();
+    let names = ["artifact-\u{fffd}", "artifact-é", "artifact-e\u{301}"];
+    for (index, name) in names.iter().enumerate() {
+        fs::write(t.path().join(name), index.to_string()).unwrap();
+    }
+    let expected = application_backup::inventory(t.path()).unwrap();
+    assert_eq!(expected.as_object().unwrap().len(), names.len());
+    for (index, name) in names.iter().enumerate() {
+        assert_eq!(expected[*name], codec::digest(index.to_string().as_bytes()));
+    }
+    for directory in [false, true] {
+        let mut invalid_paths = Vec::new();
+        for byte in [0xff, 0xfe] {
+            let path = t
+                .path()
+                .join(std::ffi::OsString::from_vec(vec![b'a', byte]));
+            if directory {
+                fs::create_dir(&path).unwrap();
+            } else {
+                fs::write(&path, [byte]).unwrap();
+            }
+            invalid_paths.push(path);
+        }
+        let error = application_backup::inventory(t.path()).unwrap_err();
+        assert!(error.to_string().contains("UTF-8"), "{error}");
+        for path in invalid_paths {
+            if directory {
+                fs::remove_dir(path).unwrap();
+            } else {
+                fs::remove_file(path).unwrap();
+            }
+        }
+        assert_eq!(application_backup::inventory(t.path()).unwrap(), expected);
+    }
+}
+
+#[test]
+fn lossy_capture_paths_cannot_publish_or_replace_the_previous_restore_point_in_either_engine() {
+    for native in [true, false] {
+        let (t, c) = backup_fixture();
+        application_backup::capture(&c, "good", false).unwrap();
+        let previous = fs::read(t.path().join("backups/LAST_SUCCESS")).unwrap();
+        let acceptance = fs::read(t.path().join("backups/good/acceptance.json")).unwrap();
+        fs::write(t.path().join("non_utf8"), b"").unwrap();
+        let result = if native {
+            application_backup::capture(&c, "mixed", false)
+        } else {
+            python_backup(&c, "capture")
+        };
+        assert!(
+            result.is_err(),
+            "non-UTF-8 capture was accepted: {result:?}"
+        );
+        assert!(!t.path().join("backups/mixed").exists());
+        assert!(
+            !t.path()
+                .join("backups/mixed.partial/acceptance.json")
+                .exists()
+        );
+        assert!(!t.path().join("backups/mixed.restore-workspace").exists());
+        assert_eq!(
+            fs::read(t.path().join("backups/LAST_SUCCESS")).unwrap(),
+            previous
+        );
+        assert_eq!(
+            fs::read(t.path().join("backups/good/acceptance.json")).unwrap(),
+            acceptance
+        );
+        application_backup::inspect(&c, &t.path().join("backups/good"), None).unwrap();
     }
 }
 #[test]

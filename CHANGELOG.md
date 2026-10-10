@@ -19,6 +19,10 @@
 
 ### Fixed
 
+- Reject backup manifests with missing literal stage placeholders or invalid
+  credential IDs during evaluation, before installing a permanently failing timer.
+- Reject non-UTF-8 application backup artifact paths in both engines, preserving
+  complete digest inventories and preventing lossy filename collisions.
 - Reject enabled backup project names that cannot be represented by the runtime
   resource contract, including dotted, at-sign and overlength names.
 - Give logical restoration the owning backup contract's complete bounded budget
