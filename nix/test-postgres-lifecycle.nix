@@ -1,9 +1,10 @@
 {
   pkgs,
-  nativePackage ? null,
+  nativePackage ? import ./native-package.nix {inherit pkgs;},
+  interop ? false,
 }: let
-  tool = import ./postgres-package.nix {inherit pkgs nativePackage;};
-  legacyTool = import ./postgres-package.nix {inherit pkgs;};
+  tool = nativePackage;
+  legacyTool = import ./test-python-package.nix {inherit pkgs;};
   sql = pkgs.writeText "acknowledged-save.sql" ''
     CREATE TABLE IF NOT EXISTS saves (
       mutation text PRIMARY KEY, geometry jsonb NOT NULL, review text NOT NULL,
@@ -33,7 +34,7 @@ in
       };
       services.harbor-db.postgresql.enable = true;
       environment.systemPackages = [tool pkgs.postgresql_18 pkgs.python3];
-      system.extraDependencies = pkgs.lib.optional (nativePackage != null) legacyTool;
+      system.extraDependencies = pkgs.lib.optional interop legacyTool;
       # Model the existing unguarded primary for first-rollout live adoption.
       systemd.services.fixture-existing-postgresql = {
         serviceConfig = {
@@ -132,7 +133,7 @@ in
       verify_save()
       machine.succeed("systemctl stop postgresql")
       machine.succeed("runuser -u postgres -- flock -n -x /var/lib/harbor-db/postgresql/lock true")
-      ${pkgs.lib.optionalString (nativePackage != null) ''
+      ${pkgs.lib.optionalString interop ''
         # Both implementations resume the other's persisted authority records.
         # Invoke legacy executables explicitly: normal units remain native.
         machine.succeed("runuser -u postgres -- ${legacyTool}/bin/harbor-db-postgres --config /etc/harbor-db/postgresql.json check")

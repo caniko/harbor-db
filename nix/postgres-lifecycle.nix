@@ -2,7 +2,7 @@
   config,
   lib,
   pkgs,
-  harborDbStoragePackage ? null,
+  harborDbStoragePackage,
   ...
 }: let
   inherit (lib) mkEnableOption mkIf mkOption types;
@@ -88,10 +88,7 @@ in {
     enable = mkEnableOption "adopted PostgreSQL identity guards and staged upgrades";
     package = mkOption {
       type = types.package;
-      default = import ./postgres-package.nix {
-        inherit pkgs;
-        nativePackage = harborDbStoragePackage;
-      };
+      default = harborDbStoragePackage;
       description = "Harbor DB PostgreSQL lifecycle adapter.";
     };
     resource = mkOption {

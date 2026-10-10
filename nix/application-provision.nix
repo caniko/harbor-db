@@ -3,7 +3,7 @@
   lib,
   pkgs,
   options,
-  harborDbStoragePackage ? null,
+  harborDbStoragePackage,
   ...
 }: let
   inherit (lib) mkOption types;
@@ -11,10 +11,7 @@
   unit = types.strMatching "[A-Za-z0-9_@.:-]+\\.service";
   projects = lib.filterAttrs (_: project: project.postgres.provision.enable) config.services.harbor-db.projects;
   policies = lib.mapAttrs (_: project: project.postgres.provision) projects;
-  package = import ./postgres-package.nix {
-    inherit pkgs;
-    nativePackage = harborDbStoragePackage;
-  };
+  package = harborDbStoragePackage;
   manifest = name: policy:
     pkgs.writeText "harbor-db-${name}-provision.json" (builtins.toJSON {
       version = 1;

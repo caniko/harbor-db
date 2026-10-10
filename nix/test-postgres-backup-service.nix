@@ -3,9 +3,10 @@
   nativePackage,
   testPackage,
 }: let
-  lib = pkgs.lib;
+  inherit (pkgs) lib;
   postgres = pkgs.postgresql_18;
-  legacyPackage = import ./postgres-package.nix {inherit pkgs;};
+  legacyPackage = import ./test-python-package.nix {inherit pkgs;};
+  bridge = import ./test-native-bridge.nix {inherit pkgs;};
   tools = [pkgs.bash pkgs.coreutils pkgs.diffutils pkgs.util-linux pkgs.systemd pkgs.findutils pkgs.gnugrep postgres nativePackage];
   fixtureConfig = builtins.toJSON {
     native_package = toString nativePackage;
@@ -18,19 +19,7 @@ in
   pkgs.testers.runNixOSTest {
     name = "harbor-db-native-postgres-backup-service";
     extraDriverArgs = ["--junit-xml" "junit.xml"];
-    extraPythonPackages = ps: [
-      (ps.buildPythonPackage {
-        pname = "harbor-db-test-bridge";
-        version = "1";
-        src = ../python;
-        format = "other";
-        dontBuild = true;
-        installPhase = ''
-          mkdir -p "$out/${ps.python.sitePackages}"
-          cp -r harbor_db "$out/${ps.python.sitePackages}/"
-        '';
-      })
-    ];
+    extraPythonPackages = ps: [(bridge.package ps)];
     defaults = {
       imports = [./pg-backup.nix];
       _module.args.harborDbStoragePackage = nativePackage;
@@ -113,27 +102,10 @@ in
       systemd.timers.pg-basebackup.enable = lib.mkForce false;
     };
     # Python supplies only node objects and the version-1 transport.
-    testScript = ''
-      import os, socket, subprocess
-      from harbor_db.test_bridge import serve
-      control, inherited = socket.socketpair()
-      fixture = subprocess.Popen(
-          ["${testPackage}/bin/harbor-db-postgres-backup-fixture",
-           "--config", ${builtins.toJSON fixtureConfig},
-           "--control-fd", str(inherited.fileno()),
-           "--acceptance", os.path.join(os.environ["out"], "backup-service-acceptance.json")],
-          pass_fds=(inherited.fileno(),))
-      inherited.close()
-      try:
-          serve(control.fileno(), {"primary": primary, "backup": backup})
-      finally:
-          control.close()
-          if fixture.poll() is None:
-              try:
-                  fixture.wait(timeout=30)
-              except subprocess.TimeoutExpired:
-                  fixture.kill()
-                  fixture.wait(timeout=30)
-      assert fixture.returncode == 0, fixture.returncode
-    '';
+    testScript = bridge.script {
+      fixture = "${testPackage}/bin/harbor-db-postgres-backup-fixture";
+      arguments = ["--config" fixtureConfig];
+      nodes = ["primary" "backup"];
+      artifact = "backup-service-acceptance.json";
+    };
   }

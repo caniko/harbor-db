@@ -1,10 +1,12 @@
 {
   pkgs,
-  nativePackage ? null,
+  nativePackage ? import ./native-package.nix {inherit pkgs;},
+  interop ? false,
   testPackage ? null,
 }: let
-  tool = import ./postgres-package.nix {inherit pkgs nativePackage;};
-  legacyTool = import ./postgres-package.nix {inherit pkgs;};
+  tool = nativePackage;
+  legacyTool = import ./test-python-package.nix {inherit pkgs;};
+  bridge = import ./test-native-bridge.nix {inherit pkgs;};
   data = "/var/lib/postgres/18";
   authority = "/var/lib/fence-authority";
   startup = "/var/lib/fence-startup";
@@ -52,21 +54,11 @@
             writer_fence.close_fence(config, sys.argv[2])
   '';
 in
-  assert nativePackage == null || testPackage != null;
+  assert !interop || testPackage != null;
     pkgs.testers.runNixOSTest {
       extraDriverArgs = ["--junit-xml" "junit.xml"];
       extraPythonPackages = ps:
-        pkgs.lib.optional (nativePackage != null) (ps.buildPythonPackage {
-          pname = "harbor-db-test-bridge";
-          version = "1";
-          src = ../python;
-          format = "other";
-          dontBuild = true;
-          installPhase = ''
-            mkdir -p "$out/${ps.python.sitePackages}"
-            cp -r harbor_db "$out/${ps.python.sitePackages}/"
-          '';
-        });
+        pkgs.lib.optional interop (bridge.package ps);
       name = "harbor-db-postgres-writer-fence";
       nodes.machine = {
         imports = [./postgres-lifecycle.nix];
@@ -87,7 +79,7 @@ in
           "d ${authority} 0700 postgres postgres -"
         ];
         environment.systemPackages = [tool pkgs.postgresql_18 pkgs.python3];
-        system.extraDependencies = pkgs.lib.optional (nativePackage != null) legacyTool;
+        system.extraDependencies = [legacyTool];
         systemd.services.fixture-client = {
           requires = ["postgresql.service"];
           after = ["postgresql.service"];
@@ -103,38 +95,25 @@ in
         specialisation.guarded.configuration.services.harbor-db.postgresql.writerFence.blockedUnits = ["fixture-client.service"];
       };
       testScript =
-        if nativePackage != null
-        then ''
-          import os
-          import socket
-          import subprocess
-          from harbor_db.test_bridge import serve
-
-          control, inherited = socket.socketpair()
-          fixture = subprocess.Popen(
-              ["${testPackage}/bin/harbor-db-writer-fence-fixture",
-               "--control-fd", str(inherited.fileno()),
-               "--config", "${manifest}",
-               "--legacy-python-path", "${legacyTool}/lib",
-               "--fault-script", "${interrupt}",
-               "--data-dir", "${data}",
-               "--startup-dir", "${startup}",
-               "--acceptance", os.path.join(os.environ["out"], "writer-fence-acceptance.json")],
-              pass_fds=(inherited.fileno(),),
-          )
-          inherited.close()
-          try:
-              serve(control.fileno(), {"machine": machine})
-          finally:
-              control.close()
-              if fixture.poll() is None:
-                  try:
-                      fixture.wait(timeout=30)
-                  except subprocess.TimeoutExpired:
-                      fixture.kill()
-                      fixture.wait(timeout=30)
-          assert fixture.returncode == 0, fixture.returncode
-        ''
+        if interop
+        then
+          bridge.script {
+            fixture = "${testPackage}/bin/harbor-db-writer-fence-fixture";
+            arguments = [
+              "--config"
+              "${manifest}"
+              "--legacy-python-path"
+              "${legacyTool}/lib"
+              "--fault-script"
+              "${interrupt}"
+              "--data-dir"
+              data
+              "--startup-dir"
+              startup
+            ];
+            nodes = ["machine"];
+            artifact = "writer-fence-acceptance.json";
+          }
         else ''
           import json
           start_all()

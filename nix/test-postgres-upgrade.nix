@@ -1,8 +1,8 @@
 {
   pkgs,
-  nativePackage ? null,
+  nativePackage ? import ./native-package.nix {inherit pkgs;},
 }: let
-  tool = import ./postgres-package.nix {inherit pkgs nativePackage;};
+  tool = nativePackage;
   old = pkgs.postgresql_17;
   new = pkgs.postgresql_18;
   state = "/var/lib/harbor-db/postgresql";

@@ -3,9 +3,10 @@
   nativePackage,
   testPackage,
 }: let
-  lib = pkgs.lib;
+  inherit (pkgs) lib;
   postgres = pkgs.postgresql_18;
-  legacyPackage = import ./postgres-package.nix {inherit pkgs;};
+  legacyPackage = import ./test-python-package.nix {inherit pkgs;};
+  bridge = import ./test-native-bridge.nix {inherit pkgs;};
   tools = [pkgs.bash pkgs.coreutils pkgs.diffutils pkgs.util-linux pkgs.systemd pkgs.findutils pkgs.gnugrep pkgs.gnutar postgres nativePackage];
   fixtureConfig = builtins.toJSON {
     native_package = toString nativePackage;
@@ -19,19 +20,7 @@ in
   pkgs.testers.runNixOSTest {
     name = "harbor-db-native-source-local-recovery";
     extraDriverArgs = ["--junit-xml" "junit.xml"];
-    extraPythonPackages = ps: [
-      (ps.buildPythonPackage {
-        pname = "harbor-db-test-bridge";
-        version = "1";
-        src = ../python;
-        format = "other";
-        dontBuild = true;
-        installPhase = ''
-          mkdir -p "$out/${ps.python.sitePackages}"
-          cp -r harbor_db "$out/${ps.python.sitePackages}/"
-        '';
-      })
-    ];
+    extraPythonPackages = ps: [(bridge.package ps)];
     defaults = {
       virtualisation = {
         memorySize = lib.mkDefault 1024;
@@ -100,27 +89,10 @@ in
       };
     };
     # The bridge supplies transport only; Rust owns ordering, waits and assertions.
-    testScript = ''
-      import os, socket, subprocess
-      from harbor_db.test_bridge import serve
-      control, inherited = socket.socketpair()
-      fixture = subprocess.Popen(
-          ["${testPackage}/bin/harbor-db-source-local-recovery-fixture",
-           "--config", ${builtins.toJSON fixtureConfig},
-           "--control-fd", str(inherited.fileno()),
-           "--acceptance", os.path.join(os.environ["out"], "source-local-recovery-acceptance.json")],
-          pass_fds=(inherited.fileno(),))
-      inherited.close()
-      try:
-          serve(control.fileno(), {"primary": primary, "certifier": certifier})
-      finally:
-          control.close()
-          if fixture.poll() is None:
-              try:
-                  fixture.wait(timeout=30)
-              except subprocess.TimeoutExpired:
-                  fixture.kill()
-                  fixture.wait(timeout=30)
-      assert fixture.returncode == 0, fixture.returncode
-    '';
+    testScript = bridge.script {
+      fixture = "${testPackage}/bin/harbor-db-source-local-recovery-fixture";
+      arguments = ["--config" fixtureConfig];
+      nodes = ["primary" "certifier"];
+      artifact = "source-local-recovery-acceptance.json";
+    };
   }

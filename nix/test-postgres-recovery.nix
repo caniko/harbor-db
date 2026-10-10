@@ -1,8 +1,8 @@
 {
   pkgs,
-  nativePackage ? null,
+  nativePackage ? import ./native-package.nix {inherit pkgs;},
 }: let
-  tool = import ./postgres-package.nix {inherit pkgs nativePackage;};
+  tool = nativePackage;
   template = pkgs.writeText "recovery-template.json" (builtins.toJSON {
     resource = "recovery-fixture";
     data_dir = "/var/lib/postgres/18";

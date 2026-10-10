@@ -18,6 +18,10 @@
       "x86_64-linux"
       "aarch64-linux"
     ];
+    storagePackageArgument = {pkgs, ...}: {
+      key = "${./nix/storage-package-argument.nix}:flake-package";
+      _module.args.harborDbStoragePackage = self.packages.${pkgs.stdenv.hostPlatform.system}.storage-lifecycle;
+    };
     configurationFixture = pkgs: let
       policy = pkgs.writeText "harbor-db-configuration-fixture.json" (builtins.toJSON {
         version = 1;
@@ -101,6 +105,7 @@
     }: {
       key = "${./nix/module.nix}:flake-wrapper";
       imports = [
+        storagePackageArgument
         ./nix/module.nix
         ./nix/postgres-lifecycle.nix
         ./nix/cutover.nix
@@ -108,15 +113,18 @@
       ];
       services.harbor-db.package = lib.mkDefault self.packages.${pkgs.system}.harbor-db;
     };
-    nixosModules.pg-backup = import ./nix/pg-backup.nix;
-    nixosModules.postgres-lifecycle = ./nix/postgres-lifecycle.nix;
-    nixosModules.cutover = ./nix/cutover.nix;
+    nixosModules.pg-backup = {
+      imports = [storagePackageArgument ./nix/pg-backup.nix];
+    };
+    nixosModules.postgres-lifecycle = {
+      imports = [storagePackageArgument ./nix/postgres-lifecycle.nix];
+    };
+    nixosModules.cutover = {
+      imports = [storagePackageArgument ./nix/cutover.nix];
+    };
     nixosModules.db-harbor = self.nixosModules.harbor-db;
     nixosModules.default = self.nixosModules.harbor-db;
-    nixosModules.native-storage = {pkgs, ...}: {
-      imports = [self.nixosModules.default];
-      _module.args.harborDbStoragePackage = self.packages.${pkgs.system}.storage-lifecycle-rust;
-    };
+    nixosModules.native-storage = self.nixosModules.default;
 
     packages = forAllSystems ({
       pkgs,
@@ -148,6 +156,8 @@
         // {
           inherit cargoArtifacts;
           doCheck = false;
+          passthru.harborDbRuntime = "rust";
+          disallowedReferences = [pkgs.python3];
         });
       testingArgs =
         commonArgs
@@ -174,13 +184,14 @@
           '';
         });
       harbor-db-cached = buildCache.withRustCache {package = harbor-db;};
-    in {
-      inherit harbor-db harbor-db-cached harbor-db-test;
-      storage-lifecycle-rust = harbor-db.overrideAttrs (old: {
+      storage-lifecycle = harbor-db.overrideAttrs (old: {
         meta = old.meta // {mainProgram = "harbor-db-postgres";};
       });
-      postgres-lifecycle = import ./nix/postgres-package.nix {inherit pkgs;};
-      storage-lifecycle = import ./nix/postgres-package.nix {inherit pkgs;};
+    in {
+      inherit harbor-db harbor-db-cached harbor-db-test;
+      inherit storage-lifecycle;
+      storage-lifecycle-rust = storage-lifecycle;
+      postgres-lifecycle = storage-lifecycle;
       db-harbor = harbor-db;
       # Same derivation: exports both harbor-db and the standalone
       # home-manager-backup bin. mainProgram lets `lib.getExe` resolve the
@@ -223,6 +234,7 @@
         native-package-eval = pkgs.callPackage ./nix/module-eval.nix {module = nativeModule;};
         native-storage-eval = pkgs.callPackage ./nix/native-storage-eval.nix {
           module = nativeModule;
+          defaultModule = self.nixosModules.default;
           inherit nativePackage;
         };
         native-cli-smoke = pkgs.callPackage ./nix/native-cli-smoke.nix {
@@ -233,11 +245,18 @@
           module = import ./nix/module.nix;
         };
         application-provision-eval = pkgs.callPackage ./nix/application-provision-eval.nix {module = self.nixosModules.default;};
-        application-provision = pkgs.callPackage ./nix/test-application-provision.nix {module = self.nixosModules.default;};
+        application-provision = pkgs.callPackage ./nix/test-application-provision.nix {
+          module = self.nixosModules.default;
+          inherit nativePackage;
+        };
         application-backup = pkgs.callPackage ./nix/test-application-backup.nix {module = self.nixosModules.default;};
-        application-transition = pkgs.callPackage ./nix/test-application-transition.nix {module = self.nixosModules.default;};
+        application-transition = pkgs.callPackage ./nix/test-application-transition.nix {
+          module = self.nixosModules.default;
+          inherit nativePackage;
+        };
         application-postgres-transition = pkgs.callPackage ./nix/test-application-transition.nix {
           module = self.nixosModules.default;
+          inherit nativePackage;
           withPostgres = true;
         };
         module-smoke = pkgs.callPackage ./nix/test-module.nix {
@@ -251,10 +270,10 @@
           module = self.nixosModules.default;
           lifecycleModule = self.nixosModules.postgres-lifecycle;
         };
-        postgres-crash-rollback = pkgs.callPackage ./nix/test-postgres-lifecycle.nix {};
-        postgres-interrupted-upgrade = pkgs.callPackage ./nix/test-postgres-upgrade.nix {};
-        postgres-recovery-acceptance = pkgs.callPackage ./nix/test-postgres-recovery.nix {};
-        postgres-writer-fence = pkgs.callPackage ./nix/test-postgres-writer-fence.nix {};
+        postgres-crash-rollback = pkgs.callPackage ./nix/test-postgres-lifecycle.nix {inherit nativePackage;};
+        postgres-interrupted-upgrade = pkgs.callPackage ./nix/test-postgres-upgrade.nix {inherit nativePackage;};
+        postgres-recovery-acceptance = pkgs.callPackage ./nix/test-postgres-recovery.nix {inherit nativePackage;};
+        postgres-writer-fence = pkgs.callPackage ./nix/test-postgres-writer-fence.nix {inherit nativePackage;};
         postgres-lifecycle-test = import ./nix/test-python-regressions.nix {
           inherit pkgs;
           pythonSource = ./python;
@@ -295,27 +314,34 @@
           inherit nativePackage;
           testPackage = self.packages.${pkgs.system}.harbor-db-test;
         };
-        native-postgres-crash-rollback = pkgs.callPackage ./nix/test-postgres-lifecycle.nix {inherit nativePackage;};
+        native-postgres-crash-rollback = pkgs.callPackage ./nix/test-postgres-lifecycle.nix {
+          inherit nativePackage;
+          interop = true;
+        };
         native-postgres-interrupted-upgrade = pkgs.callPackage ./nix/test-postgres-upgrade.nix {inherit nativePackage;};
         native-postgres-recovery-acceptance = pkgs.callPackage ./nix/test-postgres-recovery.nix {inherit nativePackage;};
         native-postgres-writer-fence = pkgs.callPackage ./nix/test-postgres-writer-fence.nix {
           inherit nativePackage;
+          interop = true;
           testPackage = self.packages.${pkgs.system}.harbor-db-test;
         };
         native-application-provision = pkgs.callPackage ./nix/test-application-provision.nix {
           module = nativeModule;
           inherit nativePackage;
+          interop = true;
           testPackage = self.packages.${pkgs.system}.harbor-db-test;
         };
         native-application-backup = pkgs.callPackage ./nix/test-application-backup.nix {module = nativeModule;};
         native-application-transition = pkgs.callPackage ./nix/test-application-transition.nix {
           module = nativeModule;
           inherit nativePackage;
+          interop = true;
           testPackage = self.packages.${pkgs.system}.harbor-db-test;
         };
         native-application-postgres-transition = pkgs.callPackage ./nix/test-application-transition.nix {
           module = nativeModule;
           inherit nativePackage;
+          interop = true;
           testPackage = self.packages.${pkgs.system}.harbor-db-test;
           withPostgres = true;
         };

@@ -3,7 +3,7 @@
   lib,
   options,
   pkgs,
-  harborDbStoragePackage ? null,
+  harborDbStoragePackage,
   ...
 }: let
   inherit (lib) mkOption types;
@@ -100,10 +100,7 @@ in {
     enable = lib.mkEnableOption "mandatory rebuild and activation cutover admission";
     package = mkOption {
       type = types.package;
-      default = import ./postgres-package.nix {
-        inherit pkgs;
-        nativePackage = harborDbStoragePackage;
-      };
+      default = harborDbStoragePackage;
       description = "Harbor-DB cutover and existing storage/recovery engines.";
     };
     timeoutSeconds = mkOption {

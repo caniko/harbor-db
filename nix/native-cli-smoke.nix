@@ -20,6 +20,7 @@
 in
   pkgs.runCommand "harbor-db-native-cli-smoke" {nativeBuildInputs = [pkgs.python3];} ''
     test ! -e ${package}/bin/harbor-db-test
+    test ! -e ${package}/lib/harbor_db
     test ! -e ${package}/bin/harbor-db-native-supervisor-fixture
     test ! -e ${package}/bin/harbor-db-writer-fence-fixture
     test ! -e ${package}/bin/harbor-db-backend-transition-fixture

@@ -2,11 +2,13 @@
   pkgs,
   module,
   withPostgres ? false,
-  nativePackage ? null,
+  nativePackage ? import ./native-package.nix {inherit pkgs;},
+  interop ? false,
   testPackage ? null,
 }: let
-  storage = import ./postgres-package.nix {inherit pkgs nativePackage;};
-  legacyStorage = import ./postgres-package.nix {inherit pkgs;};
+  storage = nativePackage;
+  bridge = import ./test-native-bridge.nix {inherit pkgs;};
+  legacyStorage = import ./test-python-package.nix {inherit pkgs;};
   sourceAuthority = {
     resource = "demo";
     state_dir = "/var/lib/demo-authority";
@@ -102,7 +104,7 @@
         backup = pathlib.Path(args[0])
         new.write_bytes((backup / "records").read_bytes())
         if ${
-      if !withPostgres && nativePackage != null
+      if !withPostgres && interop
       then "True"
       else "False"
     }:
@@ -149,8 +151,8 @@
     users.groups.demo = {};
     environment.systemPackages =
       [storage pkgs.python3 pkgs.gnutar pkgs.gzip pkgs.coreutils]
-      ++ lib.optionals (withPostgres && nativePackage != null) [pkgs.nix pkgs.postgresql_18 pkgs.bash pkgs.util-linux pkgs.systemd];
-    system.extraDependencies = pkgs.lib.optional (!withPostgres && nativePackage != null) legacyStorage;
+      ++ lib.optionals (withPostgres && interop) [pkgs.nix pkgs.postgresql_18 pkgs.bash pkgs.util-linux pkgs.systemd];
+    system.extraDependencies = pkgs.lib.optional (!withPostgres && interop) legacyStorage;
     systemd.tmpfiles.rules = [
       "d /var/lib/demo-authority 0700 demo demo -"
       "d /var/lib/demo-old 0700 demo demo -"
@@ -174,21 +176,11 @@
     system.stateVersion = "26.05";
   };
 in
-  assert nativePackage == null || testPackage != null;
+  assert !interop || testPackage != null;
     pkgs.testers.runNixOSTest {
       extraDriverArgs = ["--junit-xml" "junit.xml"];
       extraPythonPackages = ps:
-        pkgs.lib.optional (nativePackage != null) (ps.buildPythonPackage {
-          pname = "harbor-db-test-bridge";
-          version = "1";
-          src = ../python;
-          format = "other";
-          dontBuild = true;
-          installPhase = ''
-            mkdir -p "$out/${ps.python.sitePackages}"
-            cp -r harbor_db "$out/${ps.python.sitePackages}/"
-          '';
-        });
+        pkgs.lib.optional interop (bridge.package ps);
       name = "harbor-db-application-${
         if withPostgres
         then "postgres"
@@ -257,94 +249,62 @@ in
           ...
         }: {
           imports = [common];
-          users.groups = lib.optionalAttrs (withPostgres && nativePackage != null) {
+          users.groups = lib.optionalAttrs (withPostgres && interop) {
             postgres.gid = config.ids.gids.postgres;
           };
-          users.users = lib.optionalAttrs (withPostgres && nativePackage != null) {
+          users.users = lib.optionalAttrs (withPostgres && interop) {
             postgres = {
               isSystemUser = true;
               group = "postgres";
               uid = config.ids.uids.postgres;
             };
           };
-          systemd.tmpfiles.rules = lib.optionals (withPostgres && nativePackage != null) recoveryDirectories;
+          systemd.tmpfiles.rules = lib.optionals (withPostgres && interop) recoveryDirectories;
         };
       };
       testScript = {nodes, ...}:
-        if withPostgres && nativePackage != null
-        then ''
-          import json
-          import os
-          import socket
-          import subprocess
-          from harbor_db.test_bridge import serve
-
-          configuration = json.loads(${builtins.toJSON (builtins.toJSON {
-            native_package = toString nativePackage;
-            storage_package = toString storage;
-            postgres_package = toString pkgs.postgresql_18;
-            coreutils_package = toString pkgs.coreutils;
-            shell = pkgs.runtimeShell;
-            tool_roots = map toString [pkgs.util-linux pkgs.systemd pkgs.nix pkgs.gnutar];
-            transition_manifest = toString nodes.primary.environment.etc."harbor-db/demo-transition.json".source;
-            backup_manifest = toString nodes.primary.environment.etc."harbor-db/demo-backup.json".source;
-            source_manifest = toString sourceManifest;
-            target_manifest = toString targetManifest;
-          })})
-          control, inherited = socket.socketpair()
-          fixture = subprocess.Popen(
-              ["${testPackage}/bin/harbor-db-postgres-transition-fixture",
-               "--control-fd", str(inherited.fileno()),
-               "--config", json.dumps(configuration),
-               "--evidence", os.path.join(os.environ["out"], "postgres-transition-acceptance.json")],
-              pass_fds=(inherited.fileno(),),
-          )
-          inherited.close()
-          try:
-              serve(control.fileno(), {"primary": primary, "certifier": certifier})
-          finally:
-              control.close()
-              if fixture.poll() is None:
-                  try:
-                      fixture.wait(timeout=30)
-                  except subprocess.TimeoutExpired:
-                      fixture.kill()
-                      fixture.wait(timeout=30)
-          assert fixture.returncode == 0, fixture.returncode
-        ''
+        if withPostgres && interop
+        then
+          bridge.script {
+            fixture = "${testPackage}/bin/harbor-db-postgres-transition-fixture";
+            arguments = [
+              "--config"
+              (builtins.toJSON {
+                native_package = toString nativePackage;
+                storage_package = toString storage;
+                postgres_package = toString pkgs.postgresql_18;
+                coreutils_package = toString pkgs.coreutils;
+                shell = pkgs.runtimeShell;
+                tool_roots = map toString [pkgs.util-linux pkgs.systemd pkgs.nix pkgs.gnutar];
+                transition_manifest = toString nodes.primary.environment.etc."harbor-db/demo-transition.json".source;
+                backup_manifest = toString nodes.primary.environment.etc."harbor-db/demo-backup.json".source;
+                source_manifest = toString sourceManifest;
+                target_manifest = toString targetManifest;
+              })
+            ];
+            nodes = ["primary" "certifier"];
+            artifactFlag = "--evidence";
+            artifact = "postgres-transition-acceptance.json";
+          }
         else if withPostgres
         then builtins.readFile ./test-application-postgres-transition.py
-        else if nativePackage != null
-        then ''
-          import os
-          import socket
-          import subprocess
-          from harbor_db.test_bridge import serve
-
-          control, inherited = socket.socketpair()
-          fixture = subprocess.Popen(
-              ["${testPackage}/bin/harbor-db-backend-transition-fixture",
-               "--control-fd", str(inherited.fileno()),
-               "--source-manifest", "${sourceManifest}",
-               "--target-manifest", "${targetManifest}",
-               "--native-package", "${nativePackage}",
-               "--legacy-package", "${legacyStorage}",
-               "--acceptance", os.path.join(os.environ["out"], "backend-transition-acceptance.json")],
-              pass_fds=(inherited.fileno(),),
-          )
-          inherited.close()
-          try:
-              serve(control.fileno(), {"primary": primary, "certifier": certifier})
-          finally:
-              control.close()
-              if fixture.poll() is None:
-                  try:
-                      fixture.wait(timeout=30)
-                  except subprocess.TimeoutExpired:
-                      fixture.kill()
-                      fixture.wait(timeout=30)
-          assert fixture.returncode == 0, fixture.returncode
-        ''
+        else if interop
+        then
+          bridge.script {
+            fixture = "${testPackage}/bin/harbor-db-backend-transition-fixture";
+            arguments = [
+              "--source-manifest"
+              "${sourceManifest}"
+              "--target-manifest"
+              "${targetManifest}"
+              "--native-package"
+              "${nativePackage}"
+              "--legacy-package"
+              "${legacyStorage}"
+            ];
+            nodes = ["primary" "certifier"];
+            artifact = "backend-transition-acceptance.json";
+          }
         else ''
           import json
           start_all()

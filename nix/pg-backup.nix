@@ -2,17 +2,14 @@
   config,
   lib,
   pkgs,
-  harborDbStoragePackage ? null,
+  harborDbStoragePackage,
   ...
 }: let
   inherit (lib) mkEnableOption mkIf mkMerge mkOption types;
   cfg = config.services.harbor-db.pgBackup;
   sourceRole = lib.elem cfg.role ["source" "both"];
   targetRole = lib.elem cfg.role ["target" "both"];
-  storagePackage = import ./postgres-package.nix {
-    inherit pkgs;
-    nativePackage = harborDbStoragePackage;
-  };
+  storagePackage = harborDbStoragePackage;
   durable = "${storagePackage}/bin/harbor-db-durable";
   pruneTool = "${storagePackage}/bin/harbor-db-backup-prune";
 

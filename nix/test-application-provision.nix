@@ -1,26 +1,18 @@
 {
   pkgs,
   module,
-  nativePackage ? null,
+  nativePackage ? import ./native-package.nix {inherit pkgs;},
+  interop ? false,
   testPackage ? null,
 }: let
-  legacyStorage = import ./postgres-package.nix {inherit pkgs;};
+  legacyStorage = import ./test-python-package.nix {inherit pkgs;};
+  bridge = import ./test-native-bridge.nix {inherit pkgs;};
 in
-  assert nativePackage == null || testPackage != null;
+  assert !interop || testPackage != null;
     pkgs.testers.runNixOSTest {
       extraDriverArgs = ["--junit-xml" "junit.xml"];
       extraPythonPackages = ps:
-        pkgs.lib.optional (nativePackage != null) (ps.buildPythonPackage {
-          pname = "harbor-db-test-bridge";
-          version = "1";
-          src = ../python;
-          format = "other";
-          dontBuild = true;
-          installPhase = ''
-            mkdir -p "$out/${ps.python.sitePackages}"
-            cp -r harbor_db "$out/${ps.python.sitePackages}/"
-          '';
-        });
+        pkgs.lib.optional interop (bridge.package ps);
       name = "harbor-db-application-provision";
       nodes.machine = {pkgs, ...}: {
         imports = [module];
@@ -65,42 +57,29 @@ in
           };
         };
         environment.systemPackages = [pkgs.postgresql_18];
-        system.extraDependencies = pkgs.lib.optional (nativePackage != null) legacyStorage;
+        system.extraDependencies = pkgs.lib.optional interop legacyStorage;
         system.stateVersion = "26.05";
       };
       testScript =
-        if nativePackage != null
-        then ''
-          import os
-          import socket
-          import subprocess
-          from harbor_db.test_bridge import serve
-
-          control, inherited = socket.socketpair()
-          fixture = subprocess.Popen(
-              ["${testPackage}/bin/harbor-db-provision-fixture",
-               "--control-fd", str(inherited.fileno()),
-               "--native-provision", "${nativePackage}/bin/harbor-db-provision",
-               "--python-provision", "${legacyStorage}/bin/harbor-db-provision",
-               "--psql", "${pkgs.postgresql_18}/bin/psql",
-               "--runuser", "${pkgs.util-linux}/bin/runuser",
-               "--systemctl", "${pkgs.systemd}/bin/systemctl",
-               "--acceptance", os.path.join(os.environ["out"], "provision-acceptance.json")],
-              pass_fds=(inherited.fileno(),),
-          )
-          inherited.close()
-          try:
-              serve(control.fileno(), {"machine": machine})
-          finally:
-              control.close()
-              if fixture.poll() is None:
-                  try:
-                      fixture.wait(timeout=30)
-                  except subprocess.TimeoutExpired:
-                      fixture.kill()
-                      fixture.wait(timeout=30)
-          assert fixture.returncode == 0, fixture.returncode
-        ''
+        if interop
+        then
+          bridge.script {
+            fixture = "${testPackage}/bin/harbor-db-provision-fixture";
+            arguments = [
+              "--native-provision"
+              "${nativePackage}/bin/harbor-db-provision"
+              "--python-provision"
+              "${legacyStorage}/bin/harbor-db-provision"
+              "--psql"
+              "${pkgs.postgresql_18}/bin/psql"
+              "--runuser"
+              "${pkgs.util-linux}/bin/runuser"
+              "--systemctl"
+              "${pkgs.systemd}/bin/systemctl"
+            ];
+            nodes = ["machine"];
+            artifact = "provision-acceptance.json";
+          }
         else ''
           # reboot() reconnects only when QEMU was started with reboot support.
           machine.start(allow_reboot=True)
