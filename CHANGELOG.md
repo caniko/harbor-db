@@ -18,6 +18,16 @@
 
 ### Fixed
 
+- Retain the CI contract in filtered Cargo sources so packaged migration checks
+  can validate `simit.toml`.
+- Stream pinned physical-manifest hashes during pruning in both runtimes and
+  retry capture scratch collisions while preserving interrupted inodes.
+- Clear undeclared variables from supervised argv cases; test fixtures declare
+  their required execution path explicitly.
+- Revalidate interrupted writer release in both runtimes while retaining source
+  backup pins and borrowed fence leases; inhibit premature completion/retirement.
+- Let managed backup, restore and export run for their owning unit's lifetime
+  instead of imposing the short worker-probe deadline.
 - Coordinate process creation and final writer exec with lease acquisition and
   release, restoring descriptor flags after failed exec.
 - Bind supervisor liveness to the explicit main task on emulated AArch64 and

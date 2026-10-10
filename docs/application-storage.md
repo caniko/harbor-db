@@ -139,8 +139,13 @@ The sequence is:
    released generation, including legacy units without a resource wrapper.
    Retired unit names remain inhibited. The borrowed cluster fence must still be
    released explicitly by its owner; then start clients and run real acceptance.
+   If interruption leaves `write-enabled` with its inhibition marker present,
+   retry keeps exclusive authority and the source backup pin, then repeats fence,
+   recovery, independent proof and target-custody checks before removing the marker.
+   A completed release is idempotent and permits subsequent acknowledged writes.
 7. `complete` checks health and authority without requiring equality to old
    records or taking an exclusive lease from the now-running writer.
+   A retained inhibition marker blocks completion and retirement.
 8. `retire` archives terminal journal evidence before another transition may be
    planned. The root-owned generation startup policy remains retained. Authorizing
    a new backend or generation uses another explicit qualified transition.
