@@ -119,6 +119,27 @@ pub fn validate_manifest(value: &Value, host: &str) -> Result<Value> {
     Ok(value.clone())
 }
 
+fn prepared_transition(config: &Value, phase: &str) -> Result<Option<Value>> {
+    let Some(path) = config["transition_manifest"]
+        .as_str()
+        .filter(|_| matches!(phase, "preflight" | "activate"))
+    else {
+        return Ok(None);
+    };
+    let selected = durable::read_config_json(Path::new(path))?;
+    let journal = application_transition::journal_path(&selected)?;
+    if journal.exists()
+        && matches!(
+            durable::read_json(&journal)?["phase"].as_str(),
+            Some("prepared" | "committing" | "committed")
+        )
+    {
+        Ok(Some(selected))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn check_resource(
     config: &Value,
     phase: &str,
@@ -130,30 +151,18 @@ pub fn check_resource(
     }
     let now = at.unwrap_or_else(custody::now);
     if config["kind"] == "filesystem" {
-        if let Some(path) = config["transition_manifest"]
-            .as_str()
-            .filter(|_| matches!(phase, "preflight" | "activate"))
-        {
-            let selected = durable::read_config_json(Path::new(path))?;
-            let journal = application_transition::journal_path(&selected)?;
-            if journal.exists()
-                && matches!(
-                    durable::read_json(&journal)?["phase"].as_str(),
-                    Some("prepared" | "committing" | "committed")
-                )
-            {
-                if selected["custody_manifest"].is_null() {
-                    return Err(invalid(
-                        "cutover transition admission requires target corpus custody publication",
-                    ));
-                }
-                return application_transition::admission(
-                    &selected,
-                    phase,
-                    &config["authority"],
-                    candidate,
-                );
+        if let Some(selected) = prepared_transition(config, phase)? {
+            if selected["custody_manifest"].is_null() {
+                return Err(invalid(
+                    "cutover transition admission requires target corpus custody publication",
+                ));
             }
+            return application_transition::admission(
+                &selected,
+                phase,
+                &config["authority"],
+                candidate,
+            );
         }
         let metadata = if phase != "startup" {
             Some(inventory(config, false)?)
@@ -399,19 +408,7 @@ pub fn check_manifest(
                 .checked_duration_since(Instant::now())
                 .filter(|d| !d.is_zero())
                 .ok_or_else(|| invalid("cutover inspection budget exhausted"))?;
-            let mut as_root = false;
-            if let Some(path) = config["transition_manifest"]
-                .as_str()
-                .filter(|_| matches!(phase, "preflight" | "activate"))
-            {
-                let selected = durable::read_config_json(Path::new(path))?;
-                let journal = application_transition::journal_path(&selected)?;
-                as_root = journal.exists()
-                    && matches!(
-                        durable::read_json(&journal)?["phase"].as_str(),
-                        Some("prepared" | "committing" | "committed")
-                    );
-            }
+            let as_root = prepared_transition(config, phase)?.is_some();
             let extra = candidate
                 .map(|c| vec!["--candidate".into(), c.into()])
                 .unwrap_or_default();

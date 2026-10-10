@@ -135,6 +135,13 @@ pub fn owned_ancestors(path: &Path) -> Result<()> {
     Ok(())
 }
 pub fn validate(config: &Value) -> Result<(Value, Value)> {
+    let (source, target) = validate_bindings(config)?;
+    validate_barrier_paths(config, &source, &target)?;
+    validate_workers(config)?;
+    Ok((source, target))
+}
+
+fn validate_bindings(config: &Value) -> Result<(Value, Value)> {
     let required = [
         "version",
         "resource",
@@ -190,6 +197,10 @@ pub fn validate(config: &Value) -> Result<(Value, Value)> {
             "PostgreSQL backend transitions require the existing writer fence",
         ));
     }
+    Ok((source, target))
+}
+
+fn validate_barrier_paths(config: &Value, source: &Value, target: &Value) -> Result<()> {
     for key in [
         "source_manifest",
         "target_manifest",
@@ -213,7 +224,7 @@ pub fn validate(config: &Value) -> Result<(Value, Value)> {
         }
     }
     let barrier = Path::new(string(config, "barrier_dir")?);
-    let authority = Path::new(string(&source, "state_dir")?);
+    let authority = Path::new(string(source, "state_dir")?);
     let drop_in = Path::new(string(config, "drop_in_root")?);
     if resolve(barrier)? != barrier || resolve(drop_in)? != drop_in {
         return Err(invalid("transition barrier storage is redirected"));
@@ -227,9 +238,9 @@ pub fn validate(config: &Value) -> Result<(Value, Value)> {
             "root startup barriers must be outside application-owned authority",
         ));
     }
-    for p in paths(&source, "directories")?
+    for p in paths(source, "directories")?
         .iter()
-        .chain(paths(&target, "directories")?.iter())
+        .chain(paths(target, "directories")?.iter())
     {
         if barrier.starts_with(p) {
             return Err(invalid(
@@ -237,6 +248,10 @@ pub fn validate(config: &Value) -> Result<(Value, Value)> {
             ));
         }
     }
+    Ok(())
+}
+
+fn validate_workers(config: &Value) -> Result<()> {
     let units = units(config)?;
     let unique: BTreeSet<_> = units.iter().collect();
     if units.is_empty()
@@ -297,7 +312,7 @@ pub fn validate(config: &Value) -> Result<(Value, Value)> {
         }
         process::account(string(c, "user")?)?;
     }
-    Ok((source, target))
+    Ok(())
 }
 /// Declared immutable policy/tools may be Nix package links. Resolve their target
 /// before opening it; corpus and recovery evidence retain no-follow semantics.

@@ -889,16 +889,17 @@ fn import_off_host_leased(
     durable::write_json(&absolute(&destination)?, &receipt)?;
     Ok(receipt)
 }
-fn preparation_command(preparation: &Value, key: &str, leases: &[RawFd]) -> Result<()> {
+fn preparation_argv(preparation: &Value, key: &str) -> Result<Vec<String>> {
     let argv = preparation[key]
         .as_array()
+        .filter(|v| !v.is_empty())
         .ok_or_else(|| invalid(format!("{key} must be explicit absolute executable argv")))?
         .iter()
         .map(|v| {
             v.as_str()
                 .filter(|s| !s.is_empty() && !s.contains('\0'))
                 .map(str::to_owned)
-                .ok_or_else(|| invalid("invalid preparation argv"))
+                .ok_or_else(|| invalid(format!("{key} must be explicit absolute executable argv")))
         })
         .collect::<Result<Vec<_>>>()?;
     if !argv.first().is_some_and(|s| Path::new(s).is_absolute()) {
@@ -906,7 +907,41 @@ fn preparation_command(preparation: &Value, key: &str, leases: &[RawFd]) -> Resu
             "{key} must be explicit absolute executable argv"
         )));
     }
-    let mut spec = process::CommandSpec::new(argv);
+    Ok(argv)
+}
+
+struct PreparationCommands {
+    readiness: Vec<String>,
+    backup: Vec<String>,
+    restore: Vec<String>,
+    export: Option<Vec<String>>,
+}
+
+impl PreparationCommands {
+    fn parse(preparation: &Value) -> Result<Self> {
+        // Admit every worker before taking a lease or executing a side effect.
+        let readiness = preparation_argv(preparation, "readiness_command")?;
+        let backup = preparation_argv(preparation, "backup_command")?;
+        let restore = preparation_argv(preparation, "restore_command")?;
+        let export = if preparation
+            .get("export_command")
+            .is_none_or(|v| v.is_null() || v.as_array().is_some_and(Vec::is_empty))
+        {
+            None
+        } else {
+            Some(preparation_argv(preparation, "export_command")?)
+        };
+        Ok(Self {
+            readiness,
+            backup,
+            restore,
+            export,
+        })
+    }
+}
+
+fn preparation_command(argv: &[String], leases: &[RawFd]) -> Result<()> {
+    let mut spec = process::CommandSpec::new(argv.to_vec());
     spec.leases = leases.to_vec();
     // Managed preparation units deliberately use TimeoutStartSec=infinity.
     // Backup, restore and export are not short probes; their owner controls
@@ -915,6 +950,81 @@ fn preparation_command(preparation: &Value, key: &str, leases: &[RawFd]) -> Resu
     process::execute(&spec)?;
     Ok(())
 }
+
+fn require_producer_snapshot(
+    config: &Value,
+    settings: &Value,
+    now: Option<i64>,
+    fence: &WriterExclusion,
+) -> Result<()> {
+    let backup_lease = backup_lease(settings)?;
+    let now = clock(now)?;
+    if !exists(&absolute(&path(settings, "backup_root")?)?.join("recovery/SELECTED")) {
+        return Err(invalid(
+            "source-local preparation requires an explicitly published producer capture",
+        ));
+    }
+    let mut held = vec![backup_lease.fd()];
+    if let Some(lease) = &fence.lease {
+        held.push(lease.fd());
+    }
+    let evidence_lease = evidence_lease(settings, true)?;
+    held.push(evidence_lease.fd());
+    let (_, binding) = backup(config, settings, now, &held)?;
+    snapshot_evidence(config, settings, &binding, now)?;
+    Ok(())
+}
+
+fn verify_prepared_snapshot(
+    config: &Value,
+    settings: &Value,
+    now: Option<i64>,
+    fence: &WriterExclusion,
+    outer: &[RawFd],
+) -> Result<()> {
+    let (backup_lease, evidence_lease) = backup_evidence_leases(settings, true)?;
+    let now = clock(now)?;
+    let mut held = fds(fence, &backup_lease, &evidence_lease);
+    held.extend_from_slice(outer);
+    let (directory, binding) = backup(config, settings, now, &held)?;
+    let source = snapshot_evidence(config, settings, &binding, now)?;
+    if settings["require_writer_fence"] == true
+        && source_fence(settings, &source)?
+            != fence.binding.as_ref().and_then(|v| v["token"].as_str())
+    {
+        return Err(invalid(
+            "record snapshot writer fence differs from the retained window",
+        ));
+    }
+    verify_backup(config, &directory, &held)
+}
+
+fn accept_prepared_restore(
+    config: &Value,
+    settings: &Value,
+    now: Option<i64>,
+    fence: &WriterExclusion,
+    outer: &[RawFd],
+) -> Result<()> {
+    let (backup_lease, evidence_lease) = backup_evidence_leases(settings, true)?;
+    let now = clock(now)?;
+    let mut held = fds(fence, &backup_lease, &evidence_lease);
+    held.extend_from_slice(outer);
+    let (directory, binding) = backup(config, settings, now, &held)?;
+    let mut local = settings.clone();
+    local["off_host_receipt_file"] = Value::Null;
+    check_evidence(
+        config,
+        &local,
+        (&directory, &binding),
+        now,
+        true,
+        fence.binding.as_ref(),
+        &held,
+    )?;
+    Ok(())
+}
+
 pub fn prepare(config: &Value, preparation: &Value, socket: &Path, port: u16) -> Result<Value> {
     prepare_at(config, preparation, socket, port, None)
 }
@@ -927,56 +1037,15 @@ pub fn prepare_at(
     now: Option<i64>,
 ) -> Result<Value> {
     let settings = policy(config)?;
-    // Validate all commands before executing any side effect.
-    for key in [
-        "readiness_command",
-        "backup_command",
-        "restore_command",
-        "export_command",
-    ] {
-        if key == "export_command"
-            && preparation
-                .get(key)
-                .is_none_or(|v| v.is_null() || v.as_array().is_some_and(Vec::is_empty))
-        {
-            continue;
-        }
-        let argv = preparation[key]
-            .as_array()
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| invalid(format!("{key} must be explicit absolute executable argv")))?;
-        if !argv[0].as_str().is_some_and(|s| Path::new(s).is_absolute())
-            || argv.iter().any(|v| {
-                !v.as_str()
-                    .is_some_and(|s| !s.is_empty() && !s.contains('\0'))
-            })
-        {
-            return Err(invalid(format!(
-                "{key} must be explicit absolute executable argv"
-            )));
-        }
-    }
+    let commands = PreparationCommands::parse(preparation)?;
     let anchor = absolute(&path(settings, "snapshot_file")?)?
         .parent()
         .unwrap()
         .join("preparation.lock");
     let fence = writer_exclusion(config, Some(socket), port)?;
-    if super::recovery_repository::source_local(settings)? {
-        let backup_lease = backup_lease(settings)?;
-        let now = clock(now)?;
-        if !exists(&absolute(&path(settings, "backup_root")?)?.join("recovery/SELECTED")) {
-            return Err(invalid(
-                "source-local preparation requires an explicitly published producer capture",
-            ));
-        }
-        let mut held = vec![backup_lease.fd()];
-        if let Some(lease) = &fence.lease {
-            held.push(lease.fd());
-        }
-        let evidence_lease = evidence_lease(settings, true)?;
-        held.push(evidence_lease.fd());
-        let (_, binding) = backup(config, settings, now, &held)?;
-        snapshot_evidence(config, settings, &binding, now)?;
+    let source_local = super::recovery_repository::source_local(settings)?;
+    if source_local {
+        require_producer_snapshot(config, settings, now, &fence)?;
     }
     let preparation_lease = durable::lock(&anchor, false, true)?;
     let mut leases = vec![preparation_lease.fd()];
@@ -990,14 +1059,14 @@ pub fn prepare_at(
         port,
         &leases,
     )?;
-    preparation_command(preparation, "readiness_command", &leases)?;
-    let source_snapshot = if super::recovery_repository::source_local(settings)? {
+    preparation_command(&commands.readiness, &leases)?;
+    let source_snapshot = if source_local {
         let _backup_lease = backup_lease(settings)?;
         source_snapshot_path(config, settings)?
     } else {
         path(settings, "snapshot_file")?
     };
-    if super::recovery_repository::source_local(settings)? && !exists(&source_snapshot) {
+    if source_local && !exists(&source_snapshot) {
         return Err(invalid(
             "source-local preparation requires an explicitly published producer snapshot",
         ));
@@ -1014,7 +1083,7 @@ pub fn prepare_at(
                     ));
                 }
             }
-            preparation_command(preparation, "backup_command", &leases)?;
+            preparation_command(&commands.backup, &leases)?;
         }
         let backup_lease = backup_lease(settings)?;
         let mut held = leases.clone();
@@ -1031,48 +1100,14 @@ pub fn prepare_at(
         }
         snapshot_leased(config, socket, port, now, &held)?;
     } else {
-        let (backup_lease, evidence_lease) = backup_evidence_leases(settings, true)?;
-        let now = clock(now)?;
-        let mut held = fds(&fence, &backup_lease, &evidence_lease);
-        held.extend_from_slice(&leases);
-        let (directory, binding) = backup(config, settings, now, &held)?;
-        let source = snapshot_evidence(config, settings, &binding, now)?;
-        if settings["require_writer_fence"] == true
-            && source_fence(settings, &source)?
-                != fence.binding.as_ref().and_then(|v| v["token"].as_str())
-        {
-            return Err(invalid(
-                "record snapshot writer fence differs from the retained window",
-            ));
-        }
-        verify_backup(config, &directory, &held)?;
+        verify_prepared_snapshot(config, settings, now, &fence, &leases)?;
     }
     if !exists(&path(settings, "receipt_file")?) {
-        preparation_command(preparation, "restore_command", &leases)?;
+        preparation_command(&commands.restore, &leases)?;
     }
-    {
-        let (backup_lease, evidence_lease) = backup_evidence_leases(settings, true)?;
-        let now = clock(now)?;
-        let mut held = fds(&fence, &backup_lease, &evidence_lease);
-        held.extend_from_slice(&leases);
-        let (directory, binding) = backup(config, settings, now, &held)?;
-        let mut local = settings.clone();
-        local["off_host_receipt_file"] = Value::Null;
-        check_evidence(
-            config,
-            &local,
-            (&directory, &binding),
-            now,
-            true,
-            fence.binding.as_ref(),
-            &held,
-        )?;
-    }
-    if preparation["export_command"]
-        .as_array()
-        .is_some_and(|v| !v.is_empty())
-    {
-        preparation_command(preparation, "export_command", &leases)?;
+    accept_prepared_restore(config, settings, now, &fence, &leases)?;
+    if let Some(export) = &commands.export {
+        preparation_command(export, &leases)?;
     }
     if let Some(credentials) = std::env::var_os("CREDENTIALS_DIRECTORY") {
         let incoming = PathBuf::from(credentials).join("recovery-off-host");
@@ -1098,7 +1133,11 @@ mod tests {
             .find(|path| path.is_file())
             .unwrap();
         let preparation = json!({"backup_command":[shell,"-c","sleep 61; printf 'completed' > \"$1\"","backup",ready]});
-        preparation_command(&preparation, "backup_command", &[lease.fd()]).unwrap();
+        preparation_command(
+            &preparation_argv(&preparation, "backup_command").unwrap(),
+            &[lease.fd()],
+        )
+        .unwrap();
         assert_eq!(fs::read(&ready).unwrap(), b"completed");
         assert!(durable::lock(&anchor, false, false).is_err());
     }
