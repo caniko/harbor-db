@@ -2,6 +2,13 @@
 version = 1
 
 [[coverage]]
+case = "native.supervisor.detached_nix_case_retains_launcher_path_without_service_manager_environment"
+capability = "suite-cli"
+operation = "harbor-db-test.run"
+dimension = "compatibility"
+evidence = "The actual detached CLI runs from an executable forced beyond 16 MiB, retains identical complete bytes, and qualifies a controlled Nix case with a missing service-manager PATH by using the retained launcher environment in both service roles."
+
+[[coverage]]
 case = "vm.x86_64-linux.module-smoke"
 capability = "nixos"
 operation = "nixos.lifecycle-plan"

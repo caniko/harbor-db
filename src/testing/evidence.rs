@@ -94,6 +94,10 @@ pub fn check_path(path: &Path) -> Result<()> {
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_publish(path, |file| Ok(file.write_all(bytes)?))
+}
+
+fn atomic_publish(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
     let parent = open(
         path.parent().ok_or_else(|| error("missing parent"))?,
         libc::O_RDONLY | libc::O_DIRECTORY,
@@ -130,7 +134,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     };
     let mut file = unsafe { File::from_raw_fd(fd) };
     let outcome = (|| -> Result<()> {
-        file.write_all(bytes)?;
+        write(&mut file)?;
         file.sync_all()?;
         if unsafe {
             libc::renameat(
@@ -152,6 +156,63 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         }
     }
     outcome
+}
+
+fn stream_file(
+    path: &Path,
+    maximum: u64,
+    mut consume: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let mut file = open(path, libc::O_RDONLY, 0)?;
+    let identity = |metadata: &fs::Metadata| {
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    };
+    let before = file.metadata()?;
+    if !before.is_file() || before.len() > maximum {
+        return Err(error("bound file is not regular or exceeds its size limit"));
+    }
+    let mut buffer = [0u8; 65536];
+    let mut count = 0u64;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        count += read as u64;
+        if count > maximum {
+            return Err(error("bound file grew beyond its size limit"));
+        }
+        consume(&buffer[..read])?;
+    }
+    if count != before.len() || identity(&before) != identity(&file.metadata()?) {
+        return Err(error("bound file changed while being retained"));
+    }
+    Ok(())
+}
+
+/// Descriptor-pinned, bounded-memory retention for complete executable bytes.
+pub(crate) fn atomic_copy(path: &Path, source: &Path, maximum: u64) -> Result<()> {
+    atomic_publish(path, |file| {
+        stream_file(source, maximum, |bytes| Ok(file.write_all(bytes)?))
+    })
+}
+
+pub(crate) fn file_digest(path: &Path, maximum: u64) -> Result<String> {
+    let mut digest = Sha256::new();
+    stream_file(path, maximum, |bytes| {
+        digest.update(bytes);
+        Ok(())
+    })?;
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 pub fn bounded_read(path: &Path) -> Result<Vec<u8>> {

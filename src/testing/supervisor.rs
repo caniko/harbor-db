@@ -48,11 +48,22 @@ pub struct FileBinding {
     pub path: PathBuf,
     pub sha256: String,
 }
+// Bind complete source/launcher files with bounded memory. Small acceptance
+// carriers retain evidence::MAX_ARTIFACT_BYTES; debug launchers often exceed it.
+const MAX_BOUND_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 pub fn bind_file(path: &Path) -> Result<FileBinding> {
     Ok(FileBinding {
         path: path.to_path_buf(),
-        sha256: evidence::hash(&evidence::bounded_read(path)?),
+        sha256: evidence::file_digest(path, MAX_BOUND_FILE_BYTES)?,
     })
+}
+
+pub(crate) fn retain_executable(path: &Path, source: &Path) -> Result<FileBinding> {
+    use std::os::unix::fs::PermissionsExt;
+    evidence::atomic_copy(path, source, MAX_BOUND_FILE_BYTES)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    evidence::open(path, libc::O_RDONLY, 0)?.sync_all()?;
+    bind_file(path)
 }
 
 /// Complete regular-file inventory of an immutable retained source snapshot.
@@ -1509,11 +1520,7 @@ pub fn start_detached(run: &Path, executable: &Path) -> Result<Vec<String>> {
     // A caller's target/debug binary can be rebuilt while services are alive.
     // Both roles, including observer restarts, execute the same retained bytes.
     let service_executable = run.join("service-executable");
-    evidence::atomic_write(&service_executable, &evidence::bounded_read(executable)?)?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&service_executable, fs::Permissions::from_mode(0o700))?;
-    evidence::open(&service_executable, libc::O_RDONLY, 0)?.sync_all()?;
-    let binding = bind_file(&service_executable)?;
+    let binding = retain_executable(&service_executable, executable)?;
     publish(&run.join("service-executable.json"), &binding)?;
     publish(
         &run.join("launch-requested.json"),

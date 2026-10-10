@@ -135,9 +135,7 @@ pub fn create_with_executor(
             ));
         }
         let path = work.join("harbor-db-test");
-        durable::atomic_write(&path, &evidence::bounded_read(executable)?)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
-        inputs.push(supervisor::bind_file(&path)?);
+        inputs.push(supervisor::retain_executable(&path, executable)?);
         Some(path)
     } else {
         None

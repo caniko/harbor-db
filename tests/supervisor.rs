@@ -611,7 +611,20 @@ if role == 'worker':
     let spec_path = tmp.path().join("selection.json");
     fs::write(&spec_path, serde_json::to_vec(&selection).unwrap()).unwrap();
     let log = tmp.path().join("launches.jsonl");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_harbor-db-test"))
+    let launcher = tmp.path().join("large-launcher");
+    fs::copy(env!("CARGO_BIN_EXE_harbor-db-test"), &launcher).unwrap();
+    // ELF executables remain runnable with a retained tail. Always exercise a
+    // launcher beyond the evidence-carrier limit, even in stripped CI builds.
+    let file = fs::OpenOptions::new().write(true).open(&launcher).unwrap();
+    file.set_len(
+        file.metadata()
+            .unwrap()
+            .len()
+            .max(harbor_db::testing::evidence::MAX_ARTIFACT_BYTES + 1024),
+    )
+    .unwrap();
+    drop(file);
+    let output = std::process::Command::new(&launcher)
         .args(["run", "--spec"])
         .arg(spec_path)
         .arg("--base")
@@ -623,6 +636,10 @@ if role == 'worker':
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let run = tmp.path().join("detached-nix-path");
+    assert_eq!(
+        fs::read(run.join("service-executable")).unwrap(),
+        fs::read(&launcher).unwrap()
+    );
     let state = supervisor::status(&run).unwrap();
     assert_eq!(state.results[0].reason, supervisor::ExitReason::Exited);
     assert_eq!(state.results[0].code, Some(23));

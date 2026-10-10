@@ -19,6 +19,8 @@
 
 ### Fixed
 
+- Stream detached executable retention and complete-file binding with a separate
+  finite bound, admitting debug binaries larger than the evidence-carrier limit.
 - Retry occupied evidence temporary names without replacing interrupted inodes;
   retain the invoking tool `PATH` for detached worker and observer services.
 - Require existing custody roots and descendants in boot tmpfiles and activation
