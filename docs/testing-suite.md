@@ -149,6 +149,10 @@ an exact dependency-free Cargo selector in a cleared environment and validates t
 resulting semantic receipt. An installed runner therefore does not need to inherit
 a developer shell to execute that supported Cargo shape. Project dependencies and
 application-specific tools still come from the retained candidate's selected inputs.
+Detached worker and observer services receive the invoking tool `PATH` through
+an explicit systemd environment property, also recorded in `launch-requested.json`.
+Observer restarts retain that property; the copied unwrapped binary therefore
+keeps the packaged wrapper or development shell's Nix tool lookup.
 
 Library `runner::create` without an executor retains its existing Python behavior;
 native/prerequisite argv cases then require explicit artifact producers. Other

@@ -104,22 +104,30 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
             .ok_or_else(|| error("missing filename"))?
             .as_bytes(),
     )?;
-    let temporary = CString::new(format!(
-        ".write-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ))?;
-    let fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            temporary.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600,
-        )
+    let (temporary, fd) = loop {
+        let temporary = CString::new(format!(
+            ".write-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))?;
+        // SAFETY: parent pins the directory and temporary remains live. O_EXCL
+        // preserves every occupied inode, including an interrupted publication.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                temporary.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd >= 0 {
+            break (temporary, fd);
+        }
+        let failure = std::io::Error::last_os_error();
+        if failure.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(failure.into());
+        }
     };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
     let mut file = unsafe { File::from_raw_fd(fd) };
     let outcome = (|| -> Result<()> {
         file.write_all(bytes)?;

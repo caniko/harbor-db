@@ -512,6 +512,143 @@ fn fresh_logs_and_heartbeat_cannot_hide_five_minutes_without_meaningful_progress
 }
 
 #[test]
+fn restarted_roles_retry_evidence_collisions_without_replacing_stale_inodes() {
+    use std::os::unix::fs::MetadataExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let run = supervisor::create_run(
+        Some(tmp.path()),
+        "evidence-collision",
+        spec(tmp.path(), "true", 5),
+    )
+    .unwrap();
+    for role in ["worker", "observe"] {
+        let bootstrap = r#"
+import json, os, pathlib, sys
+cli, run, role = sys.argv[1:]
+root = pathlib.Path(run)
+entries = []
+for number in range(2):
+    path = root / f'.write-{os.getpid()}-{number}'
+    path.write_text(f'interrupted {role} evidence {number}')
+    entries.append({'path': str(path), 'inode': path.stat().st_ino, 'bytes': path.read_text()})
+(root / f'{role}-collisions.json').write_text(json.dumps(entries))
+os.execv(cli, [cli, role, run] + (['--once'] if role == 'observe' else []))
+"#;
+        let mut command = std::process::Command::new("python3");
+        command
+            .args(["-c", bootstrap, env!("CARGO_BIN_EXE_harbor-db-test")])
+            .arg(&run)
+            .arg(role);
+        let output = process::spawn(&mut command)
+            .unwrap()
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success(), "{role}: {output:?}");
+        let entries: serde_json::Value =
+            serde_json::from_slice(&fs::read(run.join(format!("{role}-collisions.json"))).unwrap())
+                .unwrap();
+        for entry in entries.as_array().unwrap() {
+            let path = Path::new(entry["path"].as_str().unwrap());
+            assert_eq!(
+                fs::metadata(path).unwrap().ino(),
+                entry["inode"].as_u64().unwrap()
+            );
+            assert_eq!(
+                fs::read_to_string(path).unwrap(),
+                entry["bytes"].as_str().unwrap()
+            );
+        }
+    }
+    assert_eq!(supervisor::verify(&run).unwrap().verdict, Verdict::Passed);
+}
+
+#[test]
+fn detached_nix_case_retains_launcher_path_without_service_manager_environment() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let stub = tmp.path().join("wrapper-bin");
+    fs::create_dir(&stub).unwrap();
+    let python = std::process::Command::new("python3")
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        .unwrap();
+    assert!(python.status.success());
+    let python = String::from_utf8(python.stdout).unwrap();
+    let python = python.trim();
+    fs::write(
+        stub.join("systemd-run"),
+        format!("#!{python}\n")
+            + r#"
+import json, os, subprocess, sys
+args = sys.argv[1:]
+index = next(i for i, value in enumerate(args) if value.endswith('/service-executable'))
+role = args[index + 1]
+environment = {'PATH': '/missing-service-manager-bin'}
+for arg in args[:index]:
+    if arg.startswith('--setenv='):
+        key, value = arg[len('--setenv='):].split('=', 1)
+        environment[key] = value
+with open(os.environ['STUB_LOG'], 'a') as log:
+    log.write(json.dumps({'role': role, 'environment': environment}) + '\n')
+if role == 'worker':
+    # systemd-run acknowledges launch even when the case later fails.
+    subprocess.run(args[index:], env=environment, check=False)
+"#,
+    )
+    .unwrap();
+    fs::write(
+        stub.join("nix"),
+        format!("#!{python}\nimport sys\nprint('retained Nix lookup fixture')\nsys.exit(23)\n"),
+    )
+    .unwrap();
+    for name in ["systemd-run", "nix"] {
+        fs::set_permissions(stub.join(name), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut selection = spec(tmp.path(), "true", 5);
+    selection.cases[0].execution = Execution::Nix {
+        installable: ".#lookup-fixture".into(),
+    };
+    let spec_path = tmp.path().join("selection.json");
+    fs::write(&spec_path, serde_json::to_vec(&selection).unwrap()).unwrap();
+    let log = tmp.path().join("launches.jsonl");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_harbor-db-test"))
+        .args(["run", "--spec"])
+        .arg(spec_path)
+        .arg("--base")
+        .arg(tmp.path())
+        .args(["--id", "detached-nix-path"])
+        .env("PATH", &stub)
+        .env("STUB_LOG", &log)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let run = tmp.path().join("detached-nix-path");
+    let state = supervisor::status(&run).unwrap();
+    assert_eq!(state.results[0].reason, supervisor::ExitReason::Exited);
+    assert_eq!(state.results[0].code, Some(23));
+    assert_eq!(state.verification.verdict, Verdict::Failed);
+    assert!(
+        fs::read_to_string(run.join("case.stdout.log"))
+            .unwrap()
+            .contains("retained Nix lookup fixture")
+    );
+    let requested: serde_json::Value =
+        serde_json::from_slice(&fs::read(run.join("launch-requested.json")).unwrap()).unwrap();
+    assert_eq!(requested["environment"]["PATH"], stub.to_str().unwrap());
+    let launches: Vec<serde_json::Value> = fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(launches.len(), 2);
+    assert!(
+        launches
+            .iter()
+            .all(|launch| launch["environment"]["PATH"] == stub.to_str().unwrap())
+    );
+}
+
+#[test]
 fn second_service_launch_failure_is_terminal_and_stops_only_own_observer() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();

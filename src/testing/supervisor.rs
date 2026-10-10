@@ -1484,6 +1484,7 @@ pub fn foreground(run: &Path) -> Result<RunStatus> {
 /// CLI must dispatch `worker DIR` / `observe DIR`. Observer restart only attaches.
 pub fn start_detached(run: &Path, executable: &Path) -> Result<Vec<String>> {
     load_spec(run)?;
+    let service_path = std::env::var("PATH")?;
     evidence::check_path(executable)?;
     if !executable.is_absolute() || !executable.is_file() {
         return Err(error("service executable must be an absolute regular file"));
@@ -1516,7 +1517,7 @@ pub fn start_detached(run: &Path, executable: &Path) -> Result<Vec<String>> {
     publish(&run.join("service-executable.json"), &binding)?;
     publish(
         &run.join("launch-requested.json"),
-        &serde_json::json!({"unix_seconds": now(), "executable": binding, "original_executable": executable}),
+        &serde_json::json!({"unix_seconds": now(), "executable": binding, "original_executable": executable, "environment": {"PATH": service_path}}),
     )?;
     let mut units: Vec<String> = Vec::new();
     for role in ["observe", "worker"] {
@@ -1536,6 +1537,9 @@ pub fn start_detached(run: &Path, executable: &Path) -> Result<Vec<String>> {
         .iter()
         .map(|s| (*s).to_string())
         .collect();
+        // current_exe() retains the unwrapped binary. Both services, including
+        // observer restarts, need the wrapper/dev-shell's recorded tool lookup.
+        argv.push(format!("--setenv=PATH={service_path}"));
         if role == "observe" {
             argv.push("--property=Restart=on-failure".into());
         }

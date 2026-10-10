@@ -19,6 +19,8 @@
 
 ### Fixed
 
+- Retry occupied evidence temporary names without replacing interrupted inodes;
+  retain the invoking tool `PATH` for detached worker and observer services.
 - Require existing custody roots and descendants in boot tmpfiles and activation
   directory setup, preserving permission repair and sibling directory creation.
 - Generate authenticated loopback replication rules for source-local recovery,

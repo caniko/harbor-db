@@ -1061,7 +1061,7 @@ source = "tests/supervisor.rs"
 argv_prefix = ["cargo", "test", "--locked", "--features", "testing", "--test", "supervisor"]
 argv_suffix = ["--", "--exact"]
 maturity = "crystallized"
-selectors = ["failed_verdict_dominates_indeterminate_and_incomplete", "foreground_error_stops_observer_without_disk_stop_marker", "heartbeat_advances_without_stdout_or_semantic_progress", "persisted_activity_distinguishes_quiet_logs_heartbeat_and_progress", "second_service_launch_failure_is_terminal_and_stops_only_own_observer", "argv_cases_exclude_ambient_variables_and_keep_the_retained_environment"]
+selectors = ["failed_verdict_dominates_indeterminate_and_incomplete", "foreground_error_stops_observer_without_disk_stop_marker", "heartbeat_advances_without_stdout_or_semantic_progress", "persisted_activity_distinguishes_quiet_logs_heartbeat_and_progress", "second_service_launch_failure_is_terminal_and_stops_only_own_observer", "argv_cases_exclude_ambient_variables_and_keep_the_retained_environment", "restarted_roles_retry_evidence_collisions_without_replacing_stale_inodes", "detached_nix_case_retains_launcher_path_without_service_manager_environment"]
 
 [[inventories]]
 origin = "rust"
