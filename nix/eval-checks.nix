@@ -6,7 +6,8 @@
     resultMessage ? "${name} eval assertions passed",
     nativeBuildInputs ? [],
   }: let
-    checkedAssertions = builtins.map
+    checkedAssertions =
+      builtins.map
       (assertion:
         if assertion.assertion
         then {

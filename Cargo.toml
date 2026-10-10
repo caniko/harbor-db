@@ -20,11 +20,61 @@ path = "src/main.rs"
 name = "home-manager-backup"
 path = "src/bin/home-manager-backup.rs"
 
+[[bin]]
+name = "harbor-db-test"
+path = "src/bin/harbor-db-test.rs"
+required-features = ["testing"]
+
+[[bin]]
+name = "harbor-db-native-supervisor-fixture"
+path = "tests/fixtures/native_supervisor.rs"
+required-features = ["testing"]
+
+[[bin]]
+name = "harbor-db-writer-fence-fixture"
+path = "tests/fixtures/writer_fence.rs"
+required-features = ["testing"]
+
+[[bin]]
+name = "harbor-db-backend-transition-fixture"
+path = "tests/fixtures/backend_transition.rs"
+required-features = ["testing"]
+
+[[bin]]
+name = "harbor-db-provision-fixture"
+path = "tests/fixtures/provision.rs"
+required-features = ["testing"]
+
+[[bin]]
+name = "harbor-db-postgres-transition-fixture"
+path = "tests/fixtures/postgres_transition.rs"
+required-features = ["testing"]
+
+[[bin]]
+name = "harbor-db-postgres-backup-fixture"
+path = "tests/fixtures/postgres_backup.rs"
+required-features = ["testing"]
+
+[[bin]]
+name = "harbor-db-source-local-recovery-fixture"
+path = "tests/fixtures/source_local_recovery.rs"
+required-features = ["testing"]
+
+[features]
+default = []
+testing = ["dep:roxmltree"]
+
 [dependencies]
 chrono = "0.4"
+libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+sha2 = "0.10"
+roxmltree = { version = "0.20", optional = true }
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.9"
+
+[dev-dependencies]
+tempfile = "3"

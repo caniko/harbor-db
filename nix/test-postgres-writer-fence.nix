@@ -1,5 +1,10 @@
-{pkgs}: let
-  tool = import ./postgres-package.nix {inherit pkgs;};
+{
+  pkgs,
+  nativePackage ? null,
+  testPackage ? null,
+}: let
+  tool = import ./postgres-package.nix {inherit pkgs nativePackage;};
+  legacyTool = import ./postgres-package.nix {inherit pkgs;};
   data = "/var/lib/postgres/18";
   authority = "/var/lib/fence-authority";
   startup = "/var/lib/fence-startup";
@@ -47,116 +52,167 @@
             writer_fence.close_fence(config, sys.argv[2])
   '';
 in
-  pkgs.testers.runNixOSTest {
-    name = "harbor-db-postgres-writer-fence";
-    nodes.machine = {
-      imports = [./postgres-lifecycle.nix];
-      virtualisation.memorySize = 1024;
-      services.postgresql = {
-        enable = true;
-        package = pkgs.postgresql_18;
-        dataDir = data;
-        authentication = pkgs.lib.mkForce "local all all trust";
-      };
-      services.harbor-db.postgresql = {
-        stateDir = authority;
-        writerFence.startupStateDir = startup;
-      };
-      systemd.tmpfiles.rules = [
-        "d ${data} 0700 postgres postgres -"
-        "d ${authority} 0700 postgres postgres -"
-      ];
-      environment.systemPackages = [tool pkgs.postgresql_18 pkgs.python3];
-      systemd.services.fixture-client = {
-        requires = ["postgresql.service"];
-        after = ["postgresql.service"];
-        unitConfig.ConditionPathExists = ["/etc/os-release"];
-        serviceConfig = {
-          Type = "oneshot";
-          User = "postgres";
-          Group = "postgres";
-          ExecStart = "${pkgs.postgresql_18}/bin/psql -X -w -d postgres -U application -v ON_ERROR_STOP=1 -c 'INSERT INTO retained VALUES (2)'";
+  assert nativePackage == null || testPackage != null;
+    pkgs.testers.runNixOSTest {
+      extraDriverArgs = ["--junit-xml" "junit.xml"];
+      extraPythonPackages = ps:
+        pkgs.lib.optional (nativePackage != null) (ps.buildPythonPackage {
+          pname = "harbor-db-test-bridge";
+          version = "1";
+          src = ../python;
+          format = "other";
+          dontBuild = true;
+          installPhase = ''
+            mkdir -p "$out/${ps.python.sitePackages}"
+            cp -r harbor_db "$out/${ps.python.sitePackages}/"
+          '';
+        });
+      name = "harbor-db-postgres-writer-fence";
+      nodes.machine = {
+        imports = [./postgres-lifecycle.nix];
+        _module.args.harborDbStoragePackage = nativePackage;
+        virtualisation.memorySize = 1024;
+        services.postgresql = {
+          enable = true;
+          package = pkgs.postgresql_18;
+          dataDir = data;
+          authentication = pkgs.lib.mkForce "local all all trust";
         };
+        services.harbor-db.postgresql = {
+          stateDir = authority;
+          writerFence.startupStateDir = startup;
+        };
+        systemd.tmpfiles.rules = [
+          "d ${data} 0700 postgres postgres -"
+          "d ${authority} 0700 postgres postgres -"
+        ];
+        environment.systemPackages = [tool pkgs.postgresql_18 pkgs.python3];
+        system.extraDependencies = pkgs.lib.optional (nativePackage != null) legacyTool;
+        systemd.services.fixture-client = {
+          requires = ["postgresql.service"];
+          after = ["postgresql.service"];
+          unitConfig.ConditionPathExists = ["/etc/os-release"];
+          serviceConfig = {
+            Type = "oneshot";
+            User = "postgres";
+            Group = "postgres";
+            ExecStart = "${pkgs.postgresql_18}/bin/psql -X -w -d postgres -U application -v ON_ERROR_STOP=1 -c 'INSERT INTO retained VALUES (2)'";
+          };
+        };
+        specialisation.guarded.configuration.services.harbor-db.postgresql.enable = true;
+        specialisation.guarded.configuration.services.harbor-db.postgresql.writerFence.blockedUnits = ["fixture-client.service"];
       };
-      specialisation.guarded.configuration.services.harbor-db.postgresql.enable = true;
-      specialisation.guarded.configuration.services.harbor-db.postgresql.writerFence.blockedUnits = ["fixture-client.service"];
-    };
-    testScript = ''
-      import json
-      start_all()
-      machine.wait_for_unit("postgresql.service")
-      base = machine.succeed("readlink -f /run/current-system").strip()
-      root = "harbor-db-postgres --config ${manifest} "
-      pg = "runuser -u postgres -- " + root
-      query = "runuser -u postgres -- psql -X -w -At -v ON_ERROR_STOP=1 -d postgres "
-      machine.succeed(query + "-c 'CREATE ROLE application LOGIN SUPERUSER; CREATE TABLE retained(id int); INSERT INTO retained VALUES (1)'")
-      identifier = machine.succeed(query + "-c 'SELECT system_identifier FROM pg_control_system()'").strip()
-      held = json.loads(machine.succeed(root + f"inhibit-startup --system-identifier {identifier}"))
-      machine.succeed("systemctl stop postgresql")
-      # The legacy service has no Harbor startup wrapper. Interrupt before the
-      # fence selector exists, then reboot: the persistent root gate must suffice.
-      fault = "runuser -u postgres -- env PYTHONPATH=${tool}/lib python3 ${interrupt} "
-      machine.fail(fault + f"prepare {identifier}")
-      machine.crash()
-      machine.start()
-      machine.wait_for_unit("multi-user.target")
-      machine.succeed("systemctl start postgresql")
-      machine.fail("systemctl is-active postgresql")
-      machine.succeed("test ! -e ${data}/postmaster.pid")
-      machine.succeed("systemctl start postgresql-setup.service")
-      machine.succeed("test \"$(systemctl show postgresql-setup.service -p ConditionResult --value)\" = no")
-      opened = json.loads(machine.succeed(pg + f"fence-open --system-identifier {identifier}"))
-      token = opened["token"]
-      machine.succeed(root + f"release-startup --token {held['token']} --fence-token {token} --phase prepared")
-      machine.succeed("systemctl start postgresql")
-      machine.wait_for_unit("postgresql.service")
-      machine.succeed(pg + f"inspect-fence --token {token}")
-      machine.fail(query + "-U application -c 'INSERT INTO retained VALUES (2)'")
-      # Reboot the unguarded generation with the durable selected HBA.
-      machine.crash()
-      machine.start()
-      machine.wait_for_unit("postgresql.service")
-      machine.succeed(pg + f"inspect-fence --token {token}")
-      machine.fail(query + "-U application -c 'SELECT 1'")
-      machine.succeed("systemctl stop postgresql")
-      machine.succeed(pg + f"adopt --system-identifier {identifier}")
-      machine.succeed(f"{base}/specialisation/guarded/bin/switch-to-configuration test")
-      # Activation preserves an explicitly stopped service's state. Start the
-      # adopted primary separately to exercise the guarded startup wrapper.
-      machine.succeed("systemctl start postgresql")
-      machine.wait_for_unit("postgresql.service")
-      machine.succeed(pg + f"inspect-fence --token {token}")
-      # A gated migration/runtime client is skipped, preserving existing unit
-      # conditions and acknowledged records; PostgreSQL control SQL stays live.
-      machine.succeed("systemctl start fixture-client")
-      machine.succeed("test \"$(systemctl show fixture-client -p ConditionResult --value)\" = no")
-      assert machine.succeed(query + "-c 'SELECT count(*) FROM retained'").strip() == "1"
-      held = json.loads(machine.succeed(root + f"inhibit-startup --system-identifier {identifier}"))
-      machine.succeed("systemctl stop postgresql")
-      machine.fail(fault + f"thaw {token}")
-      machine.fail(root + f"release-startup --token {held['token']} --fence-token {token} --phase closed")
-      # Change back to the legacy unit while thaw is unfinished. NixOS unit
-      # replacement and reboot must retain the system.control drop-in barrier.
-      machine.succeed(f"{base}/bin/switch-to-configuration test")
-      # Unit reload does not evaluate an inactive setup unit's conditions.
-      machine.succeed("systemctl start postgresql-setup.service")
-      machine.succeed("test \"$(systemctl show postgresql-setup.service -p ConditionResult --value)\" = no")
-      machine.fail("systemctl is-active postgresql")
-      machine.succeed("test ! -e ${data}/postmaster.pid")
-      machine.crash()
-      machine.start()
-      machine.wait_for_unit("multi-user.target")
-      machine.succeed("systemctl start postgresql")
-      machine.fail("systemctl is-active postgresql")
-      machine.succeed("test ! -e ${data}/postmaster.pid")
-      machine.succeed("systemctl start postgresql-setup.service")
-      machine.succeed("test \"$(systemctl show postgresql-setup.service -p ConditionResult --value)\" = no")
-      machine.succeed(pg + f"fence-close --token {token}")
-      machine.succeed(root + f"release-startup --token {held['token']} --fence-token {token} --phase closed")
-      machine.succeed("systemctl start postgresql")
-      machine.wait_for_unit("postgresql.service")
-      machine.succeed("systemctl start fixture-client")
-      assert machine.succeed(query + "-c 'SELECT count(*) FROM retained'").strip() == "2"
-      machine.succeed("test -e ${startup}/lock; test ! -e ${startup}/inhibited.json")
-    '';
-  }
+      testScript =
+        if nativePackage != null
+        then ''
+          import os
+          import socket
+          import subprocess
+          from harbor_db.test_bridge import serve
+
+          control, inherited = socket.socketpair()
+          fixture = subprocess.Popen(
+              ["${testPackage}/bin/harbor-db-writer-fence-fixture",
+               "--control-fd", str(inherited.fileno()),
+               "--config", "${manifest}",
+               "--legacy-python-path", "${legacyTool}/lib",
+               "--fault-script", "${interrupt}",
+               "--data-dir", "${data}",
+               "--startup-dir", "${startup}",
+               "--acceptance", os.path.join(os.environ["out"], "writer-fence-acceptance.json")],
+              pass_fds=(inherited.fileno(),),
+          )
+          inherited.close()
+          try:
+              serve(control.fileno(), {"machine": machine})
+          finally:
+              control.close()
+              if fixture.poll() is None:
+                  try:
+                      fixture.wait(timeout=30)
+                  except subprocess.TimeoutExpired:
+                      fixture.kill()
+                      fixture.wait(timeout=30)
+          assert fixture.returncode == 0, fixture.returncode
+        ''
+        else ''
+          import json
+          start_all()
+          machine.wait_for_unit("postgresql.service")
+          base = machine.succeed("readlink -f /run/current-system").strip()
+          root = "harbor-db-postgres --config ${manifest} "
+          pg = "runuser -u postgres -- " + root
+          query = "runuser -u postgres -- psql -X -w -At -v ON_ERROR_STOP=1 -d postgres "
+          machine.succeed(query + "-c 'CREATE ROLE application LOGIN SUPERUSER; CREATE TABLE retained(id int); INSERT INTO retained VALUES (1)'")
+          identifier = machine.succeed(query + "-c 'SELECT system_identifier FROM pg_control_system()'").strip()
+          held = json.loads(machine.succeed(root + f"inhibit-startup --system-identifier {identifier}"))
+          machine.succeed("systemctl stop postgresql")
+          # The legacy service has no Harbor startup wrapper. Interrupt before the
+          # fence selector exists, then reboot: the persistent root gate must suffice.
+          fault = "runuser -u postgres -- env PYTHONPATH=${legacyTool}/lib python3 -B ${interrupt} "
+          code, output = machine.execute(fault + f"prepare {identifier} 2>&1")
+          assert code != 0 and "interrupted before selector publication" in output, output
+          machine.crash()
+          machine.start()
+          machine.wait_for_unit("multi-user.target")
+          machine.succeed("systemctl start postgresql")
+          machine.fail("systemctl is-active postgresql")
+          machine.succeed("test ! -e ${data}/postmaster.pid")
+          machine.succeed("systemctl start postgresql-setup.service")
+          machine.succeed("test \"$(systemctl show postgresql-setup.service -p ConditionResult --value)\" = no")
+          opened = json.loads(machine.succeed(pg + f"fence-open --system-identifier {identifier}"))
+          token = opened["token"]
+          machine.succeed(root + f"release-startup --token {held['token']} --fence-token {token} --phase prepared")
+          machine.succeed("systemctl start postgresql")
+          machine.wait_for_unit("postgresql.service")
+          machine.succeed(pg + f"inspect-fence --token {token}")
+          machine.fail(query + "-U application -c 'INSERT INTO retained VALUES (2)'")
+          # Reboot the unguarded generation with the durable selected HBA.
+          machine.crash()
+          machine.start()
+          machine.wait_for_unit("postgresql.service")
+          machine.succeed(pg + f"inspect-fence --token {token}")
+          machine.fail(query + "-U application -c 'SELECT 1'")
+          machine.succeed("systemctl stop postgresql")
+          machine.succeed(pg + f"adopt --system-identifier {identifier}")
+          machine.succeed(f"{base}/specialisation/guarded/bin/switch-to-configuration test")
+          # Activation preserves an explicitly stopped service's state. Start the
+          # adopted primary separately to exercise the guarded startup wrapper.
+          machine.succeed("systemctl start postgresql")
+          machine.wait_for_unit("postgresql.service")
+          machine.succeed(pg + f"inspect-fence --token {token}")
+          # A gated migration/runtime client is skipped, preserving existing unit
+          # conditions and acknowledged records; PostgreSQL control SQL stays live.
+          machine.succeed("systemctl start fixture-client")
+          machine.succeed("test \"$(systemctl show fixture-client -p ConditionResult --value)\" = no")
+          assert machine.succeed(query + "-c 'SELECT count(*) FROM retained'").strip() == "1"
+          held = json.loads(machine.succeed(root + f"inhibit-startup --system-identifier {identifier}"))
+          machine.succeed("systemctl stop postgresql")
+          code, output = machine.execute(fault + f"thaw {token} 2>&1")
+          assert code != 0 and "interrupted after original selector restoration" in output, output
+          machine.fail(root + f"release-startup --token {held['token']} --fence-token {token} --phase closed")
+          # Change back to the legacy unit while thaw is unfinished. NixOS unit
+          # replacement and reboot must retain the system.control drop-in barrier.
+          machine.succeed(f"{base}/bin/switch-to-configuration test")
+          # Unit reload does not evaluate an inactive setup unit's conditions.
+          machine.succeed("systemctl start postgresql-setup.service")
+          machine.succeed("test \"$(systemctl show postgresql-setup.service -p ConditionResult --value)\" = no")
+          machine.fail("systemctl is-active postgresql")
+          machine.succeed("test ! -e ${data}/postmaster.pid")
+          machine.crash()
+          machine.start()
+          machine.wait_for_unit("multi-user.target")
+          machine.succeed("systemctl start postgresql")
+          machine.fail("systemctl is-active postgresql")
+          machine.succeed("test ! -e ${data}/postmaster.pid")
+          machine.succeed("systemctl start postgresql-setup.service")
+          machine.succeed("test \"$(systemctl show postgresql-setup.service -p ConditionResult --value)\" = no")
+          machine.succeed(pg + f"fence-close --token {token}")
+          machine.succeed(root + f"release-startup --token {held['token']} --fence-token {token} --phase closed")
+          machine.succeed("systemctl start postgresql")
+          machine.wait_for_unit("postgresql.service")
+          machine.succeed("systemctl start fixture-client")
+          assert machine.succeed(query + "-c 'SELECT count(*) FROM retained'").strip() == "2"
+          machine.succeed("test -e ${startup}/lock; test ! -e ${startup}/inhibited.json")
+        '';
+    }

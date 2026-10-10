@@ -15,7 +15,7 @@ import socket
 import time
 from pathlib import Path
 
-from . import postgres, writer_fence
+from . import postgres, writer_fence, recovery_repository
 from .durable import lock, read_json, write_json
 
 
@@ -42,6 +42,7 @@ def fresh(timestamp, now, max_age):
 
 def policy(config):
     settings = config["recovery"]
+    recovery_repository.source_local(settings)
     if type(settings.get("require_writer_fence", False)) is not bool:
         raise ValueError("recovery writer fence requirement must be a boolean")
     paths = [settings["snapshot_file"], settings["receipt_file"]]
@@ -77,6 +78,16 @@ def lsn(value):
 
 
 def backup(config, settings, now):
+    directory, binding, _ = selected_backup(config, settings, now)
+    return directory, binding
+
+
+def selected_backup(config, settings, now):
+    if recovery_repository.source_local(settings):
+        selected = recovery_repository.select(config, settings, now)
+        if postgres.inspect_cluster(config["package"], selected.directory, config["major"]) != settings["system_identifier"]:
+            raise ValueError("backup control-file identity differs from the primary")
+        return selected.directory, dict(selected.binding), selected
     root = absolute(settings["backup_root"])
     marker = absolute(root / "LAST_SUCCESS")
     fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)
@@ -101,7 +112,7 @@ def backup(config, settings, now):
         "major": str(config["major"]), "epoch_id": meta["epoch_id"],
         "manifest_sha256": digest(manifest), "recovery_target_lsn": meta["post_backup_lsn"],
         "metadata_sha256": digest(metadata),
-    }
+    }, None
 
 
 def verify_backup(config, directory):
@@ -142,6 +153,31 @@ def evidence(path, label, binding, settings, now):
         raise ValueError(f"{label} record-check contract differs")
     fresh(value.get("completed_at"), now, settings["max_age_seconds"])
     return value
+
+
+def validate_capture_source(config, settings, source, now):
+    # The caller retains the repository lease. Independent certifiers use the
+    # copied source token, rather than requiring a local primary fence.
+    if recovery_repository.source_local(settings):
+        selected = recovery_repository.select(config, settings, now)
+        if any(source.get(key) != value for key, value in selected.binding.items()):
+            raise ValueError("record snapshot is for a different backup")
+        selected.validate_snapshot(source.get("writer_fence_token"), source.get("records"))
+        if source.get("completed_at") != selected.metadata["completed_at"]:
+            raise ValueError("source-local snapshot completion differs from its immutable capture")
+
+
+def source_snapshot_path(config, settings):
+    """Resolve source evidence under the caller's retained repository lease."""
+    if recovery_repository.source_local(settings):
+        return recovery_repository.select(config, settings, int(time.time())).snapshot_path
+    return Path(settings["snapshot_file"])
+
+
+def snapshot_evidence(config, settings, binding, now):
+    source = evidence(source_snapshot_path(config, settings), "record snapshot", binding, settings, now)
+    validate_capture_source(config, settings, source, now)
+    return source
 
 
 @contextlib.contextmanager
@@ -192,9 +228,11 @@ def source_fence(settings, source):
 
 def snapshot(config, socket_dir, port, *, now=None):
     settings = policy(config)
+    if recovery_repository.source_local(settings) and not settings.get("require_writer_fence", False):
+        raise ValueError("source-local snapshots require the writer fence")
     now = int(time.time()) if now is None else now
     with writer_exclusion(config, socket_dir, port) as fence, lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings):
-        directory, binding = backup(config, settings, now)
+        directory, binding, selected = selected_backup(config, settings, now)
         postgres.inspect_live(config, settings["system_identifier"], socket_dir, port)
         verify_backup(config, directory)
         result = {"version": 1, **binding, "completed_at": now,
@@ -202,6 +240,9 @@ def snapshot(config, socket_dir, port, *, now=None):
                    "records": records(config, settings, socket_dir, port)}
         if fence is not None:
             result["writer_fence_token"] = fence["token"]
+        if selected is not None:
+            selected.validate_snapshot(result.get("writer_fence_token"), result["records"])
+            return snapshot_evidence(config, settings, binding, now)
         write_json(absolute(settings["snapshot_file"]), result)
     return result
 
@@ -227,7 +268,7 @@ def certify(config, data_dir, socket_dir, port, *, now=None, hostname=None):
         raise ValueError("cannot certify the authoritative primary as a restored copy")
     with lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings):
         directory, binding = backup(config, settings, now)
-        source = evidence(settings["snapshot_file"], "record snapshot", binding, settings, now)
+        source = snapshot_evidence(config, settings, binding, now)
         source_fence(settings, source)
         verify_backup(config, directory)
         observed = inspect_restored(config, socket_dir, port)
@@ -242,7 +283,7 @@ def certify(config, data_dir, socket_dir, port, *, now=None, hostname=None):
             raise ValueError("restored application records differ from the source snapshot")
         result = {"version": 1, "status": "ready", **binding, "completed_at": now,
                   "record_contract_sha256": contract(settings), "records": actual,
-                  "snapshot_sha256": digest(settings["snapshot_file"]),
+                   "snapshot_sha256": digest(source_snapshot_path(config, settings)),
                   "executor_host": socket.gethostname() if hostname is None else hostname,
                   "restored_data_dir": str(restored), "replay_lsn": observed["replay_lsn"]}
         write_json(absolute(settings["receipt_file"]), result)
@@ -258,10 +299,12 @@ def live_check(config, socket_dir, port, *, now=None):
     """Read-only whole-primary acceptance at the current fenced record boundary."""
     settings = policy(config)
     with admission(config, now=now, socket_dir=socket_dir, port=port) as result:
-        source = read_json(settings["snapshot_file"])
+        source = read_json(source_snapshot_path(config, settings))
+        if recovery_repository.source_local(settings):
+            validate_capture_source(config, settings, source, int(time.time()) if now is None else now)
         if records(config, settings, socket_dir, port) != source["records"]:
             raise ValueError("live primary records differ from the accepted recovery snapshot")
-        return {**result, "snapshot_sha256": digest(settings["snapshot_file"])}
+        return {**result, "snapshot_sha256": digest(source_snapshot_path(config, settings))}
 
 
 @contextlib.contextmanager
@@ -283,7 +326,7 @@ def preflight(config, *, now=None):
 
 
 def check_evidence(config, settings, directory, binding, now, *, verify_contents=True, fence=None):
-    source = evidence(settings["snapshot_file"], "record snapshot", binding, settings, now)
+    source = snapshot_evidence(config, settings, binding, now)
     recorded_fence = source_fence(settings, source)
     if settings.get("require_writer_fence", False) and (fence is None or recorded_fence != fence["token"]):
         raise ValueError("record snapshot writer fence differs from the retained window")
@@ -309,7 +352,7 @@ def check_evidence(config, settings, directory, binding, now, *, verify_contents
 
 def validate_receipt(config, settings, source, binding, receipt, label):
     if (receipt.get("status") != "ready" or receipt.get("records") != source["records"]
-            or receipt.get("snapshot_sha256") != digest(settings["snapshot_file"])
+            or receipt.get("snapshot_sha256") != digest(source_snapshot_path(config, settings))
             or receipt.get("restored_data_dir") == config["data_dir"]
             or not receipt.get("restored_data_dir")
             or receipt["completed_at"] < source["completed_at"]
@@ -331,7 +374,7 @@ def import_off_host(config, path, *, now=None):
         directory, binding = backup(config, settings, now)
         local = settings | {"off_host_receipt_file": None}
         check_evidence(config, local, directory, binding, now, fence=fence)
-        source = evidence(settings["snapshot_file"], "record snapshot", binding, settings, now)
+        source = snapshot_evidence(config, settings, binding, now)
         receipt = evidence(path, "off-host restore acceptance", binding, settings, now)
         validate_receipt(config, settings, source, binding, receipt, "off-host restore acceptance")
         write_json(absolute(settings["off_host_receipt_file"]), receipt)
@@ -349,12 +392,31 @@ def prepare(config, preparation, socket_dir, port):
         ) or not Path(argv[0]).is_absolute():
             raise ValueError(f"{key} must be explicit absolute executable argv")
     anchor = absolute(settings["snapshot_file"]).parent / "preparation.lock"
-    with writer_exclusion(config, socket_dir, port) as fence, lock(anchor, create=True):
+    with writer_exclusion(config, socket_dir, port) as fence:
+        if recovery_repository.source_local(settings):
+            with lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True):
+                if not (absolute(settings["backup_root"]) / "recovery/SELECTED").exists():
+                    raise ValueError("source-local preparation requires an explicitly published producer capture")
+                with evidence_lease(settings, inspect=True):
+                    _, binding = backup(config, settings, int(time.time()))
+                    snapshot_evidence(config, settings, binding, int(time.time()))
+        return _prepare_fenced(config, preparation, socket_dir, port, settings, anchor, fence)
+
+
+def _prepare_fenced(config, preparation, socket_dir, port, settings, anchor, fence):
+    with lock(anchor, create=True):
         postgres.inspect_live(config, settings["system_identifier"], socket_dir, port)
         postgres.run(preparation["readiness_command"])
         # A published snapshot binds the selected backup. Never replace that
         # backup on retries, even when off-host evidence is still missing.
-        if not Path(settings["snapshot_file"]).exists():
+        if recovery_repository.source_local(settings):
+            with lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True):
+                source_snapshot = source_snapshot_path(config, settings)
+        else:
+            source_snapshot = Path(settings["snapshot_file"])
+        if recovery_repository.source_local(settings) and not source_snapshot.exists():
+            raise ValueError("source-local preparation requires an explicitly published producer snapshot")
+        if not source_snapshot.exists():
             journal = anchor.with_name("preparation.json")
             if not journal.exists():
                 if any(Path(settings[key]).exists() for key in ("receipt_file", "off_host_receipt_file")
@@ -373,7 +435,7 @@ def prepare(config, preparation, socket_dir, port):
             now = int(time.time())
             with lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings, inspect=True):
                 directory, binding = backup(config, settings, now)
-                source = evidence(settings["snapshot_file"], "record snapshot", binding, settings, now)
+                source = snapshot_evidence(config, settings, binding, now)
                 if settings.get("require_writer_fence", False) and source_fence(settings, source) != fence["token"]:
                     raise ValueError("record snapshot writer fence differs from the retained window")
                 verify_backup(config, directory)

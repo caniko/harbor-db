@@ -1,5 +1,8 @@
-{pkgs}: let
-  tool = import ./postgres-package.nix {inherit pkgs;};
+{
+  pkgs,
+  nativePackage ? null,
+}: let
+  tool = import ./postgres-package.nix {inherit pkgs nativePackage;};
   old = pkgs.postgresql_17;
   new = pkgs.postgresql_18;
   state = "/var/lib/harbor-db/postgresql";
@@ -48,9 +51,11 @@
   });
 in
   pkgs.testers.runNixOSTest {
+    extraDriverArgs = ["--junit-xml" "junit.xml"];
     name = "harbor-db-interrupted-pg-upgrade";
     nodes.machine = {
       imports = [./postgres-lifecycle.nix];
+      _module.args.harborDbStoragePackage = nativePackage;
       virtualisation.memorySize = 1024;
       services.postgresql = {
         enable = true;

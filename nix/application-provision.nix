@@ -3,6 +3,7 @@
   lib,
   pkgs,
   options,
+  harborDbStoragePackage ? null,
   ...
 }: let
   inherit (lib) mkOption types;
@@ -10,7 +11,10 @@
   unit = types.strMatching "[A-Za-z0-9_@.:-]+\\.service";
   projects = lib.filterAttrs (_: project: project.postgres.provision.enable) config.services.harbor-db.projects;
   policies = lib.mapAttrs (_: project: project.postgres.provision) projects;
-  package = import ./postgres-package.nix {inherit pkgs;};
+  package = import ./postgres-package.nix {
+    inherit pkgs;
+    nativePackage = harborDbStoragePackage;
+  };
   manifest = name: policy:
     pkgs.writeText "harbor-db-${name}-provision.json" (builtins.toJSON {
       version = 1;
@@ -24,7 +28,7 @@
       endpoint = {
         package = toString config.services.postgresql.package;
         socket_dir = policy.socketDirectory;
-        port = policy.port;
+        inherit (policy) port;
         control_role = "postgres";
         lock_file = "/var/lib/harbor-db-provision/lock";
       };
@@ -35,6 +39,7 @@
     ConditionPathExists = ["!${config.services.harbor-db.postgresql.stateDir}/writer-fence.json"];
   };
 in {
+  imports = [./storage-package-argument.nix];
   options.services.harbor-db.projects = mkOption {
     type = types.attrsOf (types.submodule {
       options.postgres.provision = {

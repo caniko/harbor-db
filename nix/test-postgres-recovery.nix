@@ -1,5 +1,8 @@
-{pkgs}: let
-  tool = import ./postgres-package.nix {inherit pkgs;};
+{
+  pkgs,
+  nativePackage ? null,
+}: let
+  tool = import ./postgres-package.nix {inherit pkgs nativePackage;};
   template = pkgs.writeText "recovery-template.json" (builtins.toJSON {
     resource = "recovery-fixture";
     data_dir = "/var/lib/postgres/18";
@@ -51,6 +54,7 @@
   };
 in
   pkgs.testers.runNixOSTest {
+    extraDriverArgs = ["--junit-xml" "junit.xml"];
     name = "harbor-db-postgres-recovery-acceptance";
     nodes = {
       primary = {

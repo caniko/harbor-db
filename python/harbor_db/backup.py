@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from .durable import lock, sync_directory
+from .backup_pins import protection
 
 
 def prune(root, base_days, wal_days, segment_bytes, *, now=None):
@@ -21,7 +22,7 @@ def prune(root, base_days, wal_days, segment_bytes, *, now=None):
         raise ValueError("invalid PostgreSQL WAL segment size")
     root = Path(root)
     now = time.time() if now is None else now
-    with lock(root / "BACKUP_LOCK", create=True):
+    with protection(root, segment_bytes) as pinned, lock(root / "BACKUP_LOCK", create=True):
         base = root / "base"
         backups = [p for p in base.iterdir() if not p.name.endswith(".partial")]
         if any(p.is_symlink() or not p.is_dir() for p in backups):
@@ -29,7 +30,7 @@ def prune(root, base_days, wal_days, segment_bytes, *, now=None):
         backups.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         retained, expired = [], []
         for index, path in enumerate(backups):
-            if index < 2 or path.stat().st_mtime >= now - base_days * 86400:
+            if index < 2 or path.stat().st_mtime >= now - base_days * 86400 or path.name in pinned:
                 retained.append(path)
             else:
                 expired.append(path)

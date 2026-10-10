@@ -2,6 +2,7 @@
   config,
   lib,
   pkgs,
+  harborDbStoragePackage ? null,
   ...
 }: let
   inherit (lib) mkEnableOption mkIf mkOption types;
@@ -31,23 +32,27 @@
       };
     }
     // lib.optionalAttrs (cfg.recovery != null) {
-      recovery = {
-        system_identifier = cfg.recovery.systemIdentifier;
-        require_writer_fence = cfg.recovery.requireWriterFence;
-        backup_root = cfg.recovery.backupRoot;
-        snapshot_file = cfg.recovery.snapshotFile;
-        receipt_file = cfg.recovery.receiptFile;
-        off_host_receipt_file = cfg.recovery.offHostReceiptFile;
-        source_hostname = cfg.recovery.sourceHostname;
-        max_age_seconds = cfg.recovery.maxAgeSeconds;
-        verify_timeout_seconds = cfg.recovery.verifyTimeoutSeconds;
-        record_checks =
-          lib.mapAttrsToList (name: check: {
-            inherit name;
-            inherit (check) database sql;
-          })
-          cfg.recovery.recordChecks;
-      };
+      recovery =
+        {
+          system_identifier = cfg.recovery.systemIdentifier;
+          require_writer_fence = cfg.recovery.requireWriterFence;
+          backup_root = cfg.recovery.backupRoot;
+          snapshot_file = cfg.recovery.snapshotFile;
+          receipt_file = cfg.recovery.receiptFile;
+          off_host_receipt_file = cfg.recovery.offHostReceiptFile;
+          source_hostname = cfg.recovery.sourceHostname;
+          max_age_seconds = cfg.recovery.maxAgeSeconds;
+          verify_timeout_seconds = cfg.recovery.verifyTimeoutSeconds;
+          record_checks =
+            lib.mapAttrsToList (name: check: {
+              inherit name;
+              inherit (check) database sql;
+            })
+            cfg.recovery.recordChecks;
+        }
+        // lib.optionalAttrs (cfg.recovery.repositoryProtocol != "legacy") {
+          repository_protocol = cfg.recovery.repositoryProtocol;
+        };
     }
     // lib.optionalAttrs (cfg.upgrade != null) {
       upgrade = {
@@ -78,12 +83,15 @@
     export_command = preparation.exportCommand;
   });
 in {
-  imports = [./postgres-writer-clients.nix];
+  imports = [./postgres-writer-clients.nix ./storage-package-argument.nix];
   options.services.harbor-db.postgresql = {
     enable = mkEnableOption "adopted PostgreSQL identity guards and staged upgrades";
     package = mkOption {
       type = types.package;
-      default = import ./postgres-package.nix {inherit pkgs;};
+      default = import ./postgres-package.nix {
+        inherit pkgs;
+        nativePackage = harborDbStoragePackage;
+      };
       description = "Harbor DB PostgreSQL lifecycle adapter.";
     };
     resource = mkOption {
@@ -119,6 +127,11 @@ in {
             description = "Require confirmed writer exclusion and the same fence token in the source snapshot before live adoption and cutover. Disable only when retiring accepted bootstrap enrollment; active fencing remains enforced at startup.";
           };
           backupRoot = mkOption {type = types.strMatching "/.*";};
+          repositoryProtocol = mkOption {
+            type = types.enum ["legacy" "source-local-v1"];
+            default = "legacy";
+            description = "Recovery repository selection. source-local-v1 consumes an immutable fenced capture under recovery/ and preserves the backup service's legacy LAST_SUCCESS timestamp.";
+          };
           snapshotFile = mkOption {type = types.strMatching "/.*";};
           receiptFile = mkOption {type = types.strMatching "/.*";};
           offHostReceiptFile = mkOption {

@@ -2,9 +2,11 @@
   pkgs,
   module,
   withPostgres ? false,
+  nativePackage ? null,
+  testPackage ? null,
 }: let
-  inherit (pkgs) lib;
-  storage = import ./postgres-package.nix {inherit pkgs;};
+  storage = import ./postgres-package.nix {inherit pkgs nativePackage;};
+  legacyStorage = import ./postgres-package.nix {inherit pkgs;};
   sourceAuthority = {
     resource = "demo";
     state_dir = "/var/lib/demo-authority";
@@ -99,6 +101,13 @@
     elif stage == "import":
         backup = pathlib.Path(args[0])
         new.write_bytes((backup / "records").read_bytes())
+        if ${
+      if !withPostgres && nativePackage != null
+      then "True"
+      else "False"
+    }:
+            counter = new.parent / "import-count"
+            counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))
         if postgres:
             sql("SET ROLE demo_owner; INSERT INTO documents VALUES (1,'source-revision-seven') ON CONFLICT (id) DO UPDATE SET body=EXCLUDED.body")
             counter = new.parent / "import-count"
@@ -119,6 +128,17 @@
     elif stage != "cleanup": raise ValueError(stage)
   '';
   command = stage: ["${pkgs.python3}/bin/python3" (toString adapter) stage "{backup}" "{workspace}"];
+  recoveryDirectories = [
+    "d /var/lib/demo-primary-backup 0700 postgres postgres -"
+    "d /var/lib/demo-primary-backup/base 0700 postgres postgres -"
+    "d /var/lib/demo-primary-backup/locks 0700 postgres postgres -"
+    "f /var/lib/demo-primary-backup/locks/mutate 0600 postgres postgres -"
+    "d /var/lib/demo-primary-backup/evidence 0700 postgres postgres -"
+    "f /var/lib/demo-primary-backup/evidence/recovery.lock 0600 postgres postgres -"
+    "d /var/lib/demo-recovered 0700 postgres postgres -"
+    "d /var/lib/demo-restore-wal 0700 postgres postgres -"
+    "d /var/lib/demo-recovery-socket 0700 postgres postgres -"
+  ];
   common = {lib, ...}: {
     imports = [module];
     services.timesyncd.enable = lib.mkForce false;
@@ -127,7 +147,10 @@
       group = "demo";
     };
     users.groups.demo = {};
-    environment.systemPackages = [storage pkgs.python3 pkgs.gnutar pkgs.gzip pkgs.coreutils];
+    environment.systemPackages =
+      [storage pkgs.python3 pkgs.gnutar pkgs.gzip pkgs.coreutils]
+      ++ lib.optionals (withPostgres && nativePackage != null) [pkgs.nix pkgs.postgresql_18 pkgs.bash pkgs.util-linux pkgs.systemd];
+    system.extraDependencies = pkgs.lib.optional (!withPostgres && nativePackage != null) legacyStorage;
     systemd.tmpfiles.rules = [
       "d /var/lib/demo-authority 0700 demo demo -"
       "d /var/lib/demo-old 0700 demo demo -"
@@ -151,132 +174,228 @@
     system.stateVersion = "26.05";
   };
 in
-  pkgs.testers.runNixOSTest {
-    name = "harbor-db-application-${
-      if withPostgres
-      then "postgres"
-      else "backend"
-    }-transition";
-    nodes = {
-      primary = {
-        config,
-        lib,
-        ...
-      }: {
-        imports = [common];
-        services.harbor-db.projects.demo.transition = {
-          enable = true;
-          sourceManifest = toString sourceManifest;
-          targetManifest = toString targetManifest;
-          backupManifest = toString config.environment.etc."harbor-db/demo-backup.json".source;
-          targetCustodyManifest = toString custodyManifest;
-          independentReceipt = "/var/lib/demo-authority/independent.json";
-          runtimeUnits = ["demo.service"];
-          postgresManifest =
-            if withPostgres
-            then toString postgresManifest
-            else null;
-          commands = lib.genAttrs ["import" "verify-target" "verify-source" "health"] (stage: {
-            user =
-              if withPostgres && lib.elem stage ["import" "verify-target"]
-              then "postgres"
-              else "demo";
-            argv = ["${pkgs.python3}/bin/python3" (toString adapter) stage "{backup}"];
-          });
-          executableFiles = [(toString adapter)];
-        };
-        services.postgresql = lib.mkIf withPostgres {
-          enable = true;
-          package = pkgs.postgresql_18;
-          dataDir = "/var/lib/postgres/18";
-          authentication = lib.mkBefore "local replication postgres peer\nlocal all demo_runtime peer map=demo\n";
-          identMap = "demo demo demo_runtime";
-        };
-        users.users = lib.optionalAttrs withPostgres {postgres.extraGroups = ["demo" "demo-backup"];};
-        environment.systemPackages = lib.optionals withPostgres [pkgs.nix pkgs.postgresql_18];
-        systemd.tmpfiles.rules = lib.optionals withPostgres [
-          "d /var/lib/postgres/18 0700 postgres postgres -"
-          "d /var/lib/demo-primary-authority 0700 postgres postgres -"
-          "d /var/lib/demo-primary-backup 0700 postgres postgres -"
-          "d /var/lib/demo-primary-backup/base 0700 postgres postgres -"
-          "d /var/lib/demo-primary-backup/locks 0700 postgres postgres -"
-          "f /var/lib/demo-primary-backup/locks/mutate 0600 postgres postgres -"
-          "d /var/lib/demo-primary-backup/evidence 0700 postgres postgres -"
-          "f /var/lib/demo-primary-backup/evidence/recovery.lock 0600 postgres postgres -"
-          "d /var/lib/demo-recovered 0700 postgres postgres -"
-          "d /var/lib/demo-restore-wal 0700 postgres postgres -"
-          "d /var/lib/demo-recovery-socket 0700 postgres postgres -"
-        ];
-        systemd.services.demo.serviceConfig = {
-          User = "demo";
-          ExecStart = "${pkgs.python3}/bin/python3 ${adapter} writer source";
-        };
-        specialisation = lib.optionalAttrs (!withPostgres) {
-          target.configuration = {config, ...}: {
-            services.harbor-db.cutover = {
-              enable = true;
-              resources.demo = custody // {transition_manifest = toString config.services.harbor-db.projects.demo.transition.manifest;};
+  assert nativePackage == null || testPackage != null;
+    pkgs.testers.runNixOSTest {
+      extraDriverArgs = ["--junit-xml" "junit.xml"];
+      extraPythonPackages = ps:
+        pkgs.lib.optional (nativePackage != null) (ps.buildPythonPackage {
+          pname = "harbor-db-test-bridge";
+          version = "1";
+          src = ../python;
+          format = "other";
+          dontBuild = true;
+          installPhase = ''
+            mkdir -p "$out/${ps.python.sitePackages}"
+            cp -r harbor_db "$out/${ps.python.sitePackages}/"
+          '';
+        });
+      name = "harbor-db-application-${
+        if withPostgres
+        then "postgres"
+        else "backend"
+      }-transition";
+      nodes = {
+        primary = {
+          config,
+          lib,
+          ...
+        }: {
+          imports = [common];
+          services.harbor-db.projects.demo.transition = {
+            enable = true;
+            sourceManifest = toString sourceManifest;
+            targetManifest = toString targetManifest;
+            backupManifest = toString config.environment.etc."harbor-db/demo-backup.json".source;
+            targetCustodyManifest = toString custodyManifest;
+            independentReceipt = "/var/lib/demo-authority/independent.json";
+            runtimeUnits = ["demo.service"];
+            postgresManifest =
+              if withPostgres
+              then toString postgresManifest
+              else null;
+            commands = lib.genAttrs ["import" "verify-target" "verify-source" "health"] (stage: {
+              user =
+                if withPostgres && lib.elem stage ["import" "verify-target"]
+                then "postgres"
+                else "demo";
+              argv = ["${pkgs.python3}/bin/python3" (toString adapter) stage "{backup}"];
+            });
+            executableFiles = [(toString adapter)];
+          };
+          services.postgresql = lib.mkIf withPostgres {
+            enable = true;
+            package = pkgs.postgresql_18;
+            dataDir = "/var/lib/postgres/18";
+            authentication = lib.mkBefore "local replication postgres peer\nlocal all demo_runtime peer map=demo\n";
+            identMap = "demo demo demo_runtime";
+          };
+          users.users = lib.optionalAttrs withPostgres {postgres.extraGroups = ["demo" "demo-backup"];};
+          environment.systemPackages = lib.optionals withPostgres [pkgs.nix pkgs.postgresql_18];
+          systemd.tmpfiles.rules =
+            lib.optionals withPostgres [
+              "d /var/lib/postgres/18 0700 postgres postgres -"
+              "d /var/lib/demo-primary-authority 0700 postgres postgres -"
+            ]
+            ++ lib.optionals withPostgres recoveryDirectories;
+          systemd.services.demo.serviceConfig = {
+            User = "demo";
+            ExecStart = "${pkgs.python3}/bin/python3 ${adapter} writer source";
+          };
+          specialisation = lib.optionalAttrs (!withPostgres) {
+            target.configuration = {config, ...}: {
+              services.harbor-db.cutover = {
+                enable = true;
+                resources.demo = custody // {transition_manifest = toString config.services.harbor-db.projects.demo.transition.manifest;};
+              };
+              systemd.services.demo.serviceConfig.ExecStart = lib.mkForce "${pkgs.python3}/bin/python3 ${adapter} writer target";
             };
-            systemd.services.demo.serviceConfig.ExecStart = lib.mkForce "${pkgs.python3}/bin/python3 ${adapter} writer target";
           };
         };
+        certifier = {
+          config,
+          lib,
+          ...
+        }: {
+          imports = [common];
+          users.groups = lib.optionalAttrs (withPostgres && nativePackage != null) {
+            postgres.gid = config.ids.gids.postgres;
+          };
+          users.users = lib.optionalAttrs (withPostgres && nativePackage != null) {
+            postgres = {
+              isSystemUser = true;
+              group = "postgres";
+              uid = config.ids.uids.postgres;
+            };
+          };
+          systemd.tmpfiles.rules = lib.optionals (withPostgres && nativePackage != null) recoveryDirectories;
+        };
       };
-      certifier = common;
-    };
-    testScript =
-      if withPostgres
-      then builtins.readFile ./test-application-postgres-transition.py
-      else ''
-        import json
-        start_all()
-        def align(receiver, sender):
-            seconds = max(int(host.succeed("date +%s").strip()) for host in (receiver, sender))
-            receiver.succeed(f"date --set=@{seconds}")
-        primary.wait_for_unit("multi-user.target")
-        certifier.wait_for_unit("multi-user.target")
-        primary.succeed("runuser -u demo -- sh -c 'printf source-revision-seven > /var/lib/demo-old/records'")
-        primary.succeed("runuser -u demo -- harbor-db-resource --config ${sourceManifest} adopt --identity retained-resource")
-        primary.succeed("systemctl start demo.service")
-        primary.wait_for_unit("demo.service")
-        contract = primary.succeed("readlink -f /etc/harbor-db/demo-transition.json").strip()
-        transition = f"harbor-db-transition --config {contract}"
-        primary.succeed(transition + " plan --candidate " + contract)
-        result = json.loads(primary.succeed(transition + " prepare"))
-        assert result["status"] == "awaiting-independent-restore"
-        primary.fail("systemctl is-active demo.service")
-        primary.succeed("systemctl start demo.service")
-        primary.fail("systemctl is-active demo.service")
-        primary.fail("runuser -u demo -- harbor-db-resource --config ${sourceManifest} check")
-        primary.crash()
-        primary.start()
-        primary.wait_for_unit("multi-user.target")
-        primary.succeed("systemctl start demo.service")
-        primary.fail("systemctl is-active demo.service")
-        point = result["backup"].split("/")[-1]
-        archive = primary.succeed(f"tar -C /var/lib/demo-backups -czf - {point} | base64 -w0").strip()
-        certifier.succeed(f"printf '%s' '{archive}' | base64 -d | tar -xzf - -C /var/lib/demo-backups")
-        align(certifier, primary)
-        backup_contract = certifier.succeed("readlink -f /etc/harbor-db/demo-backup.json").strip()
-        proof = json.loads(certifier.succeed(f"runuser -u demo -- harbor-db-application-backup --config {backup_contract} certify /var/lib/demo-backups/{point} --state /var/lib/demo-certifier"))
-        encoded = certifier.succeed(f"base64 -w0 /var/lib/demo-certifier/{proof['source_acceptance_sha256']}.json").strip()
-        primary.succeed(f"printf '%s' '{encoded}' | base64 -d > /var/lib/demo-authority/independent.json")
-        align(primary, certifier)
-        assert json.loads(primary.succeed(transition + " prepare"))["phase"] == "prepared"
-        candidate = primary.succeed("readlink -f /run/current-system/specialisation/target").strip()
-        primary.succeed(transition + " bind-candidate --candidate " + candidate)
-        primary.succeed(candidate + "/bin/switch-to-configuration test")
-        primary.fail("systemctl is-active demo.service")
-        primary.succeed(transition + " commit")
-        primary.succeed("test -f /var/lib/harbor-db-transitions/demo/inhibited.json")
-        primary.succeed(transition + " enable-writes")
-        primary.succeed("systemctl start demo.service")
-        primary.wait_for_unit("demo.service")
-        primary.succeed(transition + " complete")
-        primary.fail(transition + " abort")
-        primary.succeed("runuser -u demo -- harbor-db-resource --config ${targetManifest} check")
-        primary.fail("runuser -u demo -- harbor-db-resource --config ${sourceManifest} check")
-        primary.succeed(transition + " retire")
-        primary.succeed("test -f /var/lib/demo-old/records")
-        primary.succeed("grep acknowledged /var/lib/demo-new/records")
-      '';
-  }
+      testScript = {nodes, ...}:
+        if withPostgres && nativePackage != null
+        then ''
+          import json
+          import os
+          import socket
+          import subprocess
+          from harbor_db.test_bridge import serve
+
+          configuration = json.loads(${builtins.toJSON (builtins.toJSON {
+            native_package = toString nativePackage;
+            storage_package = toString storage;
+            postgres_package = toString pkgs.postgresql_18;
+            coreutils_package = toString pkgs.coreutils;
+            shell = pkgs.runtimeShell;
+            tool_roots = map toString [pkgs.util-linux pkgs.systemd pkgs.nix pkgs.gnutar];
+            transition_manifest = toString nodes.primary.environment.etc."harbor-db/demo-transition.json".source;
+            backup_manifest = toString nodes.primary.environment.etc."harbor-db/demo-backup.json".source;
+            source_manifest = toString sourceManifest;
+            target_manifest = toString targetManifest;
+          })})
+          control, inherited = socket.socketpair()
+          fixture = subprocess.Popen(
+              ["${testPackage}/bin/harbor-db-postgres-transition-fixture",
+               "--control-fd", str(inherited.fileno()),
+               "--config", json.dumps(configuration),
+               "--evidence", os.path.join(os.environ["out"], "postgres-transition-acceptance.json")],
+              pass_fds=(inherited.fileno(),),
+          )
+          inherited.close()
+          try:
+              serve(control.fileno(), {"primary": primary, "certifier": certifier})
+          finally:
+              control.close()
+              if fixture.poll() is None:
+                  try:
+                      fixture.wait(timeout=30)
+                  except subprocess.TimeoutExpired:
+                      fixture.kill()
+                      fixture.wait(timeout=30)
+          assert fixture.returncode == 0, fixture.returncode
+        ''
+        else if withPostgres
+        then builtins.readFile ./test-application-postgres-transition.py
+        else if nativePackage != null
+        then ''
+          import os
+          import socket
+          import subprocess
+          from harbor_db.test_bridge import serve
+
+          control, inherited = socket.socketpair()
+          fixture = subprocess.Popen(
+              ["${testPackage}/bin/harbor-db-backend-transition-fixture",
+               "--control-fd", str(inherited.fileno()),
+               "--source-manifest", "${sourceManifest}",
+               "--target-manifest", "${targetManifest}",
+               "--native-package", "${nativePackage}",
+               "--legacy-package", "${legacyStorage}",
+               "--acceptance", os.path.join(os.environ["out"], "backend-transition-acceptance.json")],
+              pass_fds=(inherited.fileno(),),
+          )
+          inherited.close()
+          try:
+              serve(control.fileno(), {"primary": primary, "certifier": certifier})
+          finally:
+              control.close()
+              if fixture.poll() is None:
+                  try:
+                      fixture.wait(timeout=30)
+                  except subprocess.TimeoutExpired:
+                      fixture.kill()
+                      fixture.wait(timeout=30)
+          assert fixture.returncode == 0, fixture.returncode
+        ''
+        else ''
+          import json
+          start_all()
+          def align(receiver, sender):
+              seconds = max(int(host.succeed("date +%s").strip()) for host in (receiver, sender))
+              receiver.succeed(f"date --set=@{seconds}")
+          primary.wait_for_unit("multi-user.target")
+          certifier.wait_for_unit("multi-user.target")
+          primary.succeed("runuser -u demo -- sh -c 'printf source-revision-seven > /var/lib/demo-old/records'")
+          primary.succeed("runuser -u demo -- harbor-db-resource --config ${sourceManifest} adopt --identity retained-resource")
+          primary.succeed("systemctl start demo.service")
+          primary.wait_for_unit("demo.service")
+          contract = primary.succeed("readlink -f /etc/harbor-db/demo-transition.json").strip()
+          transition = f"harbor-db-transition --config {contract}"
+          primary.succeed(transition + " plan --candidate " + contract)
+          result = json.loads(primary.succeed(transition + " prepare"))
+          assert result["status"] == "awaiting-independent-restore"
+          primary.fail("systemctl is-active demo.service")
+          primary.succeed("systemctl start demo.service")
+          primary.fail("systemctl is-active demo.service")
+          primary.fail("runuser -u demo -- harbor-db-resource --config ${sourceManifest} check")
+          primary.crash()
+          primary.start()
+          primary.wait_for_unit("multi-user.target")
+          primary.succeed("systemctl start demo.service")
+          primary.fail("systemctl is-active demo.service")
+          point = result["backup"].split("/")[-1]
+          archive = primary.succeed(f"tar -C /var/lib/demo-backups -czf - {point} | base64 -w0").strip()
+          certifier.succeed(f"printf '%s' '{archive}' | base64 -d | tar -xzf - -C /var/lib/demo-backups")
+          align(certifier, primary)
+          backup_contract = certifier.succeed("readlink -f /etc/harbor-db/demo-backup.json").strip()
+          proof = json.loads(certifier.succeed(f"runuser -u demo -- harbor-db-application-backup --config {backup_contract} certify /var/lib/demo-backups/{point} --state /var/lib/demo-certifier"))
+          encoded = certifier.succeed(f"base64 -w0 /var/lib/demo-certifier/{proof['source_acceptance_sha256']}.json").strip()
+          primary.succeed(f"printf '%s' '{encoded}' | base64 -d > /var/lib/demo-authority/independent.json")
+          align(primary, certifier)
+          assert json.loads(primary.succeed(transition + " prepare"))["phase"] == "prepared"
+          candidate = primary.succeed("readlink -f /run/current-system/specialisation/target").strip()
+          primary.succeed(transition + " bind-candidate --candidate " + candidate)
+          primary.succeed(candidate + "/bin/switch-to-configuration test")
+          primary.fail("systemctl is-active demo.service")
+          primary.succeed(transition + " commit")
+          primary.succeed("test -f /var/lib/harbor-db-transitions/demo/inhibited.json")
+          primary.succeed(transition + " enable-writes")
+          primary.succeed("systemctl start demo.service")
+          primary.wait_for_unit("demo.service")
+          primary.succeed(transition + " complete")
+          primary.fail(transition + " abort")
+          primary.succeed("runuser -u demo -- harbor-db-resource --config ${targetManifest} check")
+          primary.fail("runuser -u demo -- harbor-db-resource --config ${sourceManifest} check")
+          primary.succeed(transition + " retire")
+          primary.succeed("test -f /var/lib/demo-old/records")
+          primary.succeed("grep acknowledged /var/lib/demo-new/records")
+        '';
+    }

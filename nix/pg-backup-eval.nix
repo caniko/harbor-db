@@ -39,6 +39,28 @@
   receive = eval.config.systemd.services.pg-receivewal.serviceConfig;
   base = eval.config.systemd.services.pg-basebackup.script;
   sourcePostgresql = sourceEval.config.services.postgresql;
+  localEval = import "${pkgs.path}/nixos/lib/eval-config.nix" {
+    system = "x86_64-linux";
+    modules = [
+      ./pg-backup.nix
+      {
+        system.stateVersion = "24.11";
+        services.postgresql.enable = true;
+        services.harbor-db.pgBackup = {
+          enable = true;
+          role = "both";
+          source.hostName = "127.0.0.1";
+          sourceSettings = {
+            allowedReplicationHosts = ["127.0.0.1/32"];
+            replicatorPasswordFile = "/run/secrets/pg-replicator-password";
+            firewallInterface = null;
+          };
+          targetSettings.sourceLocalRecovery.enable = true;
+        };
+      }
+    ];
+  };
+  localBackup = localEval.config.systemd.services.pg-basebackup.script;
 in
   mkEvalCheck {
     name = "harbor-db-pg-backup-eval";
@@ -78,6 +100,21 @@ in
         name = "partial-publish";
         assertion = lib.hasInfix ".partial" base && lib.hasInfix "publish-tree \"$partial_dir\" \"$date_dir\"" base;
         message = "base backups must publish through a partial directory and atomic rename";
+      }
+      {
+        name = "source-local-both-roles";
+        assertion = !(builtins.any (a: lib.hasPrefix "services.harbor-db.pgBackup" a.message) (builtins.filter (a: !a.assertion) localEval.config.assertions)) && lib.hasInfix "host replication replicator 127.0.0.1/32 scram-sha-256" localEval.config.services.postgresql.authentication && lib.hasInfix "-h 127.0.0.1" localEval.config.systemd.services.pg-receivewal.serviceConfig.ExecStart && !(localEval.config.networking.firewall.interfaces ? wg-home);
+        message = "Source-local reception must configure both source credentials and generated receiver services without opening a replication firewall.";
+      }
+      {
+        name = "source-local-persistent-mutation-before-publication";
+        assertion = lib.hasInfix ''exec 8<>"$backup_root/locks/mutate"'' localBackup && lib.hasInfix ''flock -n 8'' localBackup && !(lib.hasInfix ''locks/mutate'' base);
+        message = "Opt-in backup publication must own the existing recovery mutation inode before its legacy anchor; legacy publication remains unchanged.";
+      }
+      {
+        name = "source-local-private-recovery-namespace";
+        assertion = lib.elem "f /var/backups/pgbackup/127.0.0.1/recovery/PROTOCOL 0600 postgres postgres - source-local-v1" localEval.config.systemd.tmpfiles.rules && lib.elem "f /var/backups/pgbackup/127.0.0.1/locks/mutate 0600 postgres postgres -" localEval.config.systemd.tmpfiles.rules;
+        message = "The capture namespace and mutation inode must be provisioned outside completed backup directories with private ownership.";
       }
     ];
   }
