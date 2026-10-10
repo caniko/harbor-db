@@ -40,6 +40,15 @@ def read_json(path):
     return json.loads(read_bytes(path))
 
 
+def manifest_digest(path):
+    canonical(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError("source-local manifest requires a regular file")
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
 def child(value):
     return isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value)) and not value.endswith(".partial")
 
@@ -82,7 +91,7 @@ def protection(root, segment_bytes):
                 raise ValueError("invalid source-local pin metadata")
             base = root / "base" / backup_id
             directory(base)
-            if hashlib.sha256(read_bytes(base / "backup_manifest")).hexdigest() != digest:
+            if manifest_digest(base / "backup_manifest") != digest:
                 raise ValueError("pinned manifest digest mismatch")
             backups.add(backup_id)
         yield backups

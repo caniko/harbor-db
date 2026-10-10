@@ -774,6 +774,109 @@ fn backup_pin_and_borrowed_fence_require_declared_retained_anchors() {
     assert!(fds.fds.is_empty());
     assert!(fds.leases.is_empty());
 }
+
+#[test]
+fn interrupted_write_enabled_release_keeps_the_source_backup_pinned() {
+    let f = Fixture::new();
+    let (_, mut record) = captured_source(&f);
+    record["phase"] = json!("write-enabled");
+    let marker = f.temp.path().join("barrier/inhibited.json");
+    durable::write_json(&marker, &json!({"intent":"pending-release"})).unwrap();
+    let before = fs::read(&marker).unwrap();
+    let lease = application_transition::pin_source(&f.config, &record)
+        .unwrap()
+        .expect("a journal phase cannot release an inhibited transition's source pin");
+    assert!(durable::lock(&f.temp.path().join("backup-root/lock"), false, false).is_err());
+    assert_eq!(fs::read(&marker).unwrap(), before);
+    drop(lease);
+    fs::remove_file(&marker).unwrap();
+    assert!(
+        application_transition::pin_source(&f.config, &record)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn python_interrupted_release_revalidates_and_preserves_barrier_until_retry() {
+    let script = r#"
+import fcntl
+from unittest import mock
+from test_application_transition import ApplicationTransitionTest
+from harbor_db import application_transition as transition
+from harbor_db.durable import lock, read_json, write_json
+f = ApplicationTransitionTest()
+f.setUp()
+try:
+    f.custody()
+    f.prepare()
+    transition.commit(f.config)
+    with mock.patch.object(transition, 'release_barriers', side_effect=OSError('interrupted')):
+        try:
+            transition.enable_writes(f.config)
+        except OSError:
+            pass
+        else:
+            raise AssertionError('interruption was not exercised')
+    assert transition.status(f.config)['phase'] == 'write-enabled'
+    marker = f.barrier / 'inhibited.json'
+    before = marker.read_bytes()
+    with transition.pin_source(f.config, transition.status(f.config), []) as leases:
+        assert len(leases) == 1
+        with open(f.root / 'lock', 'rb') as contender:
+            try:
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                raise AssertionError('pending release lost the source backup pin')
+    proof_path = f.root / 'independent.json'
+    proof = read_json(proof_path)
+    write_json(proof_path, proof | {'semantic_sha256':'d'*64})
+    try:
+        transition.enable_writes(f.config)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('changed independent proof released writers')
+    write_json(proof_path, proof)
+    unaccepted = f.new / 'unaccepted'
+    unaccepted.write_bytes(b'corpus drift')
+    try:
+        transition.enable_writes(f.config)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('changed target corpus released writers')
+    try:
+        transition.complete(f.config)
+    except ValueError as error:
+        assert 'released writer barriers' in str(error)
+    else:
+        raise AssertionError('inhibited transition completed')
+    assert marker.read_bytes() == before
+    unaccepted.unlink()
+    transition.enable_writes(f.config)
+    assert not marker.exists()
+    (f.new / 'records').write_bytes(b'acknowledged post-release change')
+    with lock(f.state / 'lock', shared=True):
+        transition.enable_writes(f.config)
+    f.actions.return_value = {'version':1,'status':'healthy'}
+    transition.complete(f.config)
+finally:
+    f.doCleanups()
+"#;
+    let mut command = std::process::Command::new("python3");
+    command.args(["-B", "-c", script]).env(
+        "PYTHONPATH",
+        format!("{0}/python:{0}/tests", env!("CARGO_MANIFEST_DIR")),
+    );
+    let output = process::spawn(&mut command)
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
 #[test]
 fn redirected_barrier_storage_and_writable_ancestors_reject_manifest() {
     use std::os::unix::fs::PermissionsExt;

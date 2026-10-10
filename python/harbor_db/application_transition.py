@@ -34,6 +34,19 @@ def status(config):
     return record
 
 
+def release_pending(config):
+    try:
+        (Path(config["barrier_dir"]) / "inhibited.json").lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def terminal(config, record):
+    return (record["phase"] in ("complete", "aborted")
+            or (record["phase"] == "write-enabled" and not release_pending(config)))
+
+
 @contextlib.contextmanager
 def transaction(config, held=None):
     require_root()
@@ -41,14 +54,14 @@ def transaction(config, held=None):
     with acquisition as transition_lease:
         record = status(config)
         source, target = validate(config)
-        with lock(Path(source["state_dir"]) / "lock", shared=record["phase"] in ("write-enabled", "complete", "aborted")) as authority_lease:
+        with lock(Path(source["state_dir"]) / "lock", shared=terminal(config, record)) as authority_lease:
             with pin_source(config, record, [transition_lease, authority_lease]) as leases:
                 yield record, source, target, leases
 
 
 @contextlib.contextmanager
 def pin_source(config, record, leases):
-    if "backup" not in record or record["phase"] in ("write-enabled", "complete", "aborted"):
+    if "backup" not in record or terminal(config, record):
         yield leases
         return
     backup_config = read_json(config["backup_manifest"])
@@ -349,7 +362,7 @@ def enable_writes(config):
             raise ValueError("writer release requires committed authority")
         if generation() != record["candidate"]:
             raise ValueError("writer release generation differs")
-        if record["phase"] != "write-enabled":
+        if record["phase"] != "write-enabled" or release_pending(config):
             with fence(config, record, leases) as pinned:
                 inspect_barriers(config)
                 evidence(config, record)
@@ -358,8 +371,11 @@ def enable_writes(config):
                 verify_custody(config, record, target, pinned)
                 resource.verify(target, resource.contract(target))
                 # Durable point of no return BEFORE any app write is possible.
-                save(config, record, "write-enabled")
-        release_barriers(config, record)
+                if record["phase"] != "write-enabled":
+                    save(config, record, "write-enabled")
+                release_barriers(config, record)
+        else:
+            release_barriers(config, record)
         return {**record, "status": "write-enabled", "borrowed_fence_release_required": config["postgres_manifest"] is not None}
 
 
@@ -371,6 +387,8 @@ def complete(config):
         record = status(config)
         if record["phase"] not in ("write-enabled", "complete") or generation() != record["candidate"]:
             raise ValueError("completion requires the selected write-enabled generation")
+        if release_pending(config):
+            raise ValueError("completion requires released writer barriers")
         _, target = validate(config)
         with resource.inspection(target):
             health = run_action(config, "health", record, [transition_lease])
@@ -417,6 +435,8 @@ def retire(config):
     with transaction(config) as (record, source, target, leases):
         if record["phase"] not in ("complete", "aborted"):
             raise ValueError("unfinished transitions cannot be retired")
+        if release_pending(config):
+            raise ValueError("unfinished writer barrier release cannot be retired")
         active = target if record["phase"] == "complete" else source
         resource.verify(active, resource.contract(active))
         archive = Path(config["barrier_dir"]) / (application_backup.identity(record["intent"]) + ".history.json")

@@ -37,7 +37,7 @@ pub fn sync_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn temporary_file(parent: &Path, name: &OsStr) -> Result<(PathBuf, File)> {
+pub(super) fn temporary_file(parent: &Path, name: &OsStr) -> Result<(PathBuf, File)> {
     for _ in 0..128 {
         let temporary = parent.join(format!(
             ".{}.{}-{}",

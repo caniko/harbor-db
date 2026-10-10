@@ -39,14 +39,22 @@ pub struct Transaction {
     pub leases: Vec<Lease>,
     pub fds: Vec<RawFd>,
 }
-fn terminal(record: &Value) -> bool {
-    matches!(
-        record["phase"].as_str(),
-        Some("write-enabled" | "complete" | "aborted")
-    )
+fn release_pending(config: &Value) -> Result<bool> {
+    match fs::symlink_metadata(Path::new(string(config, "barrier_dir")?).join("inhibited.json")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+fn terminal(config: &Value, record: &Value) -> Result<bool> {
+    Ok(match record["phase"].as_str() {
+        Some("write-enabled") => !release_pending(config)?,
+        Some("complete" | "aborted") => true,
+        _ => false,
+    })
 }
 pub fn pin_source(config: &Value, record: &Value) -> Result<Option<Lease>> {
-    if record.get("backup").is_none() || terminal(record) {
+    if record.get("backup").is_none() || terminal(config, record)? {
         return Ok(None);
     }
     let backup = durable::read_config_json(Path::new(string(config, "backup_manifest")?))?;
@@ -75,7 +83,7 @@ pub fn transaction(config: &Value, held: Option<RawFd>) -> Result<Transaction> {
     let (source, target) = manifest::validate(config)?;
     let lease = durable::lock(
         &Path::new(string(&source, "state_dir")?).join("lock"),
-        terminal(&record),
+        terminal(config, &record)?,
         false,
     )?;
     fds.push(lease.fd());
@@ -639,13 +647,17 @@ pub fn enable_writes(config: &Value) -> Result<Value> {
     if tx.record["candidate"] != manifest::generation()? {
         return Err(invalid("writer release generation differs"));
     }
-    if tx.record["phase"] != "write-enabled" {
+    if tx.record["phase"] != "write-enabled" || release_pending(config)? {
         let fence = manifest::fence(config, &mut tx.record, &tx.fds)?;
         verify_prepared(config, &tx, &fence.fds)?;
         resource::verify(&tx.target, &resource::contract(&tx.target)?)?;
-        save(config, &mut tx.record, Some("write-enabled"))?;
+        if tx.record["phase"] != "write-enabled" {
+            save(config, &mut tx.record, Some("write-enabled"))?;
+        }
+        manifest::release_barriers(config, &tx.record, false)?;
+    } else {
+        manifest::release_barriers(config, &tx.record, false)?;
     }
-    manifest::release_barriers(config, &tx.record, false)?;
     tx.record["status"] = json!("write-enabled");
     tx.record["borrowed_fence_release_required"] = json!(!config["postgres_manifest"].is_null());
     Ok(tx.record)
@@ -664,6 +676,9 @@ pub fn complete(config: &Value) -> Result<Value> {
         return Err(invalid(
             "completion requires the selected write-enabled generation",
         ));
+    }
+    if release_pending(config)? {
+        return Err(invalid("completion requires released writer barriers"));
     }
     let (_, target) = manifest::validate(config)?;
     let _inspection = resource::inspection(&target)?;
@@ -746,6 +761,11 @@ pub fn retire(config: &Value) -> Result<Value> {
     let tx = transaction(config, None)?;
     if !matches!(tx.record["phase"].as_str(), Some("complete" | "aborted")) {
         return Err(invalid("unfinished transitions cannot be retired"));
+    }
+    if release_pending(config)? {
+        return Err(invalid(
+            "unfinished writer barrier release cannot be retired",
+        ));
     }
     let active = if tx.record["phase"] == "complete" {
         &tx.target

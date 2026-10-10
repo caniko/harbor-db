@@ -21,7 +21,7 @@ sha256 = "0a04cda75e3b9028746c21c720aae80b91b87de388dc0148c65844e76b7f17de"
 
 [[extensions]]
 path = "python/harbor_db/application_transition.py"
-sha256 = "2aef1b003544bd89d42ccebfaba3af686451a5974a191589f02bad2eee9ddfb2"
+sha256 = "458b1179570fbbc41edb163f4291bef9c167bb850cbb254550e3c7c9cd425da3"
 
 [[extensions]]
 path = "python/harbor_db/cutover.py"

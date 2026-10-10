@@ -397,3 +397,28 @@ fn empty_valid_pins_use_normal_retention() {
         assert!(!root.path().join("base/expired").exists());
     }
 }
+
+#[test]
+fn large_pinned_manifest_prunes_in_both_carriers_without_releasing_its_backup() {
+    for native in [true, false] {
+        let root = fixture();
+        let path = root.path().join("base/old/backup_manifest");
+        let mut manifest = fs::read(&path).unwrap();
+        manifest.resize(17 * 1024 * 1024, b' ');
+        fs::write(&path, manifest).unwrap();
+        pin(root.path());
+        let before = inventory(root.path());
+        if native {
+            backup::prune(root.path(), 1, 2, SEGMENT, Some(1_000_000.0)).unwrap();
+        } else {
+            let output = python(root.path(), PRUNE);
+            assert!(output.status.success(), "{output:?}");
+        }
+        assert!(root.path().join("base/old/data").exists());
+        assert!(!root.path().join("base/expired").exists());
+        assert!(root.path().join("wal/000000010000000000000002").exists());
+        for (path, state) in inventory(root.path()) {
+            assert_eq!(before.get(&path), Some(&state), "{path}");
+        }
+    }
+}

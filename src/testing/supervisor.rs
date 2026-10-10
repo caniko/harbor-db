@@ -744,7 +744,7 @@ fn execute_case(
     let mut command = match &case.execution {
         Execution::Argv { argv, env } => {
             let mut command = Command::new(&argv[0]);
-            command.args(&argv[1..]).envs(env);
+            command.args(&argv[1..]).env_clear().envs(env);
             command
         }
         Execution::Nix { installable } => {

@@ -28,7 +28,7 @@ fn spec(root: &Path, script: &str, deadline: u64) -> RunSpec {
             id: "case".into(),
             execution: Execution::Argv {
                 argv: vec!["sh".into(), "-c".into(), script],
-                env: BTreeMap::new(),
+                env: BTreeMap::from([("PATH".into(), std::env::var("PATH").unwrap())]),
             },
             deadline_seconds: deadline,
             artifacts: vec![harbor_db::testing::evidence::ArtifactSpec {
@@ -121,6 +121,40 @@ fn observer_reattaches_and_missing_worker_is_incomplete() {
         supervisor::verify(&run).unwrap().verdict,
         Verdict::Incomplete
     );
+}
+
+#[test]
+fn argv_cases_exclude_ambient_variables_and_keep_the_retained_environment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut selection = spec(
+        tmp.path(),
+        "test -z \"${HARBOR_UNDECLARED_TEST+x}\" && test \"$HARBOR_DECLARED_TEST\" = retained || exit 1",
+        5,
+    );
+    if let Execution::Argv { env, .. } = &mut selection.cases[0].execution {
+        env.insert("HARBOR_DECLARED_TEST".into(), "retained".into());
+        env.insert("PATH".into(), std::env::var("PATH").unwrap());
+    }
+    let run = supervisor::create_run(Some(tmp.path()), "environment", selection).unwrap();
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "fixture::worker_process",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("HARBOR_SUPERVISOR_FIXTURE_RUN", &run)
+        .env("HARBOR_UNDECLARED_TEST", "ambient-fixture-value")
+        .env("HARBOR_DECLARED_TEST", "unretained-value");
+    assert!(
+        process::spawn(&mut command)
+            .unwrap()
+            .wait()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(supervisor::verify(&run).unwrap().verdict, Verdict::Passed);
 }
 
 #[test]

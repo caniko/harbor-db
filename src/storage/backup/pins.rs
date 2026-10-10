@@ -102,7 +102,9 @@ pub(super) fn load(root: &Path, segment_bytes: u64) -> Result<Option<Protection>
         }
         let base = root.join("base").join(backup);
         directory(&base)?;
-        if codec::digest(&bytes(&base.join("backup_manifest"))?) != digest {
+        let manifest = base.join("backup_manifest");
+        canonical(&manifest)?;
+        if codec::file_digest(&manifest)? != digest {
             return Err(invalid("pinned manifest digest mismatch"));
         }
         backups.insert(backup.to_owned());

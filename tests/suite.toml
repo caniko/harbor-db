@@ -1061,7 +1061,7 @@ source = "tests/supervisor.rs"
 argv_prefix = ["cargo", "test", "--locked", "--features", "testing", "--test", "supervisor"]
 argv_suffix = ["--", "--exact"]
 maturity = "crystallized"
-selectors = ["failed_verdict_dominates_indeterminate_and_incomplete", "foreground_error_stops_observer_without_disk_stop_marker", "heartbeat_advances_without_stdout_or_semantic_progress", "persisted_activity_distinguishes_quiet_logs_heartbeat_and_progress", "second_service_launch_failure_is_terminal_and_stops_only_own_observer"]
+selectors = ["failed_verdict_dominates_indeterminate_and_incomplete", "foreground_error_stops_observer_without_disk_stop_marker", "heartbeat_advances_without_stdout_or_semantic_progress", "persisted_activity_distinguishes_quiet_logs_heartbeat_and_progress", "second_service_launch_failure_is_terminal_and_stops_only_own_observer", "argv_cases_exclude_ambient_variables_and_keep_the_retained_environment"]
 
 [[inventories]]
 origin = "rust"
@@ -1450,7 +1450,7 @@ source = "tests/transition_storage.rs"
 argv_prefix = ["cargo", "test", "--locked", "--features", "testing", "--test", "transition_storage"]
 argv_suffix = ["--", "--exact"]
 maturity = "crystallized"
-selectors = ["generation_etc_contract_cannot_escape_store", "semantic_acceptance_is_exact_and_complete"]
+selectors = ["generation_etc_contract_cannot_escape_store", "semantic_acceptance_is_exact_and_complete", "interrupted_write_enabled_release_keeps_the_source_backup_pinned", "python_interrupted_release_revalidates_and_preserves_barrier_until_retry"]
 
 [[inventories]]
 origin = "rust"
@@ -4100,7 +4100,7 @@ maturity = "crystallized"
 platforms = ["x86_64-linux", "aarch64-linux"]
 deadline_seconds = 120
 resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
-selectors = ["cross_carrier_pins_preserve_old_backup_and_actual_wal_floor", "uncertainty_preserves_entire_tree_in_both_carriers", "shared_mutation_lease_rejects_native_and_python_cli_with_eagain", "source_local_requires_absolute_unredirected_root", "empty_valid_pins_use_normal_retention"]
+selectors = ["cross_carrier_pins_preserve_old_backup_and_actual_wal_floor", "uncertainty_preserves_entire_tree_in_both_carriers", "shared_mutation_lease_rejects_native_and_python_cli_with_eagain", "source_local_requires_absolute_unredirected_root", "empty_valid_pins_use_normal_retention", "large_pinned_manifest_prunes_in_both_carriers_without_releasing_its_backup"]
 
 [[coverage]]
 case = "native.backup-pins.cross_carrier_pins_preserve_old_backup_and_actual_wal_floor"
@@ -4177,7 +4177,21 @@ maturity = "crystallized"
 platforms = ["x86_64-linux", "aarch64-linux"]
 deadline_seconds = 120
 resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
-selectors = ["occupied_snapshot_preserves_previous_generation_then_retry_commits_once", "conflicting_snapshot_is_not_overwritten_or_selected", "switch_worker_retains_all_four_leases_after_coordinator_descriptors_close", "manifest_rejects_empty_reversed_and_multiple_timelines", "target_boundary_requires_previous_segment_and_actual_floor", "missing_wal_preserves_old_selection_and_pin_then_complete_carrier_allows_retry"]
+selectors = ["occupied_snapshot_preserves_previous_generation_then_retry_commits_once", "conflicting_snapshot_is_not_overwritten_or_selected", "switch_worker_retains_all_four_leases_after_coordinator_descriptors_close", "manifest_rejects_empty_reversed_and_multiple_timelines", "target_boundary_requires_previous_segment_and_actual_floor", "missing_wal_preserves_old_selection_and_pin_then_complete_carrier_allows_retry", "interrupted_capture_scratch_preserves_its_inode_and_allows_publication"]
+
+[[inventories]]
+origin = "rust"
+id_prefix = "native.recovery-preparation."
+selector_prefix = "storage::recovery::tests::"
+source = "src/storage/recovery.rs"
+argv_prefix = ["cargo", "test", "--locked", "--all-features", "--lib"]
+argv_suffix = ["--", "--exact"]
+profile = "integration"
+maturity = "crystallized"
+platforms = ["x86_64-linux", "aarch64-linux"]
+deadline_seconds = 120
+resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
+selectors = ["managed_backup_outlives_the_short_probe_deadline"]
 
 [[cases]]
 id = "vm.x86_64-linux.native-source-local-recovery"

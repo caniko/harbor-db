@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
-    io::Read,
+    io::{Read, Write},
     os::{fd::RawFd, unix::fs::MetadataExt},
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -270,15 +270,13 @@ fn immutable(root: &Path, path: &Path, content: &[u8], capture_id: &str) -> Resu
         return Ok(());
     }
     // Scratch is outside pins: the pruner treats every pin entry as authoritative.
-    let scratch = strict(&root.join(format!(
-        ".capture-{capture_id}-{}.intent",
-        std::process::id()
-    )))?;
-    if fs::symlink_metadata(&scratch).is_ok() {
-        return Err(invalid("capture scratch already exists"));
-    }
-    durable::atomic_write(&scratch, content)?;
-    let result = durable::publish_file(&scratch, path);
+    let name = format!("capture-{capture_id}.intent");
+    let (scratch, mut file) = durable::temporary_file(root, name.as_ref())?;
+    let result = (|| {
+        file.write_all(content)?;
+        file.sync_all()?;
+        durable::publish_file(&scratch, path)
+    })();
     if result.is_err() {
         let _ = fs::remove_file(&scratch);
     }
@@ -606,6 +604,25 @@ mod tests {
         for (path, state) in states {
             assert_eq!(&carrier_state(path), state, "{} changed", path.display());
         }
+    }
+
+    #[test]
+    fn interrupted_capture_scratch_preserves_its_inode_and_allows_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let local = fs::canonicalize(root.path()).unwrap();
+        let previous = previous_generation(&local);
+        let scratch = local.join(format!(".capture-new-{}.intent", std::process::id()));
+        fs::write(&scratch, b"interrupted publication must survive").unwrap();
+        let saved = carrier_state(&scratch);
+        let (content, source) = generation("new");
+        publish_generation(&local, "new", &content, &source).unwrap();
+        assert_preserved(&previous[..3]);
+        assert_eq!(carrier_state(&scratch), saved);
+        assert_eq!(bytes(&local.join("SELECTED")).unwrap(), b"new\n");
+        let selected = carrier_state(&local.join("snapshots/new.json"));
+        publish_generation(&local, "new", &content, &source).unwrap();
+        assert_eq!(carrier_state(&local.join("snapshots/new.json")), selected);
+        assert_eq!(carrier_state(&scratch), saved);
     }
 
     #[test]

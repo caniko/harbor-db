@@ -47,6 +47,7 @@
           # producer files in sandboxed Cargo checks instead of weakening those
           # assertions or discovering workstation files at test execution time.
           || path == "${toString ./.}/flake.nix"
+          || path == "${toString ./.}/simit.toml"
           || pkgs.lib.hasPrefix "${toString ./.}/nix/" path
           || pkgs.lib.hasPrefix "${toString ./.}/docs/" path
           || pkgs.lib.hasPrefix "${toString ./.}/.github/" path

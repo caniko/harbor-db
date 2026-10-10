@@ -509,6 +509,62 @@ fn run(args: Args) -> Result<()> {
         "committed-inhibition-retained",
     )?;
     gate.barrier("committed-barrier")?;
+    // Model a crash after the durable point of no return but before marker
+    // removal. Both runtimes must revalidate rather than trusting that phase.
+    gate.shell(
+        "primary",
+        format!("python3 -c {}", quoted(&format!(
+            "import json; p='{JOURNAL}'; r=json.load(open(p)); r['phase']='write-enabled'; open(p,'w').write(json.dumps(r)+'\\n')"
+        ))),
+        true,
+        "interrupted-write-enabled-journal",
+    )?;
+    gate.readbacks(
+        &native,
+        &python,
+        "write-enabled",
+        "pending-release-readbacks",
+        true,
+    )?;
+    gate.shell(
+        "primary",
+        format!("cp {RECEIPT} /root/accepted-independent.json; python3 -c {}", quoted(&format!(
+            "import json; p='{RECEIPT}'; r=json.load(open(p)); r['semantic_sha256']='d'*64; open(p,'w').write(json.dumps(r)+'\\n')"
+        ))),
+        true,
+        "pending-release-independent-proof-changed",
+    )?;
+    for (peer, command) in [("native", &native), ("python", &python)] {
+        gate.shell(
+            "primary",
+            format!("{command} enable-writes"),
+            false,
+            &format!("{peer}-pending-release-proof-drift-denied"),
+        )?;
+        gate.shell(
+            "primary",
+            format!("{command} complete"),
+            false,
+            &format!("{peer}-completion-before-release-denied"),
+        )?;
+    }
+    gate.barrier("proof-drift-pending-release-barrier")?;
+    gate.shell("primary", format!("cp /root/accepted-independent.json {RECEIPT}; printf drift > /var/lib/demo-new/unaccepted"), true, "pending-release-proof-restored-target-changed")?;
+    for (peer, command) in [("native", &native), ("python", &python)] {
+        gate.shell(
+            "primary",
+            format!("{command} enable-writes"),
+            false,
+            &format!("{peer}-pending-release-target-drift-denied"),
+        )?;
+    }
+    gate.barrier("target-drift-pending-release-barrier")?;
+    gate.shell(
+        "primary",
+        "rm /var/lib/demo-new/unaccepted",
+        true,
+        "pending-release-target-restored",
+    )?;
     gate.phase(
         &format!("{native} enable-writes"),
         "write-enabled",

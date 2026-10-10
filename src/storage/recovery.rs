@@ -908,6 +908,10 @@ fn preparation_command(preparation: &Value, key: &str, leases: &[RawFd]) -> Resu
     }
     let mut spec = process::CommandSpec::new(argv);
     spec.leases = leases.to_vec();
+    // Managed preparation units deliberately use TimeoutStartSec=infinity.
+    // Backup, restore and export are not short probes; their owner controls
+    // cancellation while these workers retain the preparation leases.
+    spec.timeout = Duration::MAX;
     process::execute(&spec)?;
     Ok(())
 }
@@ -1077,4 +1081,25 @@ pub fn prepare_at(
         }
     }
     Ok(admission_with_outer(config, now, true, None, 5432, &leases)?.result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_backup_outlives_the_short_probe_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("completed");
+        let anchor = root.path().join("preparation.lock");
+        let lease = durable::lock(&anchor, false, true).unwrap();
+        let shell = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|path| path.join("sh"))
+            .find(|path| path.is_file())
+            .unwrap();
+        let preparation = json!({"backup_command":[shell,"-c","sleep 61; printf 'completed' > \"$1\"","backup",ready]});
+        preparation_command(&preparation, "backup_command", &[lease.fd()]).unwrap();
+        assert_eq!(fs::read(&ready).unwrap(), b"completed");
+        assert!(durable::lock(&anchor, false, false).is_err());
+    }
 }
