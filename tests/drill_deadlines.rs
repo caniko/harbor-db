@@ -246,6 +246,10 @@ impl Drop for Fixture {
 
 #[test]
 fn owning_deadline_aborts_restore_and_allows_peer_cleanup() {
+    // initdb must finish under registered AArch64 emulation before the delayed
+    // restore starts. Keep the restore delay longer than the owning budget so
+    // both engines still have to enforce the contract rather than finish it.
+    const BUDGET: u64 = 30;
     let mut fixture = Fixture::new();
     let original = fs::read(fixture.backup.join("database.dump")).unwrap();
     for native in [true, false] {
@@ -256,23 +260,29 @@ fn owning_deadline_aborts_restore_and_allows_peer_cleanup() {
             } else {
                 "python-package"
             },
-            3,
+            BUDGET + 1,
         );
         let started = Instant::now();
-        let output = capture(&fixture.drill(native, &package, "restore", &workspace, 2));
+        let output = capture(&fixture.drill(native, &package, "restore", &workspace, BUDGET));
         assert!(
             !output.status.success(),
             "a restore may not exceed its owning deadline: {output:?}"
         );
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(BUDGET + 10));
         assert!(
             package.join("restore-started").is_file(),
             "restore worker was never reached: {output:?}"
         );
         fixture.stopped(&workspace);
         assert!(
-            process::execute(&fixture.drill(!native, &fixture.package, "cleanup", &workspace, 2))
-                .is_ok()
+            process::execute(&fixture.drill(
+                !native,
+                &fixture.package,
+                "cleanup",
+                &workspace,
+                BUDGET
+            ))
+            .is_ok()
         );
         assert_eq!(
             fs::read(fixture.backup.join("database.dump")).unwrap(),

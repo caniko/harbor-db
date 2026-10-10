@@ -41,7 +41,7 @@ case = "native.drill-deadlines.owning_deadline_aborts_restore_and_allows_peer_cl
 capability = "postgres-drill"
 operation = "harbor-db-postgres-drill.restore"
 dimension = "rejection"
-evidence = "Both actual CLIs reach a controlled three-second restore worker under a two-second owning budget and fail within five seconds; PostgreSQL PID/socket carriers disappear, opposite-engine cleanup is idempotent and the dump remains byte-identical."
+evidence = "Both actual CLIs reach a controlled 31-second restore worker under a 30-second owning budget and fail within 40 seconds, allowing real initdb to finish under registered emulation. PostgreSQL PID/socket carriers disappear, opposite-engine cleanup is idempotent and the dump remains byte-identical."
 
 [[coverage]]
 case = "native.drill-deadlines.invalid_budgets_reject_before_mutation_and_explicit_budget_overrides_inheritance"

@@ -23,6 +23,8 @@
   credential IDs during evaluation, before installing a permanently failing timer.
 - Reject non-UTF-8 application backup artifact paths in both engines, preserving
   complete digest inventories and preventing lossy filename collisions.
+- Allow real PostgreSQL initialization under registered AArch64 emulation in the
+  owning-deadline fixture while still requiring its delayed restore to time out.
 - Reject enabled backup project names that cannot be represented by the runtime
   resource contract, including dotted, at-sign and overlength names.
 - Give logical restoration the owning backup contract's complete bounded budget
