@@ -46,7 +46,6 @@ in
         role = "both";
         source.hostName = "127.0.0.1";
         sourceSettings = {
-          listenAddresses = ["127.0.0.1"];
           firewallInterface = null;
           replicatorPasswordFile = "/run/disposable-secret";
         };

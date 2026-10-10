@@ -9,11 +9,23 @@
   cfg = config.services.harbor-db.pgBackup;
   sourceRole = lib.elem cfg.role ["source" "both"];
   targetRole = lib.elem cfg.role ["target" "both"];
+  loopbackAddresses = lib.optionals cfg.targetSettings.sourceLocalRecovery.enable (
+    lib.optional (lib.elem cfg.source.hostName ["127.0.0.1" "localhost"]) "127.0.0.1"
+    ++ lib.optional (lib.elem cfg.source.hostName ["::1" "localhost"]) "::1"
+  );
   replicationHosts = lib.unique (cfg.sourceSettings.allowedReplicationHosts
-    ++ lib.optionals cfg.targetSettings.sourceLocalRecovery.enable (
-      lib.optional (lib.elem cfg.source.hostName ["127.0.0.1" "localhost"]) "127.0.0.1/32"
-      ++ lib.optional (lib.elem cfg.source.hostName ["::1" "localhost"]) "::1/128"
-    ));
+    ++ map (address:
+      address
+      + (
+        if address == "::1"
+        then "/128"
+        else "/32"
+      ))
+    loopbackAddresses);
+  listenAddresses =
+    if cfg.sourceSettings.listenAddresses != []
+    then cfg.sourceSettings.listenAddresses
+    else loopbackAddresses;
   storagePackage = harborDbStoragePackage;
   durable = "${storagePackage}/bin/harbor-db-durable";
   pruneTool = "${storagePackage}/bin/harbor-db-backup-prune";
@@ -246,7 +258,7 @@ in {
         type = types.listOf types.str;
         default = [];
         example = ["192.168.1.10"];
-        description = "Exact IP addresses for PostgreSQL to listen on when replication is enabled.";
+        description = "Exact IP addresses for PostgreSQL to listen on when replication is enabled. An empty list derives loopback listeners for source-local recovery.";
       };
 
       allowedReplicationHosts = mkOption {
@@ -385,10 +397,10 @@ in {
       (mkIf sourceRole {
         services.postgresql = {
           settings = mkMerge [
-            (lib.optionalAttrs (cfg.sourceSettings.listenAddresses != []) {
+            (lib.optionalAttrs (listenAddresses != []) {
               # NixOS' enableTCPIP setting otherwise forces '*'. Replication
               # should bind only to the explicitly selected interface addresses.
-              listen_addresses = lib.mkForce (lib.concatStringsSep "," cfg.sourceSettings.listenAddresses);
+              listen_addresses = lib.mkForce (lib.concatStringsSep "," listenAddresses);
             })
             {
               wal_level = lib.mkDefault cfg.sourceSettings.walLevel;

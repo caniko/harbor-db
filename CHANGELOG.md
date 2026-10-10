@@ -25,6 +25,8 @@
   directory setup, preserving permission repair and sibling directory creation.
 - Generate authenticated loopback replication rules for source-local recovery,
   including both address families for `localhost`, without opening the firewall.
+- Derive source-local TCP listeners when no explicit replication listeners are
+  configured; exercise the physical recovery fixture with those defaults.
 - Probe generated cutover writer leases independently of the retired production
   Python package, retaining condition/reload argv, exit-code and exclusion checks.
 - Preserve literal serde JSON discriminator objects and exact large integers in

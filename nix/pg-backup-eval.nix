@@ -123,6 +123,16 @@ in
         message = "localhost reception must admit both loopback address families.";
       }
       {
+        name = "source-local-default-loopback-listeners";
+        assertion = localEval.config.services.postgresql.settings.listen_addresses == "127.0.0.1" && ipv6Local.services.postgresql.settings.listen_addresses == "::1" && localhost.services.postgresql.settings.listen_addresses == "127.0.0.1,::1";
+        message = "Default source-local receivers must have reachable TCP listeners for their selected loopback address families.";
+      }
+      {
+        name = "explicit-source-listener-preserved";
+        assertion = sourcePostgresql.settings.listen_addresses == "10.0.0.1";
+        message = "Explicit replication listeners must remain unchanged.";
+      }
+      {
         name = "source-local-persistent-mutation-before-publication";
         assertion = lib.hasInfix ''exec 8<>"$backup_root/locks/mutate"'' localBackup && lib.hasInfix ''flock -n 8'' localBackup && !(lib.hasInfix ''locks/mutate'' base);
         message = "Opt-in backup publication must own the existing recovery mutation inode before its legacy anchor; legacy publication remains unchanged.";
