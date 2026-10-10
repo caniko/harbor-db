@@ -37,6 +37,8 @@
   preserving read-only certification and retired enrollment policies.
 - Capture the expected source-local WAL rejection diagnostic in the fixture and
   read host identity through the available kernel interface.
+- Complete the post-target replay-stop WAL segment before selecting a source-local
+  capture, preserving its original switch LSN and immutable retry bytes.
 - Keep all features enabled once in the documentation build and use the supported
   NixOS test interface for the module smoke gate and its JUnit output.
 

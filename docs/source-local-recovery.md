@@ -20,6 +20,11 @@ preserve their bytes and the original completion timestamp. Recovery readers
 consume the selected generation's snapshot. The configured legacy snapshot path
 continues to locate the evidence lease and legacy-protocol snapshot.
 Recovery metadata and retention pins are outside `base/`.
+The capture target remains the first `pg_switch_wal()` ending LSN. PostgreSQL's
+inclusive recovery target compares WAL record start positions, so finalization
+also completes and waits for the following receiver segment containing a genuine
+post-target checkpoint record. This makes the frozen target reachable without
+depending on a partial WAL carrier or moving the target during a retry.
 Managed source-local preparation requires `requireWriterFence = true` at module
 evaluation. Read-only independent certification and retired bootstrap enrollment
 can disable the local fence requirement while consuming the same bound capture.
