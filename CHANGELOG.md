@@ -25,6 +25,8 @@
   complete digest inventories and preventing lossy filename collisions.
 - Allow real PostgreSQL initialization under registered AArch64 emulation in the
   owning-deadline fixture while still requiring its delayed restore to time out.
+- Publish the controlled restore worker's complete PID atomically before exposing
+  the cancellation barrier, eliminating an observed empty-carrier race.
 - Reject enabled backup project names that cannot be represented by the runtime
   resource contract, including dotted, at-sign and overlength names.
 - Give logical restoration the owning backup contract's complete bounded budget

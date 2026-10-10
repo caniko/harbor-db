@@ -55,7 +55,7 @@ case = "native.drill-deadlines.cancelled_restore_retains_private_state_for_expli
 capability = "postgres-drill"
 operation = "harbor-db-postgres-drill.cleanup"
 dimension = "interruption"
-evidence = "Each actual coordinator is killed only after its restore worker is observed and pidfd-pinned. Its real private PostgreSQL cluster remains recoverable; the opposite CLI stops it, removes PID/socket carriers and preserves control files and original dump bytes. This proves explicit cleanup after abrupt cancellation, not automatic cleanup after SIGKILL."
+evidence = "Each actual coordinator is killed only after its restore worker publishes a closed PID carrier atomically and is pidfd-pinned. Its real private PostgreSQL cluster remains recoverable; the opposite CLI stops it, removes PID/socket carriers and preserves control files and original dump bytes. This proves explicit cleanup after abrupt cancellation, not automatic cleanup after SIGKILL."
 
 [[coverage]]
 case = "native.drill-deadlines.owning_deadline_aborts_restore_and_allows_peer_cleanup"

@@ -172,7 +172,9 @@ impl Fixture {
             fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
         }
         let restore = bin.join("pg_restore");
-        fs::write(&restore, format!("#!{}\nimport os,pathlib,sys,time\npathlib.Path({:?}).write_text(str(os.getpid()))\ntime.sleep({seconds})\nos.execv({:?}, [\"pg_restore\", *sys.argv[1:]])\n", python().display(), package.join("restore-started").display().to_string(), self.package.join("bin/pg_restore").display().to_string())).unwrap();
+        // Existence is the cancellation barrier. Publish only after the PID
+        // carrier is closed so the observer cannot read a newly created empty file.
+        fs::write(&restore, format!("#!{}\nimport os,pathlib,sys,time\nmarker = pathlib.Path({:?})\npending = marker.with_suffix('.pending')\npending.write_text(str(os.getpid()))\npending.replace(marker)\ntime.sleep({seconds})\nos.execv({:?}, [\"pg_restore\", *sys.argv[1:]])\n", python().display(), package.join("restore-started").display().to_string(), self.package.join("bin/pg_restore").display().to_string())).unwrap();
         fs::set_permissions(&restore, fs::Permissions::from_mode(0o700)).unwrap();
         package
     }
