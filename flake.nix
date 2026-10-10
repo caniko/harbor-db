@@ -254,14 +254,11 @@
         postgres-interrupted-upgrade = pkgs.callPackage ./nix/test-postgres-upgrade.nix {};
         postgres-recovery-acceptance = pkgs.callPackage ./nix/test-postgres-recovery.nix {};
         postgres-writer-fence = pkgs.callPackage ./nix/test-postgres-writer-fence.nix {};
-        postgres-lifecycle-test =
-          pkgs.runCommand "harbor-db-postgres-lifecycle-test" {
-            nativeBuildInputs = [pkgs.python3 pkgs.gitMinimal pkgs.postgresql_18];
-            HARBOR_DB_TEST_POSTGRES = pkgs.postgresql_18;
-          } ''
-            PYTHONPATH=${./python} python3 -B -m unittest discover -s ${./tests} -p 'test_*.py'
-            touch "$out"
-          '';
+        postgres-lifecycle-test = import ./nix/test-python-regressions.nix {
+          inherit pkgs;
+          pythonSource = ./python;
+          checkName = "postgres-lifecycle-test";
+        };
         postgres-lifecycle-oracle-test = pkgs.callPackage ./nix/test-postgres-oracle.nix {};
         harbor-db = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db;
         cargo-fmt = craneLib.cargoFmt {

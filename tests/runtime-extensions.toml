@@ -6,6 +6,7 @@ gates = [
   ".#checks.x86_64-linux.native-source-local-recovery",
 ]
 qualified_cases = [
+  "nix.x86_64-linux.postgres-lifecycle-test",
   "nix.x86_64-linux.postgres-lifecycle-oracle-test",
   "vm.x86_64-linux.native-source-local-recovery",
 ]
@@ -16,4 +17,4 @@ sha256 = "47e441ba84dfef1a86f07d6e91f88ff09a1d22076f6c316830a20f2a6fcceac5"
 
 [[extensions]]
 path = "python/harbor_db/recovery.py"
-sha256 = "42604ae925bd20d1a5c58994469ee8aaee771fe6f34dd0ed8c3d103064f24601"
+sha256 = "0a04cda75e3b9028746c21c720aae80b91b87de388dc0148c65844e76b7f17de"

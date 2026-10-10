@@ -1019,7 +1019,7 @@ argv_prefix = ["cargo", "test", "--locked", "--features", "testing", "--test", "
 argv_suffix = ["--", "--exact"]
 profile = "fast"
 maturity = "crystallized"
-selectors = ["baseline_rejects_duplicate_mappings_traversal_and_unreviewed_head", "missing_pr_case_or_gate_blocks_migration_admission", "pr14_contract_preserves_full_native_inventory_and_all_qualified_gates", "baseline_cannot_keep_counts_while_dropping_application_contracts_or_changing_gates", "operator_can_check_pr14_scope_without_executing_or_claiming_qualification", "extension_requires_exact_hash_and_explicit_changed_scope", "extension_requires_every_frozen_oracle_even_for_unchanged_runtime", "extension_manifest_rejects_typos_provenance_paths_and_invalid_hashes", "extension_gates_cases_and_required_vm_artifacts_cannot_be_substituted", "absent_extension_manifest_keeps_original_runtime_hash_requirement"]
+selectors = ["baseline_rejects_duplicate_mappings_traversal_and_unreviewed_head", "missing_pr_case_or_gate_blocks_migration_admission", "pr14_contract_preserves_full_native_inventory_and_all_qualified_gates", "baseline_cannot_keep_counts_while_dropping_application_contracts_or_changing_gates", "operator_can_check_pr14_scope_without_executing_or_claiming_qualification", "extension_requires_exact_hash_and_explicit_changed_scope", "extension_requires_every_frozen_oracle_even_for_unchanged_runtime", "extension_manifest_rejects_typos_provenance_paths_and_invalid_hashes", "extension_gates_cases_and_required_vm_artifacts_cannot_be_substituted", "absent_extension_manifest_keeps_original_runtime_hash_requirement", "regression_gate_rejects_a_skip_that_unittest_accepts"]
 
 [[inventories]]
 origin = "rust"
@@ -1889,7 +1889,7 @@ namespace = "checks"
 id_prefix = "nix."
 source = "flake.nix"
 systems = ["x86_64-linux", "aarch64-linux"]
-names = ["postgres-lifecycle-test", "harbor-db", "cargo-fmt", "cargo-test", "cargo-doc", "cargo-clippy"]
+names = ["harbor-db", "cargo-fmt", "cargo-test", "cargo-doc", "cargo-clippy"]
 profile = "full"
 deadline_seconds = 7200
 resources = { cpu = 2, memory_mib = 8192, disk_mib = 32768, exclusive = ["nix-build"] }
@@ -4257,7 +4257,7 @@ required = true
 [[cases.artifact_specs]]
 version = 1
 source = "nix.x86_64-linux.postgres-lifecycle-oracle-test"
-path = "oracle-acceptance.json"
+path = "python-regressions-acceptance.json"
 kind = "semantic"
 required = true
 
@@ -4284,6 +4284,60 @@ required = true
 [[cases.artifact_specs]]
 version = 1
 source = "nix.aarch64-linux.postgres-lifecycle-oracle-test"
-path = "oracle-acceptance.json"
+path = "python-regressions-acceptance.json"
+kind = "semantic"
+required = true
+
+[[cases]]
+id = "nix.x86_64-linux.postgres-lifecycle-test"
+source = "nix/test-python-regressions.nix; tests/run_python_regressions.py; python"
+profile = "full"
+platforms = ["x86_64-linux"]
+deadline_seconds = 7200
+execution = { kind = "nix", installable = ".#checks.x86_64-linux.postgres-lifecycle-test" }
+coverage_note = "All 174 original methods must execute successfully against the extended default Python runtime with no skips. Aggregate evidence adds no blanket operation coverage."
+[[cases.artifact_specs]]
+version = 1
+source = "nix.x86_64-linux.postgres-lifecycle-test"
+path = "nix-outputs.json"
+kind = "nix_outputs"
+required = true
+[[cases.artifact_specs]]
+version = 1
+source = "nix.x86_64-linux.postgres-lifecycle-test"
+path = "junit.xml"
+kind = "junit"
+required = true
+[[cases.artifact_specs]]
+version = 1
+source = "nix.x86_64-linux.postgres-lifecycle-test"
+path = "python-regressions-acceptance.json"
+kind = "semantic"
+required = true
+
+[[cases]]
+id = "nix.aarch64-linux.postgres-lifecycle-test"
+source = "nix/test-python-regressions.nix; tests/run_python_regressions.py; python"
+profile = "full"
+platforms = ["aarch64-linux"]
+deadline_seconds = 7200
+execution = { kind = "nix", installable = ".#checks.aarch64-linux.postgres-lifecycle-test" }
+coverage_note = "All 174 original methods must execute successfully against the extended default Python runtime with no skips. Execution on this system requires separately qualified native or emulated AArch64 support."
+[[cases.artifact_specs]]
+version = 1
+source = "nix.aarch64-linux.postgres-lifecycle-test"
+path = "nix-outputs.json"
+kind = "nix_outputs"
+required = true
+[[cases.artifact_specs]]
+version = 1
+source = "nix.aarch64-linux.postgres-lifecycle-test"
+path = "junit.xml"
+kind = "junit"
+required = true
+[[cases.artifact_specs]]
+version = 1
+source = "nix.aarch64-linux.postgres-lifecycle-test"
+path = "python-regressions-acceptance.json"
 kind = "semantic"
 required = true

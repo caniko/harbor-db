@@ -93,7 +93,8 @@ impl RuntimeExtensions {
             ".#checks.x86_64-linux.postgres-lifecycle-oracle-test",
             ".#checks.x86_64-linux.native-source-local-recovery",
         ];
-        const CASES: [&str; 2] = [
+        const CASES: [&str; 3] = [
+            "nix.x86_64-linux.postgres-lifecycle-test",
             "nix.x86_64-linux.postgres-lifecycle-oracle-test",
             "vm.x86_64-linux.native-source-local-recovery",
         ];
@@ -175,9 +176,14 @@ impl RuntimeExtensions {
                 .iter()
                 .find(|case| &case.id == id)
                 .ok_or_else(|| error(format!("runtime extension case unregistered: {id}")))?;
-            let oracle = id == "nix.x86_64-linux.postgres-lifecycle-oracle-test";
-            let prefix = if oracle { "nix." } else { "vm." };
-            if case.profile != (if oracle { Profile::Full } else { Profile::Vm })
+            let aggregate = id.starts_with("nix.");
+            let prefix = if aggregate { "nix." } else { "vm." };
+            if case.profile
+                != (if aggregate {
+                    Profile::Full
+                } else {
+                    Profile::Vm
+                })
                 || !matches!(&case.execution, Execution::Nix { installable } if self.gates.contains(installable)
                     && installable == &format!(".#checks.{}", id.strip_prefix(prefix).unwrap_or("")))
                 || !case.artifact_specs.iter().any(|artifact| {

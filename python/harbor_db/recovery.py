@@ -232,7 +232,11 @@ def snapshot(config, socket_dir, port, *, now=None):
         raise ValueError("source-local snapshots require the writer fence")
     now = int(time.time()) if now is None else now
     with writer_exclusion(config, socket_dir, port) as fence, lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True), evidence_lease(settings):
-        directory, binding, selected = selected_backup(config, settings, now)
+        if recovery_repository.source_local(settings):
+            directory, binding, selected = selected_backup(config, settings, now)
+        else:
+            directory, binding = backup(config, settings, now)
+            selected = None
         postgres.inspect_live(config, settings["system_identifier"], socket_dir, port)
         verify_backup(config, directory)
         result = {"version": 1, **binding, "completed_at": now,

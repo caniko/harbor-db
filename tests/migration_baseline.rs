@@ -342,3 +342,67 @@ fn absent_extension_manifest_keeps_original_runtime_hash_requirement() {
     }
     baseline.validate_migration(root.path(), &suite).unwrap();
 }
+
+#[test]
+fn regression_gate_rejects_a_skip_that_unittest_accepts() {
+    let root = tempfile::tempdir().unwrap();
+    let tests = root.path().join("tests");
+    let output = root.path().join("output");
+    fs::create_dir(&tests).unwrap();
+    fs::create_dir(&output).unwrap();
+    let corpus = tests.join("test_gate.py");
+    let content = "import unittest\nclass Corpus(unittest.TestCase): pass\nfor i in range(174): setattr(Corpus, f'test_{i:03}', lambda self: None)\nCorpus.test_000 = unittest.skip('deliberate gate rejection')(Corpus.test_000)\n";
+    fs::write(&corpus, content).unwrap();
+    let run = |args: &[&str]| {
+        let mut command = std::process::Command::new("python3");
+        command
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        harbor_db::storage::process::spawn(&mut command)
+            .unwrap()
+            .wait_with_output()
+            .unwrap()
+    };
+    assert!(
+        run(&[
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            tests.to_str().unwrap()
+        ])
+        .status
+        .success()
+    );
+    let strict = run(&[
+        "-B",
+        "tests/run_python_regressions.py",
+        "--tests",
+        tests.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+        "--case-id",
+        "strict-regression-gate-fixture",
+    ]);
+    assert_eq!(strict.status.code(), Some(1));
+    let document = fs::read_to_string(output.join("junit.xml")).unwrap();
+    let junit = roxmltree::Document::parse(&document).unwrap();
+    assert_eq!(junit.root_element().attribute("tests"), Some("174"));
+    assert_eq!(junit.root_element().attribute("skipped"), Some("1"));
+    let receipt: serde_json::Value = serde_json::from_slice(
+        &fs::read(output.join("python-regressions-acceptance.json")).unwrap(),
+    )
+    .unwrap();
+    let assertions = receipt["assertions"].as_array().unwrap();
+    assert_eq!(assertions.len(), 174);
+    assert_eq!(
+        assertions
+            .iter()
+            .filter(|item| item["passed"] == false)
+            .count(),
+        1
+    );
+    assert_eq!(fs::read_to_string(&corpus).unwrap(), content);
+}
