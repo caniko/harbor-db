@@ -8,6 +8,55 @@ operation = "harbor-db-test.run"
 dimension = "compatibility"
 evidence = "The actual detached CLI runs from an executable forced beyond 16 MiB, retains identical complete bytes, and qualifies a controlled Nix case with a missing service-manager PATH by using the retained launcher environment in both service roles."
 
+[[inventories]]
+origin = "rust"
+id_prefix = "native.drill-deadlines."
+selector_prefix = ""
+source = "tests/drill_deadlines.rs"
+argv_prefix = ["cargo", "test", "--locked", "--all-features", "--test", "drill_deadlines"]
+argv_suffix = ["--", "--exact"]
+profile = "integration"
+maturity = "crystallized"
+platforms = ["x86_64-linux", "aarch64-linux"]
+deadline_seconds = 240
+resources = { cpu = 2, memory_mib = 512, disk_mib = 512, exclusive = [] }
+selectors = ["owning_deadline_aborts_restore_and_allows_peer_cleanup", "restores_outlive_the_old_120_second_probe_limit_in_both_engines", "invalid_budgets_reject_before_mutation_and_explicit_budget_overrides_inheritance", "cancelled_restore_retains_private_state_for_explicit_peer_cleanup"]
+
+[[coverage]]
+case = "native.drill-deadlines.restores_outlive_the_old_120_second_probe_limit_in_both_engines"
+capability = "postgres-drill"
+operation = "harbor-db-postgres-drill.restore"
+dimension = "positive"
+evidence = "Both actual CLIs restore the same real PostgreSQL dump through controlled 121-second pg_restore delays, outliving the former probe deadline. Real SQL returns the exact acknowledged id/revision before opposite-engine cleanup stops each private cluster."
+
+[[coverage]]
+case = "native.drill-deadlines.owning_deadline_aborts_restore_and_allows_peer_cleanup"
+capability = "postgres-drill"
+operation = "harbor-db-postgres-drill.restore"
+dimension = "rejection"
+evidence = "Both actual CLIs reach a controlled three-second restore worker under a two-second owning budget and fail within five seconds; PostgreSQL PID/socket carriers disappear, opposite-engine cleanup is idempotent and the dump remains byte-identical."
+
+[[coverage]]
+case = "native.drill-deadlines.invalid_budgets_reject_before_mutation_and_explicit_budget_overrides_inheritance"
+capability = "postgres-drill"
+operation = "harbor-db-postgres-drill.restore"
+dimension = "compatibility"
+evidence = "Both actual CLIs reject zero, over-86400 and nonnumeric inherited budgets without workspace mutation. An explicit ten-second CLI budget overrides an inherited one-second budget and admits a controlled two-second restore in each engine."
+
+[[coverage]]
+case = "native.drill-deadlines.cancelled_restore_retains_private_state_for_explicit_peer_cleanup"
+capability = "postgres-drill"
+operation = "harbor-db-postgres-drill.cleanup"
+dimension = "interruption"
+evidence = "Each actual coordinator is killed only after its restore worker is observed and pidfd-pinned. Its real private PostgreSQL cluster remains recoverable; the opposite CLI stops it, removes PID/socket carriers and preserves control files and original dump bytes. This proves explicit cleanup after abrupt cancellation, not automatic cleanup after SIGKILL."
+
+[[coverage]]
+case = "native.drill-deadlines.owning_deadline_aborts_restore_and_allows_peer_cleanup"
+capability = "postgres-drill"
+operation = "harbor-db-postgres-drill.cleanup"
+dimension = "recovery"
+evidence = "After a deadline-aborted real restore stops its disposable PostgreSQL server, the opposite CLI repeats cleanup successfully without changing dump bytes."
+
 [[coverage]]
 case = "vm.x86_64-linux.native-application-provision"
 capability = "application-provision"
@@ -677,7 +726,7 @@ case = "native.application_storage.python_and_rust_resume_each_others_failed_cap
 capability = "application-backup"
 operation = "harbor-db-application-backup.capture"
 dimension = "compatibility"
-evidence = "Each real capture engine fails in restoration, leaves its original intent and partial artifacts, and is explicitly retried by the other language. Both inspectors accept the published semantic restore point."
+evidence = "Each real capture engine fails in restoration, leaves its original intent and partial artifacts, and is explicitly retried by the other language. Both inspectors accept the published semantic restore point. Every executed adapter additionally asserts the owning ten-second contract budget and retained authority leases before mutation."
 
 [[coverage]]
 case = "native.application_storage.python_and_rust_resume_each_others_failed_capture_and_verify_immutable_restore_points"

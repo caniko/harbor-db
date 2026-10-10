@@ -11,6 +11,7 @@ const ADAPTER: &str = r#"import hashlib,json,pathlib,sys,os,fcntl
 operation,backup,workspace=sys.argv[1:]
 backup,workspace=pathlib.Path(backup),pathlib.Path(workspace)
 base=pathlib.Path(__file__).parent
+assert os.environ['HARBOR_DB_APPLICATION_TIMEOUT_SECONDS']=='10'
 fds=[int(s) for s in os.environ['HARBOR_DB_LEASE_FDS'].split(',')]
 assert fds and all(fd>=3 for fd in fds)
 for fd in fds: os.fstat(fd)

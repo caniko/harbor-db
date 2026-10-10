@@ -5,6 +5,8 @@ gates = [
   ".#checks.x86_64-linux.postgres-lifecycle-oracle-test",
   ".#checks.x86_64-linux.native-source-local-recovery",
   ".#checks.x86_64-linux.native-application-provision",
+  ".#checks.x86_64-linux.cargo-test",
+  ".#checks.x86_64-linux.native-application-backup",
 ]
 qualified_cases = [
   "nix.x86_64-linux.postgres-lifecycle-test",
@@ -36,3 +38,11 @@ sha256 = "df41d997ae9a808d895f886b0dbfe6b43c71051e20a82a06a9cf0449c51dd521"
 [[extensions]]
 path = "tests/test_application_provision.py"
 sha256 = "958f1c84f67fd46f7eab054c334dd312c851b74559c032036c08e5e5653bcc69"
+
+[[extensions]]
+path = "python/harbor_db/application_backup.py"
+sha256 = "e7ad0a32af72b27e94e2505595f34f9eee02f2f8734b01a2e9a0d4e5c6a43e27"
+
+[[extensions]]
+path = "python/harbor_db/postgres_drill.py"
+sha256 = "355e3c07b050033fc315903ec54c658f3bc4aba31578f831dde85946cd501a0c"

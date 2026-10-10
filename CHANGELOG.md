@@ -19,6 +19,9 @@
 
 ### Fixed
 
+- Give logical restoration the owning backup contract's complete bounded budget
+  instead of a 120-second per-child probe limit; retain explicit standalone
+  budgets, deadline failure cleanup and cross-engine cancellation cleanup.
 - Require declared tables during post-schema `reconcile` and read-only `check`,
   while preserving pre-schema `apply`. Generated permissions units reject
   incomplete schema migrations before admitting runtime services.

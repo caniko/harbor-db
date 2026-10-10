@@ -187,6 +187,10 @@ fn execute(
             .collect::<Vec<_>>()
             .join(","),
     );
+    env.insert(
+        "HARBOR_DB_APPLICATION_TIMEOUT_SECONDS".into(),
+        c["timeout_seconds"].to_string(),
+    );
     let mut spec = process::CommandSpec::new(args);
     spec.environment = Some(env);
     spec.cwd = Some(workspace.to_owned());

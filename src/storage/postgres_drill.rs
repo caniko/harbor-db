@@ -4,14 +4,17 @@ use std::{
     fs,
     os::unix::fs::{DirBuilderExt, MetadataExt},
     path::Path,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-fn run(package: &Path, program: &str, args: Vec<String>) -> Result<()> {
+fn run(package: &Path, program: &str, args: Vec<String>, deadline: Instant) -> Result<()> {
     let mut argv = vec![package.join("bin").join(program).display().to_string()];
     argv.extend(args);
     let mut spec = pg_core::command(argv, true);
-    spec.timeout = Duration::from_secs(120);
+    spec.timeout = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| invalid("disposable restore exceeded its execution limit"))?;
     process::execute(&spec)
         .map_err(|_| invalid(format!("disposable PostgreSQL {program} failed")))?;
     Ok(())
@@ -24,6 +27,45 @@ pub fn operate(
     workspace: &Path,
     dump: &str,
 ) -> Result<()> {
+    operate_with_timeout(
+        package,
+        command,
+        backup,
+        workspace,
+        dump,
+        timeout_seconds(None)?,
+    )
+}
+
+/// The owning application adapter supplies its contract budget. Standalone
+/// callers use the same 1800-second default or an explicit bounded CLI value.
+pub fn timeout_seconds(explicit: Option<u64>) -> Result<u64> {
+    let seconds = match explicit {
+        Some(seconds) => seconds,
+        None => match std::env::var("HARBOR_DB_APPLICATION_TIMEOUT_SECONDS") {
+            Ok(value) => value
+                .parse()
+                .map_err(|_| invalid("invalid disposable restore timeout"))?,
+            Err(std::env::VarError::NotPresent) => 1800,
+            Err(_) => return Err(invalid("invalid disposable restore timeout")),
+        },
+    };
+    if !(1..=86400).contains(&seconds) {
+        return Err(invalid("invalid disposable restore timeout"));
+    }
+    Ok(seconds)
+}
+
+pub fn operate_with_timeout(
+    package: &Path,
+    command: &str,
+    backup: &Path,
+    workspace: &Path,
+    dump: &str,
+    timeout: u64,
+) -> Result<()> {
+    let timeout = timeout_seconds(Some(timeout))?;
+    let deadline = Instant::now() + Duration::from_secs(timeout);
     if !pg_core::unredirected(workspace)? || !pg_core::unredirected(backup)? {
         return Err(invalid(
             "disposable restore paths must be absolute and unredirected",
@@ -53,6 +95,7 @@ pub fn operate(
                     "-w".into(),
                     "stop".into(),
                 ],
+                deadline,
             )?;
         }
         return Ok(());
@@ -64,18 +107,19 @@ pub fn operate(
         return Err(invalid("disposable restore requires a new workspace"));
     }
     fs::DirBuilder::new().mode(0o700).create(&socket)?;
-    run(
-        package,
-        "initdb",
-        vec![
-            "-D".into(),
-            data.clone(),
-            "--locale=C".into(),
-            "--encoding=UTF8".into(),
-            "--auth=trust".into(),
-        ],
-    )?;
     let result = (|| {
+        run(
+            package,
+            "initdb",
+            vec![
+                "-D".into(),
+                data.clone(),
+                "--locale=C".into(),
+                "--encoding=UTF8".into(),
+                "--auth=trust".into(),
+            ],
+            deadline,
+        )?;
         run(
             package,
             "pg_ctl",
@@ -92,6 +136,7 @@ pub fn operate(
                 "-w".into(),
                 "start".into(),
             ],
+            deadline,
         )?;
         let mut endpoint = vec![
             "-h".into(),
@@ -101,7 +146,7 @@ pub fn operate(
         ];
         let mut created = endpoint.clone();
         created.push("harbor_restore".into());
-        run(package, "createdb", created)?;
+        run(package, "createdb", created, deadline)?;
         let mut restore = vec![
             "--exit-on-error".into(),
             "--no-owner".into(),
@@ -113,10 +158,18 @@ pub fn operate(
             "harbor_restore".into(),
             backup.join(dump).display().to_string(),
         ]);
-        run(package, "pg_restore", restore)
+        run(package, "pg_restore", restore, deadline)
     })();
     if result.is_err() {
-        operate(package, "cleanup", backup, workspace, dump)?;
+        // Cleanup has its own bounded attempt after the restore budget expires.
+        operate_with_timeout(
+            package,
+            "cleanup",
+            backup,
+            workspace,
+            dump,
+            timeout.min(120),
+        )?;
     }
     result
 }

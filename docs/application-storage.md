@@ -78,6 +78,14 @@ supplies a reusable logical PostgreSQL restore adapter for `database.dump`.
 It creates `WORKSPACE/socket`, listens only on that private Unix socket at port
 55439, and restores database `harbor_restore`. Applications supply their semantic
 verifier, which connects to this disposable endpoint. No live database is dropped.
+The owning backup adapter supplies `timeoutSeconds` through
+`HARBOR_DB_APPLICATION_TIMEOUT_SECONDS`. Restoration shares that complete budget
+across initialization, startup, database creation and `pg_restore`; individual
+children do not receive fresh probe deadlines. Standalone calls default to 1800
+seconds and may select `--timeout-seconds` from 1 to 86400, overriding inheritance.
+Failure attempts bounded cleanup separately. Abrupt coordinator cancellation
+retains the private workspace for explicit `cleanup` or managed retry; SIGKILL
+does not establish automatic cleanup.
 
 `harbor-db-application-backup --config MANIFEST capture [--attempt ID]` records
 every artifact and executable hash, executes restoration and verification, flushes

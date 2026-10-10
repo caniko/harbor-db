@@ -83,6 +83,7 @@ def execute(config, stage, backup, workspace, lease):
         os.fstat(descriptor)
     retained = tuple(sorted(set([lease, *inherited])))
     environment["HARBOR_DB_LEASE_FDS"] = ",".join(map(str, retained))
+    environment["HARBOR_DB_APPLICATION_TIMEOUT_SECONDS"] = str(config["timeout_seconds"])
     # Adapter output is a bounded receipt, never copied into diagnostics. Each
     # child retains the persistent lease if its coordinator dies unexpectedly.
     return process.execute(argv, timeout=config["timeout_seconds"], environment=environment, leases=retained, cwd=workspace)
