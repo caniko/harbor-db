@@ -9,6 +9,11 @@
   cfg = config.services.harbor-db.pgBackup;
   sourceRole = lib.elem cfg.role ["source" "both"];
   targetRole = lib.elem cfg.role ["target" "both"];
+  replicationHosts = lib.unique (cfg.sourceSettings.allowedReplicationHosts
+    ++ lib.optionals cfg.targetSettings.sourceLocalRecovery.enable (
+      lib.optional (lib.elem cfg.source.hostName ["127.0.0.1" "localhost"]) "127.0.0.1/32"
+      ++ lib.optional (lib.elem cfg.source.hostName ["::1" "localhost"]) "::1/128"
+    ));
   storagePackage = harborDbStoragePackage;
   durable = "${storagePackage}/bin/harbor-db-durable";
   pruneTool = "${storagePackage}/bin/harbor-db-backup-prune";
@@ -302,7 +307,7 @@ in {
         };
       };
 
-      sourceLocalRecovery.enable = mkEnableOption "the source-local-v1 capture namespace and recovery-serialized backup publication";
+      sourceLocalRecovery.enable = mkEnableOption "the source-local-v1 capture namespace, authenticated loopback replication, and recovery-serialized backup publication";
 
       baseBackup = {
         enable = mkEnableOption "periodic base backup via pg_basebackup" // {default = true;};
@@ -399,7 +404,7 @@ in {
           ];
           authentication = lib.mkAfter (
             lib.concatMapStringsSep "\n" (host: "host replication replicator ${host} scram-sha-256")
-            cfg.sourceSettings.allowedReplicationHosts
+            replicationHosts
           );
         };
 

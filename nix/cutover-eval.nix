@@ -18,6 +18,14 @@
     raise SystemExit({"ExecCondition": 17, "ExecReload": 23}[phase])
   '';
   phaseCommand = phase: "${pkgs.python3}/bin/python3 ${phaseWriter} ${phase} HARBOR_DB_PHASE_READY ${lib.escapeShellArg literalArgument}";
+  descendantRules = [
+    "d /srv/history/cache 0750 archive archive - -"
+    "D '/srv/history/cache/nested' 0750 archive archive - -"
+    "v \"/srv/history/volumes\" 0750 archive archive - -"
+    "q /srv/history/quotas 0750 archive archive - -"
+    "Q /srv/history/quotas/nested 0750 archive archive - -"
+  ];
+  siblingRule = "d /srv/history-other/cache 0750 archive archive - -";
   eval = import "${pkgs.path}/nixos/lib/eval-config.nix" {
     system = pkgs.stdenv.hostPlatform.system;
     modules = [
@@ -47,7 +55,7 @@
             create = false;
           }
         ];
-        systemd.tmpfiles.rules = ["d '/srv/history' 0750 archive archive - -" "d \"/srv/history\" 0750 archive archive - -"];
+        systemd.tmpfiles.rules = ["d '/srv/history' 0750 archive archive - -" "d \"/srv/history\" 0750 archive archive - -" siblingRule] ++ descendantRules;
         systemd.services.archive.serviceConfig.ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
         systemd.services.archive.serviceConfig.ExecStartPre = ["${pkgs.coreutils}/bin/true"];
         systemd.services.archive.serviceConfig.ExecCondition = [(phaseCommand "ExecCondition")];
@@ -63,6 +71,14 @@
     (eval.extendModules {
       modules = [{services.harbor-db.dataDirectories = lib.mkForce [{path = "/srv/history";}];}];
     }).config;
+  unsafeDescendant =
+    (eval.extendModules {
+      modules = [{services.harbor-db.dataDirectories = lib.mkForce [{path = "/srv/history/cache";}];}];
+    }).config;
+  disabled =
+    (eval.extendModules {
+      modules = [{services.harbor-db.cutover.enable = lib.mkForce false;}];
+    }).config;
   # NixOS diagnostics may reference attributes that exist only on failure.
   # Keep successful assertions' messages lazy, as NixOS itself does.
   harborFailures = assertions: lib.filter (item: !item.assertion && lib.hasPrefix "Harbor-DB" item.message) assertions;
@@ -74,10 +90,18 @@
     inherit literalArgument;
     commands = lib.genAttrs commandPhases (phase: lib.toList config.systemd.services.archive.serviceConfig.${phase});
   });
+  tmpfilesFixture = pkgs.writeText "harbor-db-cutover-tmpfiles.conf" (lib.concatStringsSep "\n" (map
+    (lib.replaceStrings ["archive archive"] ["- -"])
+    (lib.filter (lib.hasInfix "/srv/history") config.systemd.tmpfiles.rules)));
 in
   (import ./eval-checks.nix {inherit pkgs;}).mkEvalCheck {
     name = "harbor-db-cutover-eval";
     assertions = [
+      {
+        name = "adopted-descendants-cannot-be-initialized";
+        assertion = lib.any (item: lib.hasInfix "dataDirectories.create = false" item.message) (harborFailures unsafeDescendant.assertions);
+        message = "activation must not create a custody root through a missing descendant";
+      }
       {
         name = "valid-adopted-contract";
         assertion = succeeds;
@@ -139,6 +163,18 @@ in
         message = "both live activation and boot tmpfiles must preserve require-existing roots";
       }
       {
+        name = "descendant-tmpfiles-preserve-missing-history";
+        assertion =
+          lib.all (rule: lib.elem ("z" + builtins.substring 1 (-1) rule) config.systemd.tmpfiles.rules) descendantRules
+          && lib.elem siblingRule config.systemd.tmpfiles.rules;
+        message = "directory rules beneath custody roots must require existing paths without matching sibling prefixes";
+      }
+      {
+        name = "unenforced-tmpfiles-retain-creation";
+        assertion = lib.all (rule: lib.elem rule disabled.systemd.tmpfiles.rules) descendantRules;
+        message = "directory creation must remain available when custody enforcement is disabled";
+      }
+      {
         name = "read-only-sudo-is-exact-argv";
         assertion = lib.any (rule:
           lib.any (command:
@@ -159,7 +195,24 @@ in
       assert manifest['enforced'] is True
       assert manifest['resources']['history']['authority']['directories'] == ['/srv/history']
       PY
-      PYTHONPATH=${config.services.harbor-db.cutover.package}/lib \
-        ${pkgs.python3}/bin/python3 ${../tests/check_cutover_command_phases.py} ${commandPhaseFixture} > "$out/command-phases.json"
+      ${pkgs.python3}/bin/python3 - <<'PY'
+      import pathlib
+      import subprocess
+      import tempfile
+
+      with tempfile.TemporaryDirectory() as staging:
+          root = pathlib.Path(staging)
+          history = root / 'srv/history'
+          command = ['${pkgs.systemd}/bin/systemd-tmpfiles', '--create', '--root=' + staging, '${tmpfilesFixture}']
+          subprocess.run(command, check=True)
+          assert not history.exists(), 'tmpfiles recreated the missing custody root'
+          assert (root / 'srv/history-other/cache').is_dir(), 'sibling rules were incorrectly inhibited'
+          cache = history / 'cache'
+          cache.mkdir(parents=True, mode=0o700)
+          subprocess.run(command, check=True)
+          assert cache.stat().st_mode & 0o777 == 0o750, 'permission repair stopped working'
+          assert not (cache / 'nested').exists(), 'tmpfiles created a missing descendant'
+      PY
+      ${pkgs.python3}/bin/python3 ${../tests/check_cutover_command_phases.py} ${commandPhaseFixture} > "$out/command-phases.json"
     '';
   }

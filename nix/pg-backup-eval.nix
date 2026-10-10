@@ -51,9 +51,7 @@
           role = "both";
           source.hostName = "127.0.0.1";
           sourceSettings = {
-            allowedReplicationHosts = ["127.0.0.1/32"];
             replicatorPasswordFile = "/run/secrets/pg-replicator-password";
-            firewallInterface = null;
           };
           targetSettings.sourceLocalRecovery.enable = true;
         };
@@ -61,6 +59,14 @@
     ];
   };
   localBackup = localEval.config.systemd.services.pg-basebackup.script;
+  ipv6Local =
+    (localEval.extendModules {
+      modules = [{services.harbor-db.pgBackup.source.hostName = lib.mkForce "::1";}];
+    }).config;
+  localhost =
+    (localEval.extendModules {
+      modules = [{services.harbor-db.pgBackup.source.hostName = lib.mkForce "localhost";}];
+    }).config;
 in
   mkEvalCheck {
     name = "harbor-db-pg-backup-eval";
@@ -105,6 +111,16 @@ in
         name = "source-local-both-roles";
         assertion = !(builtins.any (a: lib.hasPrefix "services.harbor-db.pgBackup" a.message) (builtins.filter (a: !a.assertion) localEval.config.assertions)) && lib.hasInfix "host replication replicator 127.0.0.1/32 scram-sha-256" localEval.config.services.postgresql.authentication && lib.hasInfix "-h 127.0.0.1" localEval.config.systemd.services.pg-receivewal.serviceConfig.ExecStart && !(localEval.config.networking.firewall.interfaces ? wg-home);
         message = "Source-local reception must configure both source credentials and generated receiver services without opening a replication firewall.";
+      }
+      {
+        name = "source-local-ipv6-replication-hba";
+        assertion = lib.hasInfix "host replication replicator ::1/128 scram-sha-256" ipv6Local.services.postgresql.authentication;
+        message = "IPv6 loopback reception must have a generated authenticated replication rule.";
+      }
+      {
+        name = "source-local-localhost-replication-hba";
+        assertion = lib.all (host: lib.hasInfix "host replication replicator ${host} scram-sha-256" localhost.services.postgresql.authentication) ["127.0.0.1/32" "::1/128"];
+        message = "localhost reception must admit both loopback address families.";
       }
       {
         name = "source-local-persistent-mutation-before-publication";

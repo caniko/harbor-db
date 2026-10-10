@@ -5,6 +5,10 @@
 Recovery capture runs on the source using its existing PostgreSQL OS account and
 local peer SQL endpoint. WAL is received locally, or through a separately
 qualified localhost relay, so the existing writer fence remains authoritative.
+With `pgBackup.targetSettings.sourceLocalRecovery.enable`, select `role = "both"`
+and a loopback `source.hostName`. The module generates SCRAM replication HBA
+rules for that address (`localhost` admits both loopback families) without adding
+a firewall opening. Source and target still require the replicator password file.
 Authenticated orchestration and artifact transport connect the source to an
 independent certifier. Fleet endpoints and credentials remain consumer policy.
 

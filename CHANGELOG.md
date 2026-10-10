@@ -19,6 +19,12 @@
 
 ### Fixed
 
+- Require existing custody roots and descendants in boot tmpfiles and activation
+  directory setup, preserving permission repair and sibling directory creation.
+- Generate authenticated loopback replication rules for source-local recovery,
+  including both address families for `localhost`, without opening the firewall.
+- Probe generated cutover writer leases independently of the retired production
+  Python package, retaining condition/reload argv, exit-code and exclusion checks.
 - Preserve literal serde JSON discriminator objects and exact large integers in
   receipts and journals; reject malformed or unsupported strings before mutation.
 - Share JSON token scanning, UID lookup and prepared-transition discovery; parse

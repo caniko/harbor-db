@@ -43,6 +43,12 @@
     if entry.kind == "filesystem"
     then entry.authority.directories
     else []) (lib.attrValues resources);
+  protectedPath = path:
+    lib.any (root: let
+      prefix = lib.removeSuffix "/" root;
+    in
+      path == prefix || lib.hasPrefix "${prefix}/" path)
+    protectedDirectories;
   requireExisting = rule: let
     matched = builtins.match "([dDvqQ][^[:space:]]*)[[:space:]]+('([^']*)'|\"([^\"]*)\"|([^[:space:]]+))([[:space:]].*)" rule;
     path =
@@ -54,7 +60,7 @@
       then builtins.elemAt matched 3
       else builtins.elemAt matched 4;
   in
-    if cfg.enable && matched != null && lib.elem path protectedDirectories
+    if cfg.enable && matched != null && protectedPath path
     then "z ${builtins.elemAt matched 1}${builtins.elemAt matched 5}"
     else rule;
   declaredDirectories =
@@ -89,7 +95,7 @@
 in {
   imports = [./storage-package-argument.nix];
   # Application modules often emit boot-only `d` rules with no initialization
-  # option. Enforced historical roots retain permission repair, never creation.
+  # option. Historical roots and descendants retain repair, never creation.
   options.systemd.tmpfiles.rules = mkOption {apply = rules: map requireExisting rules;};
   options.systemd.services = mkOption {
     type = types.attrsOf (types.submodule ({name, ...}: {
@@ -233,7 +239,7 @@ in {
           message = "Harbor-DB cutover admission requires adopted PostgreSQL lifecycle enrollment for every enabled primary.";
         }
         {
-          assertion = lib.all (entry: !(lib.elem entry.path protectedDirectories) || !(entry.create or true)) declaredDirectories;
+          assertion = lib.all (entry: !(protectedPath entry.path) || !(entry.create or true)) declaredDirectories;
           message = "Harbor-DB adopted corpus roots must use dataDirectories.create = false; missing historical data may never be initialized.";
         }
         {

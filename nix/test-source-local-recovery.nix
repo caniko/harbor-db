@@ -47,7 +47,6 @@ in
         source.hostName = "127.0.0.1";
         sourceSettings = {
           listenAddresses = ["127.0.0.1"];
-          allowedReplicationHosts = ["127.0.0.1/32"];
           firewallInterface = null;
           replicatorPasswordFile = "/run/disposable-secret";
         };
