@@ -19,6 +19,15 @@ removed from either the catalog or Simit configuration. Newly added prototype
 cases and new qualification gates may extend this baseline. Updating the pinned
 PR head requires a deliberate source-delta review and new baseline evidence.
 
+Version-two application provisioning adds strict post-schema reconciliation.
+Its current regression fixture establishes declared tables explicitly while
+preserving every original test method and assertion. The original fixture is
+retained byte-for-byte in `tests/oracles/pr14/tests/` and used with the frozen
+runtime. An explicit current-fixture hash in `tests/runtime-extensions.toml`,
+unchanged method-inventory digest, frozen source hashes and required CI gates
+admit this setup extension. Undeclared edits, missing or changed frozen fixtures,
+and removing the extension declaration all fail admission.
+
 ## Required behavioral parity
 
 | Contract | Rust engines |

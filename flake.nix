@@ -94,7 +94,7 @@
     lib.postgresRecoveryReadiness = 1;
     lib.postgresRecoveryPreparation = 1;
     lib.postgresWriterFence = 3;
-    lib.applicationProvisioning = 1;
+    lib.applicationProvisioning = 2;
     lib.applicationBackup = 1;
     lib.applicationBackendTransition = 1;
     lib.cutoverPreflight = 3;

@@ -328,6 +328,58 @@ fn run(args: Args) -> Result<()> {
         format!("initial acknowledged records: {baseline}"),
     )?;
     gate.record("boot:acknowledged-records-read")?;
+    gate.command(
+        vec![
+            args.systemctl.clone(),
+            "start".into(),
+            "incomplete.service".into(),
+        ],
+        1,
+        "incomplete-schema-runtime-start-rejected",
+    )?;
+    let (code, output) = gate.execute(vec![
+        args.systemctl.clone(),
+        "show".into(),
+        "incomplete-schema.service".into(),
+        "-p".into(),
+        "Result".into(),
+        "--value".into(),
+    ])?;
+    require(
+        code == 0 && output.trim() == "success",
+        format!("incomplete schema unit must finish successfully: {output}"),
+    )?;
+    gate.record("incomplete-schema-success-cannot-admit-missing-declared-table")?;
+    gate.command(
+        vec![
+            args.systemctl.clone(),
+            "is-active".into(),
+            "incomplete.service".into(),
+        ],
+        3,
+        "incomplete-runtime-remains-inactive",
+    )?;
+    for (implementation, executable) in [
+        ("native", &args.native_provision),
+        ("python", &args.python_provision),
+    ] {
+        for (action, code) in [("check", 2), ("reconcile", 1)] {
+            gate.command(
+                vec![
+                    args.runuser.clone(),
+                    "-u".into(),
+                    "postgres".into(),
+                    "--".into(),
+                    executable.clone(),
+                    "--config".into(),
+                    "/etc/harbor-db/incomplete-provision.json".into(),
+                    action.into(),
+                ],
+                code,
+                &format!("incomplete-schema:{implementation}-{action}-rejects-missing-table"),
+            )?;
+        }
+    }
     gate.provision(
         &args,
         &args.python_provision,
@@ -450,6 +502,13 @@ fn run(args: Args) -> Result<()> {
                 "apply",
                 0,
                 &format!("repeat-{round}:{implementation}-apply"),
+            )?;
+            gate.provision(
+                &args,
+                executable,
+                "reconcile",
+                0,
+                &format!("repeat-{round}:{implementation}-reconcile"),
             )?;
             gate.equal(
                 &args,

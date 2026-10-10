@@ -401,7 +401,7 @@ fn provisioning_native_privilege_convergence_and_read_only_drift() {
             std::env::current_exe().unwrap().display().to_string(),
             "--exact".into(),
             "provisioning_native_privilege_convergence_and_read_only_drift".into(),
-            "--nocapture".into(),
+            "--show-output".into(),
         ]);
         let mut env: std::collections::BTreeMap<_, _> = std::env::vars().collect();
         env.insert(
@@ -414,8 +414,9 @@ fn provisioning_native_privilege_convergence_and_read_only_drift() {
         let output = process::run(&spec).unwrap();
         assert!(
             output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
         return;
     }
@@ -491,6 +492,20 @@ fn provisioning_native_privilege_convergence_and_read_only_drift() {
     fs::write(&lock, b"").unwrap();
     let endpoint = json!({"package":package,"socket_dir":socket,"port":55441,"control_role":"control","lock_file":lock});
     let policy = json!({"database":"demo","owner_role":"demo_owner","runtime_role":"demo_runtime","schema":"public","table_privileges":["SELECT"],"sequence_privileges":["USAGE","SELECT"],"tables":{"documents":["SELECT","INSERT","UPDATE","DELETE"],"history":["SELECT","INSERT"]}});
+    let python_provision = |policy: &Value, action: &str| {
+        let mut spec = CommandSpec::new(vec![
+            "python3".into(), "-B".into(), "-c".into(),
+            "import json,sys; from harbor_db import provision; policy,endpoint=json.loads(sys.argv[1]),json.loads(sys.argv[2]); action=sys.argv[3]; print(json.dumps(provision.check(policy,endpoint))) if action=='check' else getattr(provision,action)(policy,endpoint)".into(),
+            policy.to_string(), endpoint.to_string(), action.into(),
+        ]);
+        let mut environment: std::collections::BTreeMap<_, _> = std::env::vars().collect();
+        environment.insert(
+            "PYTHONPATH".into(),
+            format!("{}/python", env!("CARGO_MANIFEST_DIR")),
+        );
+        spec.environment = Some(environment);
+        process::run(&spec).unwrap()
+    };
     let sql = |statement: &str, role: &str, db: &str| {
         run(
             "psql",
@@ -520,13 +535,48 @@ fn provisioning_native_privilege_convergence_and_read_only_drift() {
     };
     provision::apply(&policy, &endpoint).unwrap();
     provision::apply(&policy, &endpoint).unwrap();
+    assert!(!provision::check(&policy, &endpoint).unwrap());
+    assert!(python_provision(&policy, "apply").status.success());
+    assert_eq!(
+        process::text(&python_provision(&policy, "check").stdout)
+            .unwrap()
+            .trim(),
+        "false"
+    );
     success(
         "CREATE TABLE documents(id int);CREATE TABLE history(id int);CREATE TABLE immutable(id int);CREATE SEQUENCE cursor;",
         "demo_owner",
         "demo",
     );
-    provision::apply(&policy, &endpoint).unwrap();
+    provision::reconcile(&policy, &endpoint).unwrap();
     assert!(provision::check(&policy, &endpoint).unwrap());
+    assert!(python_provision(&policy, "reconcile").status.success());
+    let mut missing = policy.clone();
+    missing["tables"]["missing_history"] = json!(["SELECT", "INSERT"]);
+    let grants = success(
+        "SELECT json_agg(json_build_array(relname,relacl::text) ORDER BY relname) FROM pg_class WHERE relnamespace='public'::regnamespace",
+        "control",
+        "demo",
+    );
+    assert!(!provision::check(&missing, &endpoint).unwrap());
+    assert!(!provision::check(&missing, &endpoint).unwrap());
+    assert!(provision::reconcile(&missing, &endpoint).is_err());
+    assert_eq!(
+        process::text(&python_provision(&missing, "check").stdout)
+            .unwrap()
+            .trim(),
+        "false"
+    );
+    assert!(!python_provision(&missing, "reconcile").status.success());
+    assert_eq!(
+        success(
+            "SELECT json_agg(json_build_array(relname,relacl::text) ORDER BY relname) FROM pg_class WHERE relnamespace='public'::regnamespace",
+            "control",
+            "demo",
+        ),
+        grants,
+        "a missing declared table must not publish partially reconciled privileges"
+    );
     success(
         "INSERT INTO documents VALUES(1);UPDATE documents SET id=2;DELETE FROM documents;INSERT INTO history VALUES(1);SELECT nextval('cursor');",
         "demo_runtime",

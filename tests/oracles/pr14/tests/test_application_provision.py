@@ -42,14 +42,6 @@ class ApplicationProvisionTest(unittest.TestCase):
         cls.endpoint = {"package": str(cls.package), "socket_dir": str(cls.socket),
                         "port": 55441, "control_role": cls.user, "lock_file": str(cls.root / "provision.lock")}
         (cls.root / "provision.lock").touch(mode=0o600)
-        # Version-two admission requires the declared schema. Preserve all
-        # original assertions with an explicit fixture instead of relying on
-        # another test method to have created these tables first.
-        provision.apply(cls.config, cls.endpoint)
-        cls.command([cls.package / "bin/psql", "-X", "-w", "-v", "ON_ERROR_STOP=1",
-                     "-h", cls.socket, "-p", 55441, "-U", "demo_owner", "-d", "demo",
-                     "-c", "CREATE TABLE documents(id int); CREATE TABLE history(id int)"])
-        provision.reconcile(cls.config, cls.endpoint)
 
     @classmethod
     def command(cls, argv, **kwargs):

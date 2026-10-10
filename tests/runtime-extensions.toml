@@ -4,11 +4,13 @@ gates = [
   ".#checks.x86_64-linux.postgres-lifecycle-test",
   ".#checks.x86_64-linux.postgres-lifecycle-oracle-test",
   ".#checks.x86_64-linux.native-source-local-recovery",
+  ".#checks.x86_64-linux.native-application-provision",
 ]
 qualified_cases = [
   "nix.x86_64-linux.postgres-lifecycle-test",
   "nix.x86_64-linux.postgres-lifecycle-oracle-test",
   "vm.x86_64-linux.native-source-local-recovery",
+  "vm.x86_64-linux.native-application-provision",
 ]
 
 [[extensions]]
@@ -26,3 +28,11 @@ sha256 = "458b1179570fbbc41edb163f4291bef9c167bb850cbb254550e3c7c9cd425da3"
 [[extensions]]
 path = "python/harbor_db/cutover.py"
 sha256 = "3ddd0f233d2c2a993a2a6057f22ba093ad270406530d2b33758d3078c9a42812"
+
+[[extensions]]
+path = "python/harbor_db/provision.py"
+sha256 = "df41d997ae9a808d895f886b0dbfe6b43c71051e20a82a06a9cf0449c51dd521"
+
+[[extensions]]
+path = "tests/test_application_provision.py"
+sha256 = "958f1c84f67fd46f7eab054c334dd312c851b74559c032036c08e5e5653bcc69"

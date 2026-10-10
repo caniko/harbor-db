@@ -19,6 +19,9 @@
 
 ### Fixed
 
+- Require declared tables during post-schema `reconcile` and read-only `check`,
+  while preserving pre-schema `apply`. Generated permissions units reject
+  incomplete schema migrations before admitting runtime services.
 - Stream detached executable retention and complete-file binding with a separate
   finite bound, admitting debug binaries larger than the evidence-carrier limit.
 - Retry occupied evidence temporary names without replacing interrupted inodes;

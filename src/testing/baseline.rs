@@ -122,22 +122,25 @@ impl RuntimeExtensions {
             if !relative(&extension.path)
                 || !digest(&extension.sha256)
                 || !declared.insert(&extension.path)
-                || !baseline
-                    .files
-                    .iter()
-                    .any(|file| file.role == FileRole::Runtime && file.path == extension.path)
+                || !baseline.files.iter().any(|file| {
+                    matches!(file.role, FileRole::Runtime | FileRole::Test)
+                        && file.path == extension.path
+                })
             {
                 return Err(error(
-                    "invalid, duplicate or non-runtime extension path/hash",
+                    "invalid, duplicate or non-baseline extension path/hash",
                 ));
             }
         }
         let mut changed = BTreeSet::new();
-        for file in baseline
-            .files
-            .iter()
-            .filter(|file| file.role == FileRole::Runtime)
-        {
+        for file in baseline.files.iter().filter(|file| {
+            file.role == FileRole::Runtime
+                || (file.role == FileRole::Test
+                    && self
+                        .extensions
+                        .iter()
+                        .any(|extension| extension.path == file.path))
+        }) {
             let oracle = root.join("tests/oracles/pr14").join(&file.path);
             if codec::digest(&fs::read(&oracle)?) != file.sha256 {
                 return Err(error(format!(
@@ -300,10 +303,24 @@ impl Baseline {
         for file in self.files.iter().filter(|f| f.role == FileRole::Test) {
             let bytes = fs::read(root.join(&file.path))?;
             if codec::digest(&bytes) != file.sha256 {
-                return Err(error(format!(
-                    "PR14 Python test baseline changed: {}",
-                    file.path.display()
-                )));
+                let approved = fs::read_to_string(root.join("tests/runtime-extensions.toml"))
+                    .ok()
+                    .and_then(|text| toml::from_str::<RuntimeExtensions>(&text).ok())
+                    .is_some_and(|extensions| {
+                        extensions.extensions.iter().any(|extension| {
+                            extension.path == file.path && extension.sha256 == codec::digest(&bytes)
+                        })
+                    });
+                let oracle = root.join("tests/oracles/pr14").join(&file.path);
+                if !approved
+                    || oracle.is_symlink()
+                    || fs::read(&oracle).map_or(true, |bytes| codec::digest(&bytes) != file.sha256)
+                {
+                    return Err(error(format!(
+                        "PR14 Python test baseline changed: {}",
+                        file.path.display()
+                    )));
+                }
             }
             let text = std::str::from_utf8(&bytes)?;
             let module = file

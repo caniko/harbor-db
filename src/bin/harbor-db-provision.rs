@@ -10,6 +10,7 @@ struct Args {
 #[derive(Clone, ValueEnum)]
 enum Action {
     Apply,
+    Reconcile,
     Check,
 }
 fn run(a: Args) -> Result<bool> {
@@ -24,6 +25,10 @@ fn run(a: Args) -> Result<bool> {
         return Err(invalid("unsupported application provisioning manifest"));
     }
     match a.command {
+        Action::Reconcile => {
+            provision::reconcile(&c["policy"], &c["endpoint"])?;
+            Ok(true)
+        }
         Action::Apply => {
             provision::apply(&c["policy"], &c["endpoint"])?;
             Ok(true)

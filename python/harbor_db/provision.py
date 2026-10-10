@@ -79,10 +79,16 @@ def apply(config, endpoint):
     # One persistent cluster-scoped lock covers role creation and the database
     # transaction, including the gap between connections. Never replace it.
     with lock(endpoint["lock_file"]):
-        _apply(config, endpoint)
+        _apply(config, endpoint, require_tables=False)
 
 
-def _apply(config, endpoint):
+def reconcile(config, endpoint):
+    """Post-schema admission requires every explicitly declared relation."""
+    with lock(endpoint["lock_file"]):
+        _apply(config, endpoint, require_tables=True)
+
+
+def _apply(config, endpoint, *, require_tables):
     policy = validate(config)
     database, owner, runtime, schema = [identifier(policy[key]) for key in
                                         ("database", "owner_role", "runtime_role", "schema")]
@@ -150,14 +156,19 @@ def _apply(config, endpoint):
         statements = f"REVOKE ALL ON TABLE {target} FROM {runtime};"
         if values:
             statements += f"GRANT {','.join(values)} ON TABLE {target} TO {runtime};"
-        sql.append(f"SELECT '{statements}' WHERE to_regclass('{target}') IS NOT NULL\\gexec")
+        sql.append(statements if require_tables else
+                   f"SELECT '{statements}' WHERE to_regclass('{target}') IS NOT NULL\\gexec")
     sql.append("COMMIT;")
     query(endpoint, policy["database"], "\n".join(sql))
-    if not check(policy, endpoint):
+    if not _check(policy, endpoint, require_tables=require_tables):
         raise ValueError("application provisioning did not converge to the declared privileges")
 
 
 def check(config, endpoint):
+    return _check(config, endpoint, require_tables=True)
+
+
+def _check(config, endpoint, *, require_tables):
     policy = validate(config)
     if query(endpoint, "postgres", role_check(policy)) != "t":
         return False
@@ -184,6 +195,10 @@ def check(config, endpoint):
         "JOIN pg_namespace n ON n.oid=c.relnamespace, LATERAL aclexplode(a.attacl) acl "
         f"WHERE n.nspname='{schema}' AND acl.grantee IN (0,(SELECT oid FROM pg_roles WHERE rolname='{runtime}')))"
     ])
+    if require_tables:
+        for table in policy["tables"]:
+            checks.append("EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                          f"WHERE n.nspname='{schema}' AND c.relname='{table}' AND c.relkind IN ('r','p','v','m','f'))")
     for privilege in sorted(TABLE):
         default = "true" if privilege in policy["table_privileges"] else "false"
         cases = " ".join(f"WHEN '{table}' THEN {'true' if privilege in values else 'false'}"
@@ -215,7 +230,7 @@ def check(config, endpoint):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("command", choices=("apply", "check"))
+    parser.add_argument("command", choices=("apply", "reconcile", "check"))
     args = parser.parse_args()
     try:
         config = json.loads(args.config.read_text())
@@ -223,6 +238,8 @@ def main():
             raise ValueError("unsupported application provisioning manifest")
         if args.command == "apply":
             apply(config["policy"], config["endpoint"])
+        elif args.command == "reconcile":
+            reconcile(config["policy"], config["endpoint"])
         elif not check(config["policy"], config["endpoint"]):
             return 2
     except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:

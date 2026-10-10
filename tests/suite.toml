@@ -9,6 +9,34 @@ dimension = "compatibility"
 evidence = "The actual detached CLI runs from an executable forced beyond 16 MiB, retains identical complete bytes, and qualifies a controlled Nix case with a missing service-manager PATH by using the retained launcher environment in both service roles."
 
 [[coverage]]
+case = "vm.x86_64-linux.native-application-provision"
+capability = "application-provision"
+operation = "harbor-db-provision.reconcile"
+dimension = "positive"
+evidence = "The generated post-schema permissions unit runs native reconcile/check after real schema creation and before the acknowledged runtime INSERTs. Both actual CLIs repeatedly reconcile the complete existing privilege policy."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-application-provision"
+capability = "application-provision"
+operation = "harbor-db-provision.reconcile"
+dimension = "rejection"
+evidence = "A successfully exited incomplete-schema unit omits its declared history table. Runtime startup fails and remains inactive; both native and extended Python reconcile commands exit one, and both check commands exit two."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-application-provision"
+capability = "application-provision"
+operation = "harbor-db-provision.reconcile"
+dimension = "repetition"
+evidence = "Each native/Python repetition runs reconcile and then compares the full canonical SQL projection, including ACLs, roles, ownership and acknowledged records, with the original accepted state."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-application-provision"
+capability = "application-provision"
+operation = "harbor-db-provision.reconcile"
+dimension = "compatibility"
+evidence = "Native and extended Python CLIs reconcile the same manifest without changing the complete accepted SQL state, and agree on missing-table rejection exit codes."
+
+[[coverage]]
 case = "vm.x86_64-linux.module-smoke"
 capability = "nixos"
 operation = "nixos.lifecycle-plan"
@@ -34,7 +62,7 @@ case = "vm.x86_64-linux.native-application-provision"
 capability = "nixos"
 operation = "nixos.application-provision"
 dimension = "rejection"
-evidence = "nix/test-application-provision.nix native testScript executes tests/fixtures/provision.rs: client_permissions rejects append-only history UPDATE and runtime-OS-user owner login; native-check-exit-two-for-overgrant rejects injected UPDATE privilege after overgrant-observed-in-sql-readback."
+evidence = "nix/test-application-provision.nix native testScript executes tests/fixtures/provision.rs: client_permissions rejects append-only history UPDATE and runtime-OS-user owner login; native-check-exit-two-for-overgrant rejects injected UPDATE privilege after overgrant-observed-in-sql-readback. A successfully exited incomplete schema unit still leaves its runtime inactive; both actual reconcile/check CLIs reject its absent declared history table."
 
 [[coverage]]
 case = "vm.x86_64-linux.native-application-provision"
@@ -342,6 +370,12 @@ platforms = ["x86_64-linux"]
 deadline_seconds = 7200
 resources = { cpu = 2, memory_mib = 8192, disk_mib = 32768, exclusive = ["nixos-vm"] }
 execution = { kind = "nix", installable = ".#checks.x86_64-linux.native-application-provision" }
+[[cases.artifact_specs]]
+version = 1
+source = "vm.x86_64-linux.native-application-provision"
+path = "nix-outputs.json"
+kind = "nix_outputs"
+required = true
 [[cases.artifact_specs]]
 version = 1
 source = "vm.x86_64-linux.native-application-provision"
@@ -922,7 +956,7 @@ required = ["positive", "rejection", "repetition", "concurrency", "interruption"
 
 [[capabilities]]
 id = "application-provision"
-operations = ["harbor-db-provision.apply", "harbor-db-provision.check"]
+operations = ["harbor-db-provision.apply", "harbor-db-provision.reconcile", "harbor-db-provision.check"]
 required = ["positive", "rejection", "repetition", "concurrency", "interruption", "recovery", "compatibility"]
 
 [[capabilities]]

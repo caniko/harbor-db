@@ -147,6 +147,16 @@ fn query(e: &Value, db: &str, sql: &str) -> Result<String> {
     Ok(process::text(&out)?.trim().to_owned())
 }
 pub fn apply(c: &Value, e: &Value) -> Result<()> {
+    apply_phase(c, e, false)
+}
+
+/// Reconcile the complete post-schema policy. Every named relation must exist;
+/// missing relations abort the privilege transaction and cannot admit writers.
+pub fn reconcile(c: &Value, e: &Value) -> Result<()> {
+    apply_phase(c, e, true)
+}
+
+fn apply_phase(c: &Value, e: &Value, require_tables: bool) -> Result<()> {
     let _lease = durable::lock(Path::new(string(e, "lock_file")?), false, false)?;
     let p = validate(c)?;
     let db = string(&p, "database")?;
@@ -236,13 +246,15 @@ pub fn apply(c: &Value, e: &Value) -> Result<()> {
         if !grants.is_empty() {
             stmt += &format!("GRANT {} ON TABLE {target} TO {runtime};", grants.join(","));
         }
-        sql.push(format!(
-            "SELECT '{stmt}' WHERE to_regclass('{target}') IS NOT NULL\\gexec"
-        ));
+        sql.push(if require_tables {
+            stmt
+        } else {
+            format!("SELECT '{stmt}' WHERE to_regclass('{target}') IS NOT NULL\\gexec")
+        });
     }
     sql.push("COMMIT;".into());
     query(e, db, &sql.join("\n"))?;
-    if !check(&p, e)? {
+    if !check_phase(&p, e, require_tables)? {
         return Err(invalid(
             "application provisioning did not converge to the declared privileges",
         ));
@@ -250,6 +262,10 @@ pub fn apply(c: &Value, e: &Value) -> Result<()> {
     Ok(())
 }
 pub fn check(c: &Value, e: &Value) -> Result<bool> {
+    check_phase(c, e, true)
+}
+
+fn check_phase(c: &Value, e: &Value, require_tables: bool) -> Result<bool> {
     let p = validate(c)?;
     let db = string(&p, "database")?;
     let o = string(&p, "owner_role")?;
@@ -287,6 +303,11 @@ pub fn check(c: &Value, e: &Value) -> Result<bool> {
         ),
     ];
     let grants = privileges(&p["table_privileges"], TABLE)?;
+    if require_tables {
+        for table in p["tables"].as_object().unwrap().keys() {
+            checks.push(format!("EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='{s}' AND c.relname='{table}' AND c.relkind IN ('r','p','v','m','f'))"));
+        }
+    }
     for privilege in TABLE {
         let default = grants.iter().any(|v| v == privilege);
         let mut cases = vec![];

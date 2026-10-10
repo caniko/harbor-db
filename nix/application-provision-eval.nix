@@ -69,6 +69,11 @@ in
         message = "runtime privileges must be reconciled after schema";
       }
       {
+        name = "provisioning-phase-commands";
+        assertion = pkgs.lib.hasSuffix " apply" eval.config.systemd.services.harbor-db-demo-provision.serviceConfig.ExecStart && pkgs.lib.hasSuffix " reconcile" eval.config.systemd.services.harbor-db-demo-permissions.serviceConfig.ExecStart && pkgs.lib.hasSuffix " check" eval.config.systemd.services.harbor-db-demo-permissions.serviceConfig.ExecStartPost;
+        message = "Pre-schema setup must use apply; post-schema runtime admission must use strict reconcile and check.";
+      }
+      {
         name = "peer";
         assertion = pkgs.lib.hasInfix "harbor-demo-runtime demo demo_runtime" eval.config.services.postgresql.identMap;
         message = "runtime must map only to its dedicated role";

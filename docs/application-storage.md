@@ -4,13 +4,13 @@ Harbor DB owns database infrastructure, durable backup publication and authority
 transitions. Applications retain schema migration, coherent capture, import and
 record-level validators. Consumers declare paths, identities and deployment policy.
 
-## Dedicated PostgreSQL provisioning (version 1)
+## Dedicated PostgreSQL provisioning (version 2)
 
 `services.harbor-db.projects.<name>.postgres.provision` declares `database`,
 `ownerRole`, `runtimeRole`, `runtimeOsUser`, optional `ownerOsUser` (root), and
 schema/current/default privileges. Enable it explicitly. It may be used without
 enabling a lifecycle migration. Database and roles must be unique across projects.
-`lib.applicationProvisioning = 1` advertises this interface.
+`lib.applicationProvisioning = 2` advertises strict post-schema reconciliation.
 
 `schemaUnits` require the generated provision service. `runtimeUnits` require
 the generated permissions service, which runs after the explicit schema units.
@@ -19,11 +19,24 @@ privileges for existing named tables, including append-only tables. New tables
 initially receive the declared default privileges; all owner migrations must run
 with application writers stopped and reconcile named exceptions before startup.
 
-The control command is `harbor-db-provision --config MANIFEST apply|check`.
-`check` is read-only and returns 2 for privilege drift. The manifest records
+The control command is `harbor-db-provision --config MANIFEST apply|reconcile|check`.
+`apply` retains pre-schema initialization: absent named tables may be created by
+the following schema units, while existing tables receive their exact privileges.
+`reconcile` requires every declared table and rolls back its privilege transaction
+if any is absent. The generated permissions service runs `reconcile` followed by
+`check` before admitting runtime units. Custom post-schema callers must also use
+`reconcile`. `check` is read-only and returns 2 for missing tables or privilege
+drift. The manifest retains
 version 1, a policy and an explicit local OS-peer control endpoint. Neither
 passwords nor credential contents belong in this manifest. A persistent
-cluster-scoped inode serializes apply across connection changes.
+cluster-scoped inode serializes apply/reconcile across connection changes.
+
+The current Python regression fixture explicitly creates its declared tables
+before testing post-schema admission. Every original assertion and all 174 method
+identities remain enforced. Its original setup is retained byte-for-byte under
+`tests/oracles/pr14/tests/` and used by the frozen-runtime gate; the current setup
+is hash-bound in `tests/runtime-extensions.toml`. Missing declared tables are
+separately rejected by both engines and the generated runtime dependency chain.
 
 Existing databases owned by another role, privileged/inherited roles and objects
 owned by other roles are rejected. Provisioning does not perform implicit

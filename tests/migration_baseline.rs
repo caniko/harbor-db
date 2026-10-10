@@ -119,6 +119,11 @@ fn extension_fixture() -> (tempfile::TempDir, Baseline, Suite) {
         }
         if file.role == FileRole::Runtime {
             copy(&Path::new("tests/oracles/pr14").join(&file.path));
+        } else if file.role == FileRole::Test {
+            let oracle = Path::new("tests/oracles/pr14").join(&file.path);
+            if oracle.is_file() {
+                copy(&oracle);
+            }
         }
     }
     copy(Path::new("tests/runtime-extensions.toml"));
@@ -163,7 +168,11 @@ fn edit_extension_manifest(root: &Path, edit: impl FnOnce(&mut toml::Value)) {
 
 #[test]
 fn extension_requires_exact_hash_and_explicit_changed_scope() {
-    for path in ["python/harbor_db/backup.py", "python/harbor_db/process.py"] {
+    for path in [
+        "python/harbor_db/backup.py",
+        "python/harbor_db/process.py",
+        "tests/test_application_provision.py",
+    ] {
         let (root, baseline, suite) = extension_fixture();
         fs::write(root.path().join(path), "unapproved edit\n").unwrap();
         let error = baseline
@@ -194,7 +203,11 @@ fn extension_requires_exact_hash_and_explicit_changed_scope() {
 
 #[test]
 fn extension_requires_every_frozen_oracle_even_for_unchanged_runtime() {
-    for path in ["python/harbor_db/backup.py", "python/harbor_db/process.py"] {
+    for path in [
+        "python/harbor_db/backup.py",
+        "python/harbor_db/process.py",
+        "tests/test_application_provision.py",
+    ] {
         for missing in [false, true] {
             let (root, baseline, suite) = extension_fixture();
             let oracle = root.path().join("tests/oracles/pr14").join(path);
@@ -340,6 +353,19 @@ fn absent_extension_manifest_keeps_original_runtime_hash_requirement() {
         )
         .unwrap();
     }
+    assert!(
+        baseline
+            .validate_migration(root.path(), &suite)
+            .unwrap_err()
+            .to_string()
+            .contains("Python test baseline changed")
+    );
+    fs::copy(
+        root.path()
+            .join("tests/oracles/pr14/tests/test_application_provision.py"),
+        root.path().join("tests/test_application_provision.py"),
+    )
+    .unwrap();
     baseline.validate_migration(root.path(), &suite).unwrap();
 }
 

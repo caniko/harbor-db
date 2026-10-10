@@ -47,6 +47,25 @@ in
             ExecStart = "${pkgs.postgresql_18}/bin/psql -X -w -v ON_ERROR_STOP=1 -d demo -U demo_owner -c 'CREATE TABLE IF NOT EXISTS documents(id int); CREATE TABLE IF NOT EXISTS history(id int)'";
           };
         };
+        services.harbor-db.projects.incomplete.postgres.provision = {
+          enable = true;
+          database = "incomplete";
+          ownerRole = "incomplete_owner";
+          runtimeRole = "incomplete_runtime";
+          runtimeOsUser = "demo";
+          schemaUnits = ["incomplete-schema.service"];
+          runtimeUnits = ["incomplete.service"];
+          tables.history = ["SELECT" "INSERT"];
+        };
+        systemd.services.incomplete-schema.serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${pkgs.postgresql_18}/bin/psql -X -w -v ON_ERROR_STOP=1 -d incomplete -U incomplete_owner -c 'CREATE TABLE documents(id int)'";
+        };
+        systemd.services.incomplete.serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${pkgs.coreutils}/bin/true";
+        };
         systemd.services.demo = {
           wantedBy = ["multi-user.target"];
           serviceConfig = {
@@ -87,6 +106,11 @@ in
           machine.fail("runuser -u demo -- psql -X -w -v ON_ERROR_STOP=1 -d demo -U demo_runtime -c 'UPDATE history SET id=2'")
           machine.fail("runuser -u demo -- psql -X -w -v ON_ERROR_STOP=1 -d demo -U demo_owner -c 'SELECT 1'")
           machine.succeed("runuser -u postgres -- harbor-db-provision --config /etc/harbor-db/demo-provision.json check")
+          machine.fail("systemctl start incomplete.service")
+          machine.fail("systemctl is-active incomplete.service")
+          assert machine.succeed("systemctl show incomplete-schema.service -p Result --value").strip() == "success"
+          assert machine.succeed("systemctl show harbor-db-incomplete-permissions.service -p Result --value").strip() == "exit-code"
+          machine.fail("runuser -u postgres -- harbor-db-provision --config /etc/harbor-db/incomplete-provision.json check")
           machine.succeed("runuser -u postgres -- psql -d demo -c 'GRANT UPDATE ON history TO demo_runtime'")
           machine.fail("runuser -u postgres -- harbor-db-provision --config /etc/harbor-db/demo-provision.json check")
           machine.succeed("systemctl restart harbor-db-demo-permissions.service")

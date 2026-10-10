@@ -64,7 +64,7 @@ in {
         tables = mkOption {
           type = types.attrsOf (types.listOf (types.enum ["SELECT" "INSERT" "UPDATE" "DELETE" "TRUNCATE" "REFERENCES" "TRIGGER" "MAINTAIN"]));
           default = {};
-          description = "Exact privileges on existing named tables; apply after explicit owner migrations before admitting runtime.";
+          description = "Exact privileges on declared tables; post-schema reconcile/check require them all before admitting runtime.";
         };
         socketDirectory = mkOption {
           type = types.strMatching "/[A-Za-z0-9_./-]+";
@@ -147,7 +147,7 @@ in {
             serviceConfig =
               common.serviceConfig
               // {
-                ExecStart = "${command name p} apply";
+                ExecStart = "${command name p} reconcile";
                 ExecStartPost = "${command name p} check";
               };
           };
