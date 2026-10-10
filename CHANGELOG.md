@@ -19,6 +19,8 @@
 
 ### Fixed
 
+- Reject enabled backup project names that cannot be represented by the runtime
+  resource contract, including dotted, at-sign and overlength names.
 - Give logical restoration the owning backup contract's complete bounded budget
   instead of a 120-second per-child probe limit; retain explicit standalone
   budgets, deadline failure cleanup and cross-engine cancellation cleanup.

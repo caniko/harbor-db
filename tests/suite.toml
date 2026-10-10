@@ -8,6 +8,13 @@ operation = "harbor-db-test.run"
 dimension = "compatibility"
 evidence = "The actual detached CLI runs from an executable forced beyond 16 MiB, retains identical complete bytes, and qualifies a controlled Nix case with a missing service-manager PATH by using the retained launcher environment in both service roles."
 
+[[coverage]]
+case = "nix.x86_64-linux.native-storage-eval"
+capability = "nixos"
+operation = "nixos.application-backup"
+dimension = "rejection"
+evidence = "nix/native-storage-eval.nix backup-resource-name-boundaries admits the mixed ASCII resource alphabet and a 128-byte name; it requires the actual NixOS backup-name assertion to reject dotted, at-sign, empty and 129-byte enabled project names."
+
 [[inventories]]
 origin = "rust"
 id_prefix = "native.drill-deadlines."

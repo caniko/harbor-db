@@ -67,6 +67,10 @@ in {
   config = lib.mkIf (projects != {}) {
     assertions = lib.concatLists (lib.mapAttrsToList (name: p: [
         {
+          assertion = builtins.match "[A-Za-z0-9_-]{1,128}" name != null;
+          message = "Harbor DB ${name} backup project name must contain 1..128 ASCII letters, digits, underscores or hyphens, matching the runtime resource name.";
+        }
+        {
           assertion = builtins.attrNames p.backup.commands == ["capture" "cleanup" "restore" "verify"];
           message = "Harbor DB ${name} backup requires capture, restore, verify and cleanup.";
         }

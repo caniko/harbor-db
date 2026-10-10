@@ -56,6 +56,23 @@
     };
   eval = evaluate [module];
   defaultEval = evaluate [defaultModule];
+  backupNameAccepted = name: let
+    configured = evaluate [
+      module
+      {
+        services.harbor-db.projects.${name}.backup = {
+          enable = true;
+          user = "fixture";
+          group = "fixture";
+          directory = "/var/lib/fixture-backup";
+          commands = pkgs.lib.genAttrs ["capture" "restore" "verify" "cleanup"] (_: ["${pkgs.coreutils}/bin/true"]);
+        };
+      }
+    ];
+    rejected = builtins.filter (assertion: !assertion.assertion && pkgs.lib.hasInfix "backup project name" assertion.message) configured.config.assertions;
+  in
+    rejected == [];
+  boundaryName = count: pkgs.lib.concatStrings (builtins.genList (_: "a") count);
   directEval = evaluate [
     ./module.nix
     ./postgres-lifecycle.nix
@@ -82,6 +99,11 @@ in
     name = "harbor-db-native-storage-eval";
     resultMessage = "Native storage package is selected through the module argument";
     assertions = [
+      {
+        name = "backup-resource-name-boundaries";
+        message = "Enabled backup project names must match the runtime resource alphabet and 1..128-byte boundary.";
+        assertion = backupNameAccepted "A_0-z" && backupNameAccepted (boundaryName 128) && pkgs.lib.all (name: !backupNameAccepted name) ["a.b" "a@b" "" (boundaryName 129)];
+      }
       {
         name = "default-native-package";
         message = "The default flake module selects Rust without native-storage enrollment";

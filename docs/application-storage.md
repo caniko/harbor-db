@@ -61,6 +61,8 @@ absolute capture/restore/verify/cleanup commands and bounded execution limits.
 The systemd service loads credentials from runtime paths. Its timer is independent
 of schema migration or backend selection. `lib.applicationBackup = 1` advertises
 the interface. Physical cluster backups remain a separate `pgBackup` contract.
+Enabled backup project names must match `[A-Za-z0-9_-]{1,128}`, the runtime
+resource contract. Invalid names fail NixOS evaluation before a timer is installed.
 
 Arguments equal to `{backup}` and `{workspace}` are substituted as single argv
 elements, without a shell. Capture creates a new directory and writes all artifacts,
