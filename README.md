@@ -63,6 +63,16 @@ The flake module injects its own `harbor-db` package. When importing
 `nix/module.nix` directly, set `services.harbor-db.package` to the package
 output explicitly.
 
+Storage lifecycle commands are Rust by default. The `storage-lifecycle`,
+`postgres-lifecycle` and `storage-lifecycle-rust` package exports select the
+same native package. Flake modules inject that package through
+`harborDbStoragePackage`; direct storage-module imports build the native
+package in `nix/native-package.nix`. The Python sources and original regression
+suites are retained as migration evidence and test-only interoperability peers.
+See [storage durability](docs/storage-durability.md) and the
+[migration contract](docs/rust-migration-baseline.md) for receipt, journal and
+recovery compatibility.
+
 This generates `harbor-db-my-app.service` and, when `checkArgs` or
 `checkCommand` is set, `harbor-db-my-app-check.service`. Runtime units are
 ordered after the migration unit and require it, so each start can re-run the

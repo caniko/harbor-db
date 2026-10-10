@@ -3,8 +3,9 @@
 Harbor DB supplies filesystem publication, persistent resource authority, and a
 PostgreSQL adapter. Applications supply their schema and record-level validators;
 deployments supply persistent mounts, destinations and supported generations.
-The adapter uses Python's Linux standard library (flock, fsync and subprocess)
-and is separately packaged from the Rust lifecycle-plan runner.
+The Rust adapters own locking, durable publication, process execution and
+recovery. Storage modules select the native lifecycle package by default.
+Frozen Python sources remain test-only migration evidence.
 
 ## PostgreSQL startup
 

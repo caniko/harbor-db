@@ -126,6 +126,19 @@ trailing data and excessive nesting are rejected before mutation. Rejected
 receipt bytes remain untouched. Retention's projection of unused manifest
 fields has its separately qualified admission policy described above.
 
+### Native package and fixture selection
+
+Production lifecycle exports and flake modules select Rust. Direct storage
+module imports use the same shared module argument with a native build default;
+there is no Python fallback package. The Python peer is packaged only by
+`nix/test-python-package.nix` for frozen regression and interoperability checks.
+
+VM fixtures select cross-runtime qualification explicitly with `interop = true`.
+Their shared bridge contains only the transport module and keeps fixture-owned
+verdicts, acceptance filenames, descriptor inheritance and cleanup deadlines.
+Recovery preparation validates every command before acquiring leases, reuses
+its admitted argv and retains local acceptance before export or off-host import.
+
 The native lease engine coordinates authority acquisition with worker fork/exec
 handshakes. This prevents unrelated children from temporarily retaining an
 otherwise closed close-on-exec lock descriptor. The coordination covers the

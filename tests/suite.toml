@@ -1071,7 +1071,7 @@ source = "tests/storage_primitives.rs"
 argv_prefix = ["cargo", "test", "--locked", "--features", "testing", "--test", "storage_primitives"]
 argv_suffix = ["--", "--exact"]
 maturity = "crystallized"
-selectors = ["golden_vectors_match_retained_python_for_numbers_unicode_and_subprocess_newlines"]
+selectors = ["golden_vectors_match_retained_python_for_numbers_unicode_and_subprocess_newlines", "literal_number_sentinels_remain_objects_in_receipts_and_hashes", "decoded_duplicate_members_match_python_and_invalid_json_never_rewrites_receipts"]
 
 [[inventories]]
 origin = "rust"

@@ -4,9 +4,10 @@
 
 ### Added
 
-- Opt-in Rust storage lifecycle commands with durable fencing, recovery,
-  application transitions, and coordinated writer lease inheritance. Python
-  remains the default lifecycle package.
+- Rust-default storage lifecycle commands with durable fencing, recovery,
+  application transitions, and coordinated writer lease inheritance. Flake and
+  direct module imports share native package selection; Python is a test-only
+  migration peer.
 - Catalog-driven, candidate-bound lifecycle qualification with detached workers,
   observer reattachment, cancellation, resource diagnostics, and retained
   semantic and JUnit evidence.
@@ -18,6 +19,12 @@
 
 ### Fixed
 
+- Preserve literal serde JSON discriminator objects and exact large integers in
+  receipts and journals; reject malformed or unsupported strings before mutation.
+- Share JSON token scanning, UID lookup and prepared-transition discovery; parse
+  recovery preparation commands once before side effects and retain explicit
+  evidence lease scopes. Native VM fixtures share transport and cleanup while
+  preserving their acceptance artifacts.
 - Retain the CI contract in filtered Cargo sources so packaged migration checks
   can validate `simit.toml`.
 - Stream pinned physical-manifest hashes during pruning in both runtimes and
