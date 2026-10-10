@@ -101,7 +101,7 @@ print(json.dumps(application_transition.status(config)))
             ),
             ("PATH".into(), std::env::var("PATH").unwrap()),
         ]));
-        serde_json::from_slice::<serde_json::Value>(&process::execute(&command).unwrap()).unwrap()
+        harbor_db::storage::codec::decode(&process::execute(&command).unwrap()).unwrap()
     };
     for phase in [
         "planned",
@@ -119,8 +119,11 @@ print(json.dumps(application_transition.status(config)))
         "aborted",
     ] {
         let mut record = f.journal(phase);
-        record["retained_obligation"] =
-            json!({"unknown_future_key":"preserved ☃", "generation":42});
+        record["retained_obligation"] = json!({
+            "unknown_future_key":"preserved ☃", "generation":42,
+            "literal_number_object": {"$serde_json::private::Number": "123"},
+            "literal_raw_object": {"$serde_json::private::RawValue": "[1,2]"}
+        });
         let path = application_transition::journal_path(&f.config).unwrap();
         durable::write_json(&path, &record).unwrap();
         let original = fs::read(&path).unwrap();

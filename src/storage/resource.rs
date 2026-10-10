@@ -85,7 +85,7 @@ pub fn contract(c: &Value) -> Result<Value> {
                     process::text(&output.stderr)?.trim()
                 )));
             }
-            consumer = serde_json::from_str(&process::text(&output.stdout)?)?;
+            consumer = super::codec::decode_str(&process::text(&output.stdout)?)?;
             let m = consumer
                 .as_object()
                 .ok_or_else(|| invalid("invalid consumer storage contract"))?;

@@ -606,7 +606,7 @@ pub fn certify(
     let source = snapshot_evidence(config, settings, &binding, now)?;
     source_fence(settings, &source)?;
     verify_backup(config, &directory, &leases)?;
-    let observed: Value = serde_json::from_str(&query_leased(
+    let observed = super::codec::decode_str(&query_leased(
         config,
         socket,
         port,

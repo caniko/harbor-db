@@ -190,7 +190,7 @@ fn journal(
     selected: Option<&Path>,
     leases: &[std::os::fd::RawFd],
 ) -> Result<Value> {
-    let record: Value = serde_json::from_slice(&read_private(
+    let record = super::codec::decode(&read_private(
         &selected.map(Path::to_path_buf).unwrap_or(marker(config)?),
     )?)?;
     let token = string(&record, "token")?;
@@ -460,7 +460,7 @@ pub fn inspect_offline(config: &Value, token: &str, phase: &str) -> Result<Value
             let directory = path(config, "state_dir")?.join("writer-fences").join(token);
             let record = journal(config, Some(&directory.join("prepared.json")), &leases)?;
             let receipt: Value =
-                serde_json::from_slice(&read_private(&directory.join("closed.json"))?)?;
+                super::codec::decode(&read_private(&directory.join("closed.json"))?)?;
             if receipt != closed_receipt(&record, token)
                 || codec::digest(&read_auto(config)?) != string(&record, "original_sha256")?
             {
@@ -536,7 +536,7 @@ pub fn inspect_live_leased(
     spec.environment = Some(env);
     spec.timeout = Duration::from_secs(15);
     spec.leases = leases;
-    let mut observed: Value = serde_json::from_slice(&process::execute(&spec)?)?;
+    let mut observed = super::codec::decode(&process::execute(&spec)?)?;
     if let Some(libraries) = observed["preload_libraries"].as_array() {
         let mut values = libraries
             .iter()

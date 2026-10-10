@@ -128,7 +128,7 @@ pub fn select(config: &Value, settings: &Value, now: i64) -> Result<SelectedCapt
             "capture metadata differs from its immutable retention pin",
         ));
     }
-    let meta: Value = serde_json::from_slice(&metadata_bytes)?;
+    let meta = super::codec::decode(&metadata_bytes)?;
     let backup_id = string(&meta, "backup_id")?;
     if !valid_identifier(backup_id) {
         return Err(invalid("invalid completed backup identifier"));

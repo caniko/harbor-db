@@ -319,7 +319,7 @@ pub fn check(c: &Value, e: &Value) -> Result<bool> {
     {
         return Ok(false);
     }
-    let defaults: Value = serde_json::from_str(&query(
+    let defaults = super::codec::decode_str(&query(
         e,
         db,
         &format!(

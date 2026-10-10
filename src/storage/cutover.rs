@@ -283,7 +283,7 @@ pub fn check_resource(
                     .as_array()
                     .ok_or_else(|| invalid("invalid corpus checks"))?
                 {
-                    let paths: Value = serde_json::from_str(&recovery::query_leased(
+                    let paths = super::codec::decode_str(&recovery::query_leased(
                         &database,
                         socket,
                         port,
@@ -372,7 +372,7 @@ pub fn execute_worker(
             account
         });
     }
-    Ok(serde_json::from_slice(&process::execute(&spec)?)?)
+    super::codec::decode(&process::execute(&spec)?)
 }
 pub fn check_manifest(
     path: &Path,

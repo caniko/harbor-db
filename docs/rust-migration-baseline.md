@@ -113,6 +113,19 @@ retention acceptance have separate positive/rejection regressions. Generic
 surrogate-bearing receipt representation and canonical hashing are not established
 by this retention-only projection.
 
+### Receipt JSON admission
+
+Native receipt and journal readers decode JSON containers structurally. Literal
+objects named `$serde_json::private::Number` or `$serde_json::private::RawValue`
+remain objects; large integer values remain exact. Decoded duplicate keys use
+the final member, including escaped spellings of the same key. The canonical
+encoder retains Python-compatible spacing, sorted keys and ASCII escaping.
+
+Surviving lone-surrogate keys or values, invalid UTF-8, malformed syntax,
+trailing data and excessive nesting are rejected before mutation. Rejected
+receipt bytes remain untouched. Retention's projection of unused manifest
+fields has its separately qualified admission policy described above.
+
 The native lease engine coordinates authority acquisition with worker fork/exec
 handshakes. This prevents unrelated children from temporarily retaining an
 otherwise closed close-on-exec lock descriptor. The coordination covers the

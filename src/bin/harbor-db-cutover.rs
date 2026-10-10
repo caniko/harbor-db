@@ -1,6 +1,6 @@
 use clap::{Args, Parser, Subcommand};
 use harbor_db::storage::{Result, cutover, durable, invalid, string};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{path::PathBuf, time::Duration};
 
 #[derive(Parser)]
@@ -171,7 +171,7 @@ fn run(cli: Cli) -> Result<i32> {
             database_requirements,
             ..
         } => {
-            let requirements: Value = serde_json::from_str(&database_requirements)?;
+            let requirements = harbor_db::storage::codec::decode_str(&database_requirements)?;
             cutover::certify_filesystem(
                 select(&worker)?,
                 &certify_roots,

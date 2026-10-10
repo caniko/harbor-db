@@ -97,7 +97,7 @@ pub fn read_json(path: &Path) -> Result<Value> {
 fn read_json_file(file: &mut File) -> Result<Value> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    Ok(serde_json::from_slice(&bytes)?)
+    codec::decode(&bytes)
 }
 
 /// Load an explicitly selected policy, including NixOS /etc aliases. This is

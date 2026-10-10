@@ -237,7 +237,7 @@ fn private_dir(p: &Path) -> Result<()> {
 }
 fn certification(c: &Value, b: &Path, w: &Path, l: RawFd, a: &Value) -> Result<Value> {
     execute(c, "restore", b, w, l)?;
-    let receipt: Value = serde_json::from_slice(&execute(c, "verify", b, w, l)?)?;
+    let receipt = super::codec::decode(&execute(c, "verify", b, w, l)?)?;
     let captured = durable::read_json(&b.join("capture.json"))?;
     let semantic = captured
         .get("semantic_sha256")

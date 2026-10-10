@@ -81,7 +81,7 @@ pub(super) fn load(root: &Path, segment_bytes: u64) -> Result<Option<Protection>
             .and_then(|s| s.strip_suffix(".json"))
             .filter(|id| child(id) && !id.starts_with('.') && !id.contains(".partial"))
             .ok_or_else(|| invalid("uncertain source-local pin entry"))?;
-        let pin: serde_json::Value = serde_json::from_slice(&bytes(&entry.path())?)?;
+        let pin = crate::storage::codec::decode(&bytes(&entry.path())?)?;
         let backup = pin["backup_id"]
             .as_str()
             .filter(|s| child(s))

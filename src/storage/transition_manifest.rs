@@ -554,7 +554,7 @@ pub fn inspect_barriers(config: &Value) -> Result<()> {
                 }
             })
             .collect();
-        let observed: Value = serde_json::from_slice(&call(
+        let observed = super::codec::decode(&call(
             config,
             "busctl",
             vec![
@@ -723,7 +723,7 @@ pub fn worker(
     if data.iter().all(u8::is_ascii_whitespace) {
         Ok(Value::Null)
     } else {
-        Ok(serde_json::from_slice(&data)?)
+        super::codec::decode(&data)
     }
 }
 pub struct Fence {

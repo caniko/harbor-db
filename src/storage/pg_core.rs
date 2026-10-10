@@ -330,7 +330,7 @@ pub fn inspect_live_leased(
         .as_mut()
         .unwrap()
         .insert("PGCONNECT_TIMEOUT".into(), "5".into());
-    let observed: Value = serde_json::from_slice(&process::execute(&spec)?)?;
+    let observed = super::codec::decode(&process::execute(&spec)?)?;
     let expected = json!({"data_dir":string(config,"data_dir")?,"major":major(config)?,"system_identifier":identifier,"fsync":"on","full_page_writes":"on","synchronous_commit":"on","in_recovery":false});
     if observed != expected {
         return Err(invalid(

@@ -210,9 +210,9 @@ fn query_json(
     leases: &[RawFd],
 ) -> Result<Value> {
     // --quiet suppresses transaction tags; require exactly one JSON document.
-    Ok(serde_json::from_str(
+    super::codec::decode_str(
         recovery::query_leased(config, socket, port, "postgres", sql, leases)?.trim(),
-    )?)
+    )
 }
 
 fn control_lsn(
@@ -247,7 +247,7 @@ fn control_lsn(
     spec.environment = Some(environment);
     spec.leases = leases.to_vec();
     spec.timeout = Duration::from_secs(15);
-    let observed: Value = serde_json::from_slice(&process::execute(&spec)?)?;
+    let observed = super::codec::decode(&process::execute(&spec)?)?;
     recovery::lsn(&observed)?;
     Ok(observed)
 }
@@ -306,7 +306,7 @@ fn publish_generation(
 }
 
 fn retry_intent(proposed: &Value, content: &[u8], settings: &Value) -> Result<Value> {
-    let frozen: Value = serde_json::from_slice(content)?;
+    let frozen = super::codec::decode(content)?;
     for key in [
         "version",
         "capture_id",

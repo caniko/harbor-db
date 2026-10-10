@@ -264,7 +264,7 @@ fn loaded(
         ],
         leases,
     )?;
-    effective_condition(&serde_json::from_str(&output)?, state)
+    effective_condition(&super::codec::decode_str(&output)?, state)
 }
 fn check_drop_in(drop_in: &Path, state: &Path) -> Result<()> {
     owned(drop_in, false, 0o022)?;
@@ -402,7 +402,7 @@ pub fn release(
         ],
         &leases,
     )?;
-    let boundary: Value = serde_json::from_str(&output)?;
+    let boundary = super::codec::decode_str(&output)?;
     let expected = json!({"status":format!("{phase}-offline"),"token":fence_token,"resource":config["resource"],"data_dir":config["data_dir"],"major":major(config)?,"system_identifier":identifier});
     if boundary != expected {
         return Err(invalid(

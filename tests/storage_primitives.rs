@@ -308,7 +308,7 @@ fn golden_vectors_match_retained_python_for_numbers_unicode_and_subprocess_newli
         process::{Command, Stdio},
     };
     let vectors = r#"{"numbers":[184467440737095516160,-0,1e0,1.0000000000000001,-0.0,0.0001,0.00001,1e16,1.2345e-100,1.2345e100],"strings":["\u007f","é𝄞","\b\f\t\r\n", "slash/quote\"backslash\\"]}"#;
-    let value: serde_json::Value = serde_json::from_str(vectors).unwrap();
+    let value = codec::decode_str(vectors).unwrap();
     for compact in [false, true] {
         let script = if compact {
             "import json,sys; print(json.dumps(json.load(sys.stdin),sort_keys=True,separators=(',',':')))"
@@ -335,6 +335,54 @@ fn golden_vectors_match_retained_python_for_numbers_unicode_and_subprocess_newli
         process::text(b"one\r\ntwo\rthree\n").unwrap(),
         "one\ntwo\nthree\n"
     );
+}
+
+#[test]
+fn literal_number_sentinels_remain_objects_in_receipts_and_hashes() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("journal.json");
+    for literal in [
+        br#"{"$serde_json::private::Number": "123"}"#.as_slice(),
+        br#"{"future": {"$serde_json::private::Number": "not a number"}, "version": 1}"#.as_slice(),
+        br#"{"$serde_json::private::Number": "123", "extra": "retained"}"#.as_slice(),
+    ] {
+        fs::write(&path, literal).unwrap();
+        let value = durable::read_json(&path).unwrap();
+        assert!(value.is_object());
+        assert_eq!(codec::encode(&value, false).unwrap(), literal);
+        durable::write_json(&path, &value).unwrap();
+        let mut expected = literal.to_vec();
+        expected.push(b'\n');
+        assert_eq!(fs::read(&path).unwrap(), expected);
+    }
+}
+
+#[test]
+fn decoded_duplicate_members_match_python_and_invalid_json_never_rewrites_receipts() {
+    let input = br#"{"obsolete":"\ud800","obsolete":"valid","version":0,"\u0076ersion":1,"value":184467440737095516160}"#;
+    let value = codec::decode(input).unwrap();
+    assert_eq!(value["version"], 1);
+    assert_eq!(value["obsolete"], "valid");
+    assert_eq!(
+        codec::encode(&value, true).unwrap(),
+        br#"{"obsolete":"valid","value":184467440737095516160,"version":1}"#
+    );
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("receipt.json");
+    for bytes in [
+        br#"{"version":1} trailing"#.as_slice(),
+        br#"{"x":"\q"}"#.as_slice(),
+        br#"{"x":[1,]}"#.as_slice(),
+        br#"{"x":1,}"#.as_slice(),
+        br#"{"x":"\ud800"}"#.as_slice(),
+        b"\xff".as_slice(),
+    ] {
+        fs::write(&path, bytes).unwrap();
+        assert!(durable::read_json(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+    let deep = format!("{}0{}", "[".repeat(128), "]".repeat(128));
+    assert!(codec::decode_str(&deep).is_err());
 }
 
 #[test]
