@@ -304,6 +304,13 @@ fn run(args: Args) -> Result<()> {
     gate.checkpoint("prepared-fence-blocks-superuser");
     gate.crash_start("selected-hba-legacy-crashed")?;
     gate.unit("postgresql.service")?;
+    // Joining the boot setup job keeps its transient control SQL out of the
+    // exclusive live-session probe. The fence inspection itself stays strict.
+    gate.shell(
+        "systemctl start postgresql-setup.service",
+        true,
+        "legacy-reboot-setup-completed",
+    )?;
     gate.shell(
         format!("{pg}inspect-fence --token {}", quoted(&token)),
         true,

@@ -171,6 +171,8 @@ in
           machine.crash()
           machine.start()
           machine.wait_for_unit("postgresql.service")
+          # Join boot setup before the strict exclusive-session inspection.
+          machine.succeed("systemctl start postgresql-setup.service")
           machine.succeed(pg + f"inspect-fence --token {token}")
           machine.fail(query + "-U application -c 'SELECT 1'")
           machine.succeed("systemctl stop postgresql")

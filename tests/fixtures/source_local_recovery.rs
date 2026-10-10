@@ -227,8 +227,18 @@ fn run(args: Args) -> Result<()> {
         )?;
     }
     g.wait("primary", "systemctl is-active postgresql.service; test \"$(systemctl show postgresql-setup.service -p Result --value)\" = success", "real-primary-role-setup")?;
-    let source_host = g.shell("primary", "hostname", true, "source-hostname-observed")?;
-    let remote_host = g.shell("certifier", "hostname", true, "certifier-hostname-observed")?;
+    let source_host = g.shell(
+        "primary",
+        "cat /proc/sys/kernel/hostname",
+        true,
+        "source-hostname-observed",
+    )?;
+    let remote_host = g.shell(
+        "certifier",
+        "cat /proc/sys/kernel/hostname",
+        true,
+        "certifier-hostname-observed",
+    )?;
     let source_machine = g.shell("primary", "cat /etc/machine-id", true, "source-machine-id")?;
     let remote_machine = g.shell(
         "certifier",
@@ -347,14 +357,15 @@ fn run(args: Args) -> Result<()> {
     );
     let failure = g.shell(
         "primary",
-        format!("{capture} --wal-wait-seconds 1"),
+        format!("{capture} --wal-wait-seconds 1 2>&1"),
         false,
         "missing-receiver-wal-rejects-finalization",
     )?;
-    g.check(
+    require(
         failure.contains("missing complete receiver WAL"),
-        "failure-is-actual-missing-wal",
+        format!("unexpected finalization diagnostic: {failure}"),
     )?;
+    g.check(true, "failure-is-actual-missing-wal")?;
     let pin_script = format!(
         "stat -c '%d:%i' {ROOT}/recovery/pins/new.json; sha256sum {ROOT}/recovery/pins/new.json; cat {ROOT}/recovery/pins/new.json"
     );

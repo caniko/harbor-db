@@ -273,7 +273,7 @@
         cargo-doc = craneLib.cargoDoc (commonArgs
           // {
             inherit cargoArtifacts;
-            cargoDocExtraArgs = "--no-deps --all-features";
+            cargoDocExtraArgs = "--no-deps";
           });
         cargo-clippy = craneLib.cargoClippy (commonArgs
           // {

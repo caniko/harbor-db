@@ -3,7 +3,7 @@
   module,
   pkgs,
 }:
-pkgs.testers.nixosTest {
+pkgs.testers.runNixOSTest {
   extraDriverArgs = ["--junit-xml" "junit.xml"];
   name = "harbor-db-module-smoke";
 
