@@ -153,29 +153,12 @@ pub fn plan(config: &Value, candidate: &str, writer_fence_token: Option<&str>) -
     Ok(record)
 }
 fn owner(path: &Path) -> Result<String> {
-    let uid = fs::metadata(path)?.uid();
-    let mut buffer = vec![0u8; 16384];
-    let mut account: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut result = std::ptr::null_mut();
-    let code = unsafe {
-        libc::getpwuid_r(
-            uid,
-            &mut account,
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            &mut result,
-        )
-    };
-    if code != 0 {
-        return Err(std::io::Error::from_raw_os_error(code).into());
-    }
-    if result.is_null() {
-        return Err(invalid("authority owner account is absent"));
-    }
-    Ok(unsafe { std::ffi::CStr::from_ptr(account.pw_name) }
-        .to_str()
-        .map_err(|_| invalid("invalid account name"))?
-        .to_owned())
+    super::accounts::name(
+        fs::metadata(path)?.uid(),
+        16384,
+        "authority owner account is absent",
+        "invalid account name",
+    )
 }
 fn backup_worker(config: &Value, backup: &Path, _leases: &[RawFd]) -> Result<Value> {
     application_backup::inspect(

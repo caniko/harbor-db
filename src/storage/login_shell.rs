@@ -3,28 +3,12 @@ use super::{Result, cutover, durable, invalid, string};
 use std::path::Path;
 
 pub fn current_user() -> Result<String> {
-    let mut buffer = vec![0u8; 16384];
-    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut result = std::ptr::null_mut();
-    let code = unsafe {
-        libc::getpwuid_r(
-            libc::geteuid(),
-            &mut entry,
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            &mut result,
-        )
-    };
-    if code != 0 {
-        return Err(std::io::Error::from_raw_os_error(code).into());
-    }
-    if result.is_null() {
-        return Err(invalid("login account is absent"));
-    }
-    Ok(unsafe { std::ffi::CStr::from_ptr(entry.pw_name) }
-        .to_str()
-        .map_err(|_| invalid("invalid login account"))?
-        .to_owned())
+    super::accounts::name(
+        unsafe { libc::geteuid() },
+        16384,
+        "login account is absent",
+        "invalid login account",
+    )
 }
 pub fn hostname() -> Result<String> {
     let mut buffer = vec![0u8; 256];

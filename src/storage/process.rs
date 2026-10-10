@@ -185,30 +185,12 @@ pub fn account(name: &str) -> Result<Identity> {
 }
 
 pub fn current_username() -> Result<String> {
-    use std::ffi::CStr;
-    let mut buffer = vec![0u8; 65536];
-    let mut record: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut found = std::ptr::null_mut();
-    // SAFETY: record, lookup result and string storage live throughout this call.
-    let status = unsafe {
-        libc::getpwuid_r(
-            libc::geteuid(),
-            &mut record,
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            &mut found,
-        )
-    };
-    if status != 0 {
-        return Err(std::io::Error::from_raw_os_error(status).into());
-    }
-    if found.is_null() {
-        return Err(invalid("effective user has no account"));
-    }
-    Ok(unsafe { CStr::from_ptr(record.pw_name) }
-        .to_str()
-        .map_err(|_| invalid("account name is not UTF-8"))?
-        .to_owned())
+    super::accounts::name(
+        unsafe { libc::geteuid() },
+        65536,
+        "effective user has no account",
+        "account name is not UTF-8",
+    )
 }
 
 /// Legacy process-wide inheritance. The caller must exclude concurrent forks

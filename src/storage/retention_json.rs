@@ -1,9 +1,12 @@
 //! Project validated retention fields without decoding unused surrogate strings.
 //! Original manifest bytes remain untouched; this is not a receipt/hash codec.
-use super::{Result, durable, invalid};
+use super::{
+    Result, durable, invalid,
+    json_tokens::{self, Cursor},
+};
 use serde::{
     Deserialize, Deserializer,
-    de::{self, IgnoredAny, Visitor},
+    de::{self, Visitor},
 };
 use serde_json::Value;
 use std::{collections::BTreeMap, fmt, io::Read, path::Path};
@@ -28,51 +31,11 @@ impl<'de> Deserialize<'de> for Key {
     }
 }
 
-/// Token boundaries come from serde_json's validating stream decoder, without
-/// enabling raw_value's literal-object coercion in shared Value readers.
-struct Cursor<'a>(&'a str);
-
-impl<'a> Cursor<'a> {
-    fn eat(&mut self, byte: u8) -> bool {
-        self.0 = self.0.trim_start();
-        if self.0.as_bytes().first() == Some(&byte) {
-            self.0 = &self.0[1..];
-            true
-        } else {
-            false
-        }
-    }
-
-    fn expect(&mut self, byte: u8) -> Result<()> {
-        self.eat(byte)
-            .then_some(())
-            .ok_or_else(|| invalid("invalid retention container"))
-    }
-
-    fn raw(&mut self) -> Result<&'a str> {
-        let mut stream = serde_json::Deserializer::from_str(self.0).into_iter::<IgnoredAny>();
-        stream
-            .next()
-            .ok_or_else(|| invalid("missing retention value"))??;
-        let (raw, rest) = self.0.split_at(stream.byte_offset());
-        self.0 = rest;
-        Ok(raw.trim())
-    }
-
-    fn end(self) -> Result<()> {
-        self.0
-            .trim()
-            .is_empty()
-            .then_some(())
-            .ok_or_else(|| invalid("trailing retention data"))
-    }
-}
-
 struct Object<'a>(BTreeMap<Vec<u8>, &'a str>);
 
 impl<'a> Object<'a> {
     fn parse(text: &'a str) -> Result<Self> {
-        let mut cursor = Cursor(text);
+        let mut cursor = Cursor::new(text, "retention");
         cursor.expect(b'{')?;
         let mut fields = BTreeMap::new();
         if !cursor.eat(b'}') {
@@ -110,47 +73,15 @@ impl<'a> Object<'a> {
     }
 }
 
-fn depth_bound(bytes: &[u8]) -> Result<()> {
-    // IgnoredAny validates the whole JSON token stream, including ignored values,
-    // without recursive Value allocation. Preserve Value's existing default
-    // nesting bound as well; quotes and escaped quotes do not count as structure.
-    let (mut depth, mut string, mut escape) = (0usize, false, false);
-    for byte in bytes {
-        if string {
-            if escape {
-                escape = false;
-            } else if *byte == b'\\' {
-                escape = true;
-            } else if *byte == b'"' {
-                string = false;
-            }
-        } else {
-            match byte {
-                b'"' => string = true,
-                b'[' | b'{' => {
-                    depth += 1;
-                    if depth >= 128 {
-                        return Err(invalid("retention JSON nesting limit exceeded"));
-                    }
-                }
-                b']' | b'}' => depth = depth.saturating_sub(1),
-                _ => {}
-            }
-        }
-    }
-    Ok(())
-}
-
 pub(super) fn read(path: &Path) -> Result<Value> {
     // FIFO manifests retain the approved prompt conservative-refusal contract.
     let mut bytes = Vec::new();
     durable::open_regular(path, false)?.read_to_end(&mut bytes)?;
     let text =
         std::str::from_utf8(&bytes).map_err(|_| invalid("retention manifest is not UTF-8"))?;
-    depth_bound(&bytes)?;
-    serde_json::from_str::<IgnoredAny>(text)?;
+    json_tokens::validate(text, "retention JSON")?;
     let object = Object::parse(text)?;
-    let mut ranges = Cursor(object.field(b"WAL-Ranges")?);
+    let mut ranges = Cursor::new(object.field(b"WAL-Ranges")?, "retention");
     ranges.expect(b'[')?;
     let mut projected = Vec::new();
     if !ranges.eat(b']') {
