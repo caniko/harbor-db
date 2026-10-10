@@ -24,8 +24,10 @@
           enable = true;
           stateDir = "/srv/postgres/authority";
           requiredMounts = ["/srv"];
+          writerFence.blockedUnits = ["fixture-client.service"];
           switchAdoption.systemIdentifier = "12345";
           recovery = {
+            requireWriterFence = true;
             systemIdentifier = "12345";
             backupRoot = "/srv/backups";
             snapshotFile = "/srv/backups/records.json";
@@ -41,6 +43,10 @@
             oldDataDir = "/srv/postgres/17";
             validateCommand = ["/bin/validate-upgrade"];
           };
+        };
+        systemd.services.fixture-client = {
+          unitConfig.ConditionPathExists = ["/fixture/ready"];
+          serviceConfig.ExecStart = "/fixture/client";
         };
       }
     ];
@@ -65,6 +71,28 @@
     ];
   };
   preparationHook = pkgs.writeText "recovery-preparation-hook" withPreparation.config.system.preSwitchChecks."00-0-harbor-db-postgresql-prepare";
+  sourceLocalPolicy = {
+    prepare,
+    fenced,
+  }:
+    eval.extendModules {
+      modules = [
+        {
+          services.harbor-db.postgresql = {
+            recovery.repositoryProtocol = "source-local-v1";
+            recovery.requireWriterFence = lib.mkForce fenced;
+            recoveryPreparation =
+              if prepare
+              then withPreparation.config.services.harbor-db.postgresql.recoveryPreparation
+              else null;
+          };
+        }
+      ];
+    };
+  sourceLocalFenceRejected = policy:
+    lib.any (entry:
+      !entry.assertion && entry.message == "Managed source-local recovery preparation requires writer fencing; read-only certification and retired enrollment may remain unfenced.")
+    policy.config.assertions;
 in
   mkEvalCheck {
     name = "harbor-db-postgres-lifecycle-eval";
@@ -75,6 +103,49 @@ in
         ${pkgs.systemd}/bin/systemd-run ${pkgs.systemd}/bin/systemctl
     '';
     assertions = [
+      {
+        name = "source-local-producer-fence-policy";
+        assertion =
+          sourceLocalFenceRejected (sourceLocalPolicy {
+            prepare = true;
+            fenced = false;
+          })
+          && !(sourceLocalFenceRejected (sourceLocalPolicy {
+            prepare = true;
+            fenced = true;
+          }))
+          && !(sourceLocalFenceRejected (sourceLocalPolicy {
+            prepare = false;
+            fenced = false;
+          }));
+        message = "Managed source-local capture rejects an unfenced policy without banning read-only certification or retired enrollment.";
+      }
+      {
+        name = "writer-fence-client-startup";
+        assertion =
+          eval.config.systemd.services.fixture-client.unitConfig.ConditionPathExists
+          == ["/fixture/ready" "!/srv/postgres/authority/writer-fence.json"]
+          && !(eval.config.systemd.services.postgresql.unitConfig ? ConditionPathExists)
+          && !(eval.config.systemd.services.postgresql-setup.unitConfig ? ConditionPathExists)
+          && eval.config.services.harbor-db.postgresql.recovery.requireWriterFence;
+        message = "Explicit client gates must preserve existing conditions and leave PostgreSQL control/startup available; bootstrap recovery retains enforced fencing.";
+      }
+      {
+        name = "recovery-writer-fence-policy";
+        assertion = let
+          manifest = builtins.fromJSON (builtins.unsafeDiscardStringContext eval.config.environment.etc."harbor-db/postgresql.json".source.text);
+        in
+          manifest.recovery.require_writer_fence && manifest.writer_fence.control_role == "postgres";
+        message = "Explicit recovery enrollment must render its writer-fence requirement in the candidate manifest.";
+      }
+      {
+        name = "startup-inhibits-setup-with-primary";
+        assertion = let
+          manifest = builtins.fromJSON (builtins.unsafeDiscardStringContext eval.config.environment.etc."harbor-db/postgresql.json".source.text);
+        in
+          manifest.startup_inhibition.setup_units == ["postgresql-setup.service"];
+        message = "Persistent startup inhibition must cover setup so a legacy switch cannot run setup SQL against the inhibited primary.";
+      }
       {
         name = "managed-preactivation-preparation";
         assertion = let

@@ -8,7 +8,7 @@
   rawCommand = pkgs.writeShellScript "harbor-db-module-eval-raw" "exit 0";
   runner = pkgs.writeShellScriptBin "module-eval-runner" "exit 0";
   eval = import "${pkgs.path}/nixos/lib/eval-config.nix" {
-    system = pkgs.system;
+    inherit (pkgs) system;
     modules = [
       module
       {
@@ -67,29 +67,92 @@
   checkService = eval.config.systemd.services.harbor-db-demo-check;
   restoreService = eval.config.systemd.services.harbor-db-demo-restore;
   rawService = eval.config.systemd.services.harbor-db-raw;
-  applyScript = builtins.replaceStrings ["\n"] [" "] (builtins.readFile service.serviceConfig.ExecStart);
-  manifest = builtins.elemAt (builtins.match ".*--manifest ([^ ]+).*" applyScript) 0;
-  plan = builtins.readFile manifest;
-  restoreScript = builtins.replaceStrings ["\n"] [" "] (builtins.readFile restoreService.serviceConfig.ExecStart);
 in
   (import ./eval-checks.nix {inherit pkgs;}).mkEvalCheck {
     name = "harbor-db-module-eval";
     resultMessage = "harbor-db generic lifecycle module keeps credentials out of plans";
+    nativeBuildInputs = [pkgs.python3];
+    runtimeScript = ''
+      python3 - ${lib.escapeShellArgs [service.serviceConfig.ExecStart restoreService.serviceConfig.ExecStart secretValue (toString secretFile)]} "$out/assertions.json" <<'PY'
+      import json
+      from pathlib import Path
+      import shlex
+      import sys
+
+      apply_path, restore_path, secret_value, secret_source, evidence_path = sys.argv[1:]
+
+      def command(path):
+          commands = []
+          for line in Path(path).read_text().splitlines():
+              tokens = shlex.split(line, comments=True)
+              if tokens and tokens[0] == "exec":
+                  commands.append(tokens[1:])
+          if len(commands) != 1:
+              raise RuntimeError(f"{path}: expected exactly one exec command")
+          return commands[0]
+
+      def values(tokens, option):
+          result = []
+          for index, token in enumerate(tokens):
+              if token == option:
+                  if index + 1 == len(tokens) or tokens[index + 1].startswith("--"):
+                      raise RuntimeError(f"missing value for {option}")
+                  result.append(tokens[index + 1])
+          return result
+
+      apply_command = command(apply_path)
+      restore_command = command(restore_path)
+      manifests = values(apply_command, "--manifest")
+      if len(manifests) != 1 or apply_command[1:2] != ["apply"]:
+          raise RuntimeError("apply command must select exactly one manifest")
+      plan_text = Path(manifests[0]).read_text()
+      plan = json.loads(plan_text)
+      if type(plan.get("version")) is not int or plan["version"] != 1:
+          raise RuntimeError("generated plan must have explicit version 1")
+
+      passed = []
+
+      def check(name, condition, message):
+          if not condition:
+              raise RuntimeError(f"{name}: {message}")
+          passed.append({"name": name, "message": message})
+
+      check(
+          "credential-value-is-not-in-plan",
+          secret_value not in plan_text and secret_source not in plan_text,
+          "credential contents must not be serialized into the generated plan",
+      )
+      operations = {operation["id"]: operation for operation in plan["operations"]}
+      credential_commands = [operations["ensure"][kind] for kind in ("apply", "check")]
+      check(
+          "credential-reference-is-a-file-path",
+          "credential_environment" in plan_text and "token" in plan_text
+          and all(spec["credential_environment"] == {"TOKEN_FILE": "token"}
+                  and spec["credential_args"] == [] and spec["environment"] == {}
+                  for spec in credential_commands),
+          "plans must contain only the credential name reference",
+      )
+      selected = values(restore_command, "--operation")
+      expected = [operation["id"] for operation in plan["operations"]
+                  if operation["lifecycle"] == "restore"]
+      check(
+          "restore-targets-only-restore-operations",
+          restore_command[1:2] == ["restore"]
+          and values(restore_command, "--manifest") == manifests
+          and selected == expected == ["restore"]
+          and restore_command.count("--confirm") == 1
+          and "ensure" not in selected,
+          "the restore command must select exactly the restore-lifecycle operations",
+      )
+      evidence = Path(evidence_path)
+      evidence.write_text(json.dumps(json.loads(evidence.read_text()) + passed) + "\n")
+      PY
+    '';
     assertions = [
       {
         name = "credential-load-is-per-operation-source";
         assertion = lib.elem "token:${secretFile}" service.serviceConfig.LoadCredential;
         message = "the operation credential source must be rendered as a systemd LoadCredential entry";
-      }
-      {
-        name = "credential-value-is-not-in-plan";
-        assertion = !(lib.hasInfix secretValue plan);
-        message = "credential contents must not be serialized into the generated plan";
-      }
-      {
-        name = "credential-reference-is-a-file-path";
-        assertion = lib.hasInfix "credential_environment" plan && lib.hasInfix "token" plan;
-        message = "plans must contain only the credential name reference";
       }
       {
         name = "state-directory";
@@ -150,14 +213,6 @@ in
         name = "restore-unit-is-manual";
         assertion = (restoreService.wantedBy or []) == [];
         message = "the restore unit must never start during activation";
-      }
-      {
-        name = "restore-targets-only-restore-operations";
-        assertion =
-          lib.hasInfix "--operation restore" restoreScript
-          && lib.hasInfix "--confirm" restoreScript
-          && !(lib.hasInfix "--operation ensure" restoreScript);
-        message = "the restore command must select exactly the restore-lifecycle operations";
       }
     ];
   }

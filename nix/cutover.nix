@@ -3,6 +3,7 @@
   lib,
   options,
   pkgs,
+  harborDbStoragePackage,
   ...
 }: let
   inherit (lib) mkOption types;
@@ -42,6 +43,12 @@
     if entry.kind == "filesystem"
     then entry.authority.directories
     else []) (lib.attrValues resources);
+  protectedPath = path:
+    lib.any (root: let
+      prefix = lib.removeSuffix "/" root;
+    in
+      path == prefix || lib.hasPrefix "${prefix}/" path)
+    protectedDirectories;
   requireExisting = rule: let
     matched = builtins.match "([dDvqQ][^[:space:]]*)[[:space:]]+('([^']*)'|\"([^\"]*)\"|([^[:space:]]+))([[:space:]].*)" rule;
     path =
@@ -53,7 +60,7 @@
       then builtins.elemAt matched 3
       else builtins.elemAt matched 4;
   in
-    if cfg.enable && matched != null && lib.elem path protectedDirectories
+    if cfg.enable && matched != null && protectedPath path
     then "z ${builtins.elemAt matched 1}${builtins.elemAt matched 5}"
     else rule;
   declaredDirectories =
@@ -86,8 +93,9 @@
         else wrap command)
       commands;
 in {
+  imports = [./storage-package-argument.nix];
   # Application modules often emit boot-only `d` rules with no initialization
-  # option. Enforced historical roots retain permission repair, never creation.
+  # option. Historical roots and descendants retain repair, never creation.
   options.systemd.tmpfiles.rules = mkOption {apply = rules: map requireExisting rules;};
   options.systemd.services = mkOption {
     type = types.attrsOf (types.submodule ({name, ...}: {
@@ -98,7 +106,7 @@ in {
     enable = lib.mkEnableOption "mandatory rebuild and activation cutover admission";
     package = mkOption {
       type = types.package;
-      default = import ./postgres-package.nix {inherit pkgs;};
+      default = harborDbStoragePackage;
       description = "Harbor-DB cutover and existing storage/recovery engines.";
     };
     timeoutSeconds = mkOption {
@@ -146,6 +154,11 @@ in {
             description = "Database-owned corpus paths: read-only SQL returns a JSON array of {path, directory} entries relative to the indexed authority root.";
           };
           custody_file = mkOption {type = types.strMatching "/.*";};
+          transition_manifest = mkOption {
+            type = types.nullOr (types.strMatching "/nix/store/.*");
+            default = null;
+            description = "Prepared backend transition admission; ordinary startup still requires committed authority and explicit writer release.";
+          };
           max_age_seconds = mkOption {
             type = types.ints.positive;
             default = 172800;
@@ -162,6 +175,14 @@ in {
                 binding = mkOption {type = types.attrsOf types.str;};
                 required_files = mkOption {
                   type = types.listOf (types.strMatching "/.*");
+                  default = [];
+                };
+                required_mounts = mkOption {
+                  type = types.listOf types.str;
+                  default = [];
+                };
+                consumer_command = mkOption {
+                  type = types.listOf types.str;
                   default = [];
                 };
               };
@@ -218,7 +239,7 @@ in {
           message = "Harbor-DB cutover admission requires adopted PostgreSQL lifecycle enrollment for every enabled primary.";
         }
         {
-          assertion = lib.all (entry: !(lib.elem entry.path protectedDirectories) || !(entry.create or true)) declaredDirectories;
+          assertion = lib.all (entry: !(protectedPath entry.path) || !(entry.create or true)) declaredDirectories;
           message = "Harbor-DB adopted corpus roots must use dataDirectories.create = false; missing historical data may never be initialized.";
         }
         {
@@ -229,7 +250,7 @@ in {
       environment.etc."harbor-db/cutover.json".source = manifest;
       environment.systemPackages = [cfg.package];
       system.preSwitchChecks."00---harbor-db-cutover" = ''
-        ${cfg.package}/bin/harbor-db-cutover check --contract ${manifest} --host ${lib.escapeShellArg config.networking.hostName} --phase activate || exit $?
+        ${cfg.package}/bin/harbor-db-cutover check --contract ${manifest} --host ${lib.escapeShellArg config.networking.hostName} --phase activate --candidate "$1" || exit $?
       '';
       systemd.services = lib.mkMerge (lib.mapAttrsToList (_: entry:
         lib.genAttrs (map (lib.removeSuffix ".service") entry.runtime_units) (_: {

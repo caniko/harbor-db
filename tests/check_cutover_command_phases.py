@@ -1,5 +1,7 @@
 """Run evaluated condition/reload commands and prove their actual authority leases."""
 
+import contextlib
+import fcntl
 import json
 import os
 import pwd
@@ -10,7 +12,16 @@ import tempfile
 import time
 from pathlib import Path
 
-from harbor_db.durable import lock
+
+@contextlib.contextmanager
+def lock(path):
+    # Probe the persistent kernel anchor independently of either runtime.
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield fd
+    finally:
+        os.close(fd)
 
 
 def main():

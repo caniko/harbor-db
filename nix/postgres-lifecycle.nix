@@ -2,6 +2,7 @@
   config,
   lib,
   pkgs,
+  harborDbStoragePackage,
   ...
 }: let
   inherit (lib) mkEnableOption mkIf mkOption types;
@@ -14,24 +15,44 @@
       package = toString pg.finalPackage;
       state_dir = cfg.stateDir;
       required_mounts = cfg.requiredMounts;
+      writer_fence = {
+        control_role = "postgres";
+        replication_roles = cfg.writerFence.replicationRoles;
+        allowed_preload_libraries = cfg.writerFence.allowedPreloadLibraries;
+      };
+      startup_inhibition = {
+        state_dir = cfg.writerFence.startupStateDir;
+        unit = "postgresql.service";
+        setup_units = cfg.writerFence.setupUnits;
+        drop_in_root = "/etc/systemd/system.control";
+        systemctl = "${pkgs.systemd}/bin/systemctl";
+        busctl = "${pkgs.systemd}/bin/busctl";
+        runuser = "${pkgs.util-linux}/bin/runuser";
+        adapter = lib.getExe cfg.package;
+      };
     }
     // lib.optionalAttrs (cfg.recovery != null) {
-      recovery = {
-        system_identifier = cfg.recovery.systemIdentifier;
-        backup_root = cfg.recovery.backupRoot;
-        snapshot_file = cfg.recovery.snapshotFile;
-        receipt_file = cfg.recovery.receiptFile;
-        off_host_receipt_file = cfg.recovery.offHostReceiptFile;
-        source_hostname = cfg.recovery.sourceHostname;
-        max_age_seconds = cfg.recovery.maxAgeSeconds;
-        verify_timeout_seconds = cfg.recovery.verifyTimeoutSeconds;
-        record_checks =
-          lib.mapAttrsToList (name: check: {
-            inherit name;
-            inherit (check) database sql;
-          })
-          cfg.recovery.recordChecks;
-      };
+      recovery =
+        {
+          system_identifier = cfg.recovery.systemIdentifier;
+          require_writer_fence = cfg.recovery.requireWriterFence;
+          backup_root = cfg.recovery.backupRoot;
+          snapshot_file = cfg.recovery.snapshotFile;
+          receipt_file = cfg.recovery.receiptFile;
+          off_host_receipt_file = cfg.recovery.offHostReceiptFile;
+          source_hostname = cfg.recovery.sourceHostname;
+          max_age_seconds = cfg.recovery.maxAgeSeconds;
+          verify_timeout_seconds = cfg.recovery.verifyTimeoutSeconds;
+          record_checks =
+            lib.mapAttrsToList (name: check: {
+              inherit name;
+              inherit (check) database sql;
+            })
+            cfg.recovery.recordChecks;
+        }
+        // lib.optionalAttrs (cfg.recovery.repositoryProtocol != "legacy") {
+          repository_protocol = cfg.recovery.repositoryProtocol;
+        };
     }
     // lib.optionalAttrs (cfg.upgrade != null) {
       upgrade = {
@@ -62,11 +83,12 @@
     export_command = preparation.exportCommand;
   });
 in {
+  imports = [./postgres-writer-clients.nix ./storage-package-argument.nix];
   options.services.harbor-db.postgresql = {
     enable = mkEnableOption "adopted PostgreSQL identity guards and staged upgrades";
     package = mkOption {
       type = types.package;
-      default = import ./postgres-package.nix {inherit pkgs;};
+      default = harborDbStoragePackage;
       description = "Harbor DB PostgreSQL lifecycle adapter.";
     };
     resource = mkOption {
@@ -96,7 +118,17 @@ in {
       type = types.nullOr (types.submodule {
         options = {
           systemIdentifier = mkOption {type = types.strMatching "[1-9][0-9]*";};
+          requireWriterFence = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Require confirmed writer exclusion and the same fence token in the source snapshot before live adoption and cutover. Disable only when retiring accepted bootstrap enrollment; active fencing remains enforced at startup.";
+          };
           backupRoot = mkOption {type = types.strMatching "/.*";};
+          repositoryProtocol = mkOption {
+            type = types.enum ["legacy" "source-local-v1"];
+            default = "legacy";
+            description = "Recovery repository selection. source-local-v1 consumes an immutable fenced capture under recovery/ and preserves the backup service's legacy LAST_SUCCESS timestamp.";
+          };
           snapshotFile = mkOption {type = types.strMatching "/.*";};
           receiptFile = mkOption {type = types.strMatching "/.*";};
           offHostReceiptFile = mkOption {
@@ -130,6 +162,28 @@ in {
           };
         };
       });
+    };
+    writerFence = {
+      setupUnits = mkOption {
+        type = types.listOf (types.strMatching "[a-zA-Z0-9_-]+\\.service");
+        default = ["postgresql-setup.service"];
+        description = "Setup services inhibited with primary startup during stopped fence transitions, including across legacy generations. The persistent root-owned gate is read back for every unit before stopping the primary.";
+      };
+      startupStateDir = mkOption {
+        type = types.strMatching "/.*";
+        default = "/var/lib/harbor-db/postgresql-startup";
+        description = "Separate root-owned persistent systemd startup-inhibition state. Explicit inhibit-startup provisions it; PostgreSQL never writes it.";
+      };
+      replicationRoles = mkOption {
+        type = types.listOf (types.strMatching "[a-z_][a-z0-9_]*");
+        default = [];
+        description = "Physical-only localhost SCRAM replication roles admitted during an explicit writer fence. They cannot open SQL connections.";
+      };
+      allowedPreloadLibraries = mkOption {
+        type = types.listOf (types.strMatching "[A-Za-z0-9_.-]+");
+        default = [];
+        description = "Audited non-application-writer preload libraries allowed by live fence inspection; unknown libraries block readiness.";
+      };
     };
     recoveryPreparation = mkOption {
       default = null;
@@ -280,6 +334,10 @@ in {
       {
         assertion = preparation == null || (cfg.recovery != null && lib.all (argv: argv != [] && lib.hasPrefix "/" (builtins.head argv)) ([preparation.readinessCommand preparation.backupCommand preparation.restoreCommand] ++ lib.optional (preparation.exportCommand != []) preparation.exportCommand));
         message = "Managed recovery preparation requires a recovery policy and absolute executable argv.";
+      }
+      {
+        assertion = preparation == null || cfg.recovery == null || cfg.recovery.repositoryProtocol != "source-local-v1" || cfg.recovery.requireWriterFence;
+        message = "Managed source-local recovery preparation requires writer fencing; read-only certification and retired enrollment may remain unfenced.";
       }
       {
         assertion =

@@ -1,5 +1,10 @@
-{pkgs}: let
-  tool = import ./postgres-package.nix {inherit pkgs;};
+{
+  pkgs,
+  nativePackage ? import ./native-package.nix {inherit pkgs;},
+  interop ? false,
+}: let
+  tool = nativePackage;
+  legacyTool = import ./test-python-package.nix {inherit pkgs;};
   sql = pkgs.writeText "acknowledged-save.sql" ''
     CREATE TABLE IF NOT EXISTS saves (
       mutation text PRIMARY KEY, geometry jsonb NOT NULL, review text NOT NULL,
@@ -12,6 +17,7 @@
   '';
 in
   pkgs.testers.runNixOSTest {
+    extraDriverArgs = ["--junit-xml" "junit.xml"];
     name = "harbor-db-postgres-crash-rollback";
     nodes.machine = {
       config,
@@ -19,6 +25,7 @@ in
       ...
     }: {
       imports = [./postgres-lifecycle.nix];
+      _module.args.harborDbStoragePackage = nativePackage;
       virtualisation.memorySize = 1024;
       services.postgresql = {
         enable = true;
@@ -26,7 +33,8 @@ in
         dataDir = "/var/lib/postgres/18";
       };
       services.harbor-db.postgresql.enable = true;
-      environment.systemPackages = [tool pkgs.postgresql_18];
+      environment.systemPackages = [tool pkgs.postgresql_18 pkgs.python3];
+      system.extraDependencies = pkgs.lib.optional interop legacyTool;
       # Model the existing unguarded primary for first-rollout live adoption.
       systemd.services.fixture-existing-postgresql = {
         serviceConfig = {
@@ -125,6 +133,15 @@ in
       verify_save()
       machine.succeed("systemctl stop postgresql")
       machine.succeed("runuser -u postgres -- flock -n -x /var/lib/harbor-db/postgresql/lock true")
+      ${pkgs.lib.optionalString interop ''
+        # Both implementations resume the other's persisted authority records.
+        # Invoke legacy executables explicitly: normal units remain native.
+        machine.succeed("runuser -u postgres -- ${legacyTool}/bin/harbor-db-postgres --config /etc/harbor-db/postgresql.json check")
+        machine.succeed("install -d -o postgres -g postgres -m 0700 /var/lib/harbor-db/python-parity")
+        machine.succeed("python3 -c 'import json; c=json.load(open(\"/etc/harbor-db/postgresql.json\")); c[\"state_dir\"]=\"/var/lib/harbor-db/python-parity\"; json.dump(c,open(\"/run/python-parity.json\",\"w\"))'")
+        machine.succeed(f"runuser -u postgres -- ${legacyTool}/bin/harbor-db-postgres --config /run/python-parity.json adopt --system-identifier {identifier}")
+        machine.succeed("runuser -u postgres -- ${tool}/bin/harbor-db-postgres --config /run/python-parity.json check")
+      ''}
       # Missing storage must not be turned into a fresh cluster by NixOS.
       machine.succeed("mv /var/lib/postgres/18 /var/lib/postgres/preserved; mkdir /var/lib/postgres/18; chown postgres:postgres /var/lib/postgres/18")
       machine.fail("systemctl start postgresql")

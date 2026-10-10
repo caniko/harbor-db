@@ -36,6 +36,8 @@ def validate_manifest(value, host):
             if entry["user"] != "postgres":
                 raise ValueError("PostgreSQL admission requires the postgres service identity")
         else:
+            if entry.get("transition_manifest") is not None:
+                validate_path(entry["transition_manifest"])
             authority = entry.get("authority", {})
             directories = authority.get("directories")
             if (not isinstance(directories, list) or not directories
@@ -237,11 +239,20 @@ def certify_filesystem(config, restored_roots, identifier, *, now=None, database
         })
 
 
-def check_resource(config, *, phase, now=None):
+def check_resource(config, *, phase, now=None, candidate=None):
     if phase not in ("preflight", "activate", "startup", "certify"):
         raise ValueError("unsupported cutover phase")
     now = int(time.time()) if now is None else now
     if config["kind"] == "filesystem":
+        transition = config.get("transition_manifest")
+        if transition is not None and phase in ("preflight", "activate"):
+            from . import application_transition
+            selected = read_json(transition)
+            journal = application_transition.journal_path(selected)
+            if journal.exists() and read_json(journal)["phase"] in ("prepared", "committing", "committed"):
+                if selected["custody_manifest"] is None:
+                    raise ValueError("cutover transition admission requires target corpus custody publication")
+                return application_transition.admission(selected, phase, config["authority"], candidate)
         # Startup validates adopted roots/identity under the writer lease. A
         # corpus walk would race ordinary file turnover and block SSH commands.
         # Deployment still rejects missing/empty or changed contents up front.
@@ -283,9 +294,11 @@ def check_resource(config, *, phase, now=None):
                                           config.get("port", 5432), check["database"], check["sql"])
                 if observed.strip() != "t":
                     raise ValueError(f"candidate schema/recovery compatibility check failed: {check['database']}")
-        with recovery.admission(database, now=now, verify_contents=phase in ("activate", "certify")):
+        with recovery.admission(database, now=now, verify_contents=phase in ("activate", "certify"),
+                                socket_dir=config.get("socket_dir", "/run/postgresql"), port=config.get("port", 5432)):
+            snapshot_path = recovery.source_snapshot_path(database, settings)
             if phase == "certify" and recovery.records(database, settings, config.get("socket_dir", "/run/postgresql"),
-                                                       config.get("port", 5432)) != read_json(settings["snapshot_file"])["records"]:
+                                                       config.get("port", 5432)) != read_json(snapshot_path)["records"]:
                 raise ValueError("live database records differ from the recovery snapshot")
             requirements = {}
             for name, checks in config.get("corpus_checks", {}).items():
@@ -296,15 +309,18 @@ def check_resource(config, *, phase, now=None):
                     if not isinstance(paths, list):
                         raise TypeError("database corpus query must return a JSON array of paths")
                     requirements[name].extend({"root": check["root"], **item} for item in paths)
-            return {"database_snapshot_sha256": digest(settings["snapshot_file"]), "corpus_requirements": requirements}
+            return {"database_snapshot_sha256": digest(snapshot_path), "corpus_requirements": requirements}
 
 
-def execute_worker(path, name, config, phase, timeout, extra=(), *, command_name="check"):
+def execute_worker(path, name, config, phase, timeout, extra=(), *, command_name="check", as_root=False):
     account = pwd.getpwnam(config["user"])
     kwargs = {}
     if os.geteuid() == 0:
-        kwargs = {"user": account.pw_uid, "group": account.pw_gid,
-                  "extra_groups": os.getgrouplist(account.pw_name, account.pw_gid)}
+        kwargs = ({"user": 0, "group": 0, "extra_groups": []} if as_root else
+                  {"user": account.pw_uid, "group": account.pw_gid,
+                   "extra_groups": os.getgrouplist(account.pw_name, account.pw_gid)})
+    elif as_root:
+        raise ValueError("prepared transition inspection requires root")
     elif os.geteuid() != account.pw_uid:
         raise ValueError(f"inspection requires the resource's service user: {account.pw_name}")
     command = [sys.executable, "-B", "-m", "harbor_db.cutover", command_name, "--contract", str(path),
@@ -326,6 +342,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     checking = commands.add_parser("check", help="read-only mandatory rebuild admission")
+    checking.add_argument("--candidate", help="exact generation provided by NixOS pre-switch checks")
     certifying = commands.add_parser("certify", help="explicit custody proof from an independent restore")
     certification_worker = commands.add_parser("certify-worker", help=argparse.SUPPRESS)
     serving = commands.add_parser("serve", help="exec a declared writer retaining its resource authority lease")
@@ -375,7 +392,7 @@ def main():
                                 database_requirements=args.database_requirements)
             print("{}")
         elif args.worker:
-            print(json.dumps(check_resource(manifest["resources"][args.worker], phase=args.phase)))
+            print(json.dumps(check_resource(manifest["resources"][args.worker], phase=args.phase, candidate=args.candidate)))
         else:
             failures = []
             results = {}
@@ -386,7 +403,13 @@ def main():
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise ValueError("cutover inspection budget exhausted")
-                    results[name] = execute_worker(args.contract, name, config, args.phase, remaining)
+                    as_root = False
+                    if config.get("transition_manifest") is not None and args.phase in ("preflight", "activate"):
+                        from . import application_transition
+                        journal = application_transition.journal_path(read_json(config["transition_manifest"]))
+                        as_root = journal.exists() and read_json(journal)["phase"] in ("prepared", "committing", "committed")
+                    extra = () if args.candidate is None else ("--candidate", args.candidate)
+                    results[name] = execute_worker(args.contract, name, config, args.phase, remaining, extra, as_root=as_root)
                 except (ValueError, OSError, subprocess.TimeoutExpired) as error:
                     failures.append({"resource": name, "reason": str(error)})
             for name, config in manifest["resources"].items():

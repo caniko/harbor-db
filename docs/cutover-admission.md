@@ -26,8 +26,8 @@ policy still defines its backup age and restore requirements.
 ## Historical filesystem state
 
 Declare each authoritative corpus as a filesystem resource. Its authority state
-must be outside the corpus. Set every matching `dataDirectories` entry's
-`create = false`; missing historical storage is an error. Explicit initialization
+must be outside the corpus. Set every `dataDirectories` entry at or beneath a
+custody root to `create = false`; missing historical storage is an error. Explicit initialization
 of genuinely new state remains a separate policy choice.
 
 Database inventory queries may additionally return `size`, `sha256`,
@@ -49,8 +49,9 @@ startup custody, then execs the real shell with the shared lease inherited.
 It covers externally invoked Git commands and hooks when the web service is
 stopped. Operator-launched maintenance must use the same guarded entrypoints.
 
-Application-provided boot tmpfiles directory-creation rules for these exact
-guarded roots are converted to permission-only rules. This also covers applications
+Application-provided boot tmpfiles directory-creation rules at or beneath
+guarded roots are converted to permission-only rules. Descendants cannot create
+missing parent roots; sibling paths remain independent. This also covers applications
 whose upstream module has no require-existing initialization option.
 
 The `harbor-db-cutover certify` command compares every regular file's SHA-256,

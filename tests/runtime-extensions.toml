@@ -1,0 +1,48 @@
+version = 1
+baseline_head = "4b2850507a2e9bdfe198caf9178ea7b99ffb03a5"
+gates = [
+  ".#checks.x86_64-linux.postgres-lifecycle-test",
+  ".#checks.x86_64-linux.postgres-lifecycle-oracle-test",
+  ".#checks.x86_64-linux.native-source-local-recovery",
+  ".#checks.x86_64-linux.native-application-provision",
+  ".#checks.x86_64-linux.cargo-test",
+  ".#checks.x86_64-linux.native-application-backup",
+]
+qualified_cases = [
+  "nix.x86_64-linux.postgres-lifecycle-test",
+  "nix.x86_64-linux.postgres-lifecycle-oracle-test",
+  "vm.x86_64-linux.native-source-local-recovery",
+  "vm.x86_64-linux.native-application-provision",
+]
+
+[[extensions]]
+path = "python/harbor_db/backup.py"
+sha256 = "47e441ba84dfef1a86f07d6e91f88ff09a1d22076f6c316830a20f2a6fcceac5"
+
+[[extensions]]
+path = "python/harbor_db/recovery.py"
+sha256 = "0a04cda75e3b9028746c21c720aae80b91b87de388dc0148c65844e76b7f17de"
+
+[[extensions]]
+path = "python/harbor_db/application_transition.py"
+sha256 = "458b1179570fbbc41edb163f4291bef9c167bb850cbb254550e3c7c9cd425da3"
+
+[[extensions]]
+path = "python/harbor_db/cutover.py"
+sha256 = "3ddd0f233d2c2a993a2a6057f22ba093ad270406530d2b33758d3078c9a42812"
+
+[[extensions]]
+path = "python/harbor_db/provision.py"
+sha256 = "df41d997ae9a808d895f886b0dbfe6b43c71051e20a82a06a9cf0449c51dd521"
+
+[[extensions]]
+path = "tests/test_application_provision.py"
+sha256 = "958f1c84f67fd46f7eab054c334dd312c851b74559c032036c08e5e5653bcc69"
+
+[[extensions]]
+path = "python/harbor_db/application_backup.py"
+sha256 = "482acd0a54052039701ad1173e4271e435246dc37291cdcc17d69bbfbc21e1f4"
+
+[[extensions]]
+path = "python/harbor_db/postgres_drill.py"
+sha256 = "355e3c07b050033fc315903ec54c658f3bc4aba31578f831dde85946cd501a0c"

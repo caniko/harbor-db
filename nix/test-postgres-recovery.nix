@@ -1,5 +1,8 @@
-{pkgs}: let
-  tool = import ./postgres-package.nix {inherit pkgs;};
+{
+  pkgs,
+  nativePackage ? import ./native-package.nix {inherit pkgs;},
+}: let
+  tool = nativePackage;
   template = pkgs.writeText "recovery-template.json" (builtins.toJSON {
     resource = "recovery-fixture";
     data_dir = "/var/lib/postgres/18";
@@ -27,6 +30,9 @@
   });
   node = {pkgs, ...}: {
     virtualisation.memorySize = 1024;
+    # The driver owns fixture clock alignment; no network time writer may reset
+    # a receiving guest behind transported certification timestamps.
+    services.timesyncd.enable = pkgs.lib.mkForce false;
     environment.systemPackages = [tool pkgs.postgresql_18 pkgs.python3 pkgs.jq];
     environment.etc."recovery-template.json".source = template;
     users.users.postgres = {
@@ -48,6 +54,7 @@
   };
 in
   pkgs.testers.runNixOSTest {
+    extraDriverArgs = ["--junit-xml" "junit.xml"];
     name = "harbor-db-postgres-recovery-acceptance";
     nodes = {
       primary = {
@@ -81,6 +88,13 @@ in
           print(primary.execute("systemctl status postgresql.service --no-pager -l; journalctl -u postgresql.service --no-pager -n 80"))
           raise
       remote.wait_for_unit("multi-user.target")
+      # Independent VM clocks can advance at different rates under hosted QEMU.
+      # Time synchronisation is disabled in the node policy. Move the receiving clock
+      # forward at each evidence handoff; do not relax production freshness or
+      # alter any receipt timestamp.
+      def align_receiver(receiver, sender):
+          seconds = max(int(host.succeed("date +%s").strip()) for host in (receiver, sender))
+          receiver.succeed(f"date --set=@{seconds}")
       primary.succeed("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c \"CREATE TABLE saves (mutation text PRIMARY KEY, geometry jsonb, review text, revision bigint); INSERT INTO saves VALUES ('ack-1', '{\\\"circle\\\":[10,20,30]}', 'reviewed', 42)\"")
       identifier = primary.succeed("runuser -u postgres -- psql -Atqc 'SELECT system_identifier FROM pg_control_system()'").strip()
       for host in (primary, remote):
@@ -125,6 +139,7 @@ in
       primary.copy_from_machine("/tmp/recovery.tar", "recovery-transfer")
       remote.copy_from_host(str(primary.out_dir / "recovery-transfer/recovery.tar"), "/tmp/recovery.tar")
       remote.succeed("tar -C /srv -xf /tmp/recovery.tar; chown -R can:users /srv/backup /srv/recovered /srv/restore-wal /srv/recovery-socket")
+      align_receiver(remote, primary)
       # A can-owned restore cannot inherit Atlas's peer auth (can -> can), and
       # its socket is private. Keep authentication/config overrides disposable.
       remote.succeed("printf 'local all postgres peer map=recovery\\n' > /srv/recovered/pg_hba.conf; printf 'recovery can postgres\\n' > /srv/recovered/pg_ident.conf; chown can:users /srv/recovered/pg_*.conf; chmod 0600 /srv/recovered/pg_*.conf")
@@ -139,10 +154,16 @@ in
       remote.copy_from_machine("/srv/backup/evidence/off-host.json", "recovery-transfer")
       primary.copy_from_host(str(remote.out_dir / "recovery-transfer/off-host.json"), "/srv/incoming/recovery-off-host")
       primary.succeed("chown -R postgres:postgres /srv/incoming")
+      align_receiver(primary, remote)
       primary.succeed("runuser -u postgres -- env CREDENTIALS_DIRECTORY=/srv/incoming harbor-db-postgres --config /srv/config.json prepare-recovery --preparation-config /srv/preparation.json --socket-dir /run/postgresql --port 5432")
       primary.succeed(f"{command} inspect-recovery")
       primary.succeed(f"{command} adopt-live --system-identifier {identifier}")
       primary.succeed("test -s /srv/authority/identity.json")
+      primary.succeed(f"{command} inspect-recovery --socket-dir /run/postgresql --port 5432")
+      primary.succeed("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c 'UPDATE saves SET revision=43'")
+      primary.fail(f"{command} inspect-recovery --socket-dir /run/postgresql --port 5432")
+      primary.succeed("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c 'UPDATE saves SET revision=42'")
+      primary.succeed(f"{command} inspect-recovery --socket-dir /run/postgresql --port 5432")
 
       # Execute the mandatory dispatcher with real service-user PostgreSQL and
       # the same independently restored database evidence. Corpus initialization

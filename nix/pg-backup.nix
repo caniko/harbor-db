@@ -2,12 +2,33 @@
   config,
   lib,
   pkgs,
+  harborDbStoragePackage,
   ...
 }: let
   inherit (lib) mkEnableOption mkIf mkMerge mkOption types;
   cfg = config.services.harbor-db.pgBackup;
-  durable = "${import ./postgres-package.nix {inherit pkgs;}}/bin/harbor-db-durable";
-  pruneTool = "${import ./postgres-package.nix {inherit pkgs;}}/bin/harbor-db-backup-prune";
+  sourceRole = lib.elem cfg.role ["source" "both"];
+  targetRole = lib.elem cfg.role ["target" "both"];
+  loopbackAddresses = lib.optionals cfg.targetSettings.sourceLocalRecovery.enable (
+    lib.optional (lib.elem cfg.source.hostName ["127.0.0.1" "localhost"]) "127.0.0.1"
+    ++ lib.optional (lib.elem cfg.source.hostName ["::1" "localhost"]) "::1"
+  );
+  replicationHosts = lib.unique (cfg.sourceSettings.allowedReplicationHosts
+    ++ map (address:
+      address
+      + (
+        if address == "::1"
+        then "/128"
+        else "/32"
+      ))
+    loopbackAddresses);
+  listenAddresses =
+    if cfg.sourceSettings.listenAddresses != []
+    then cfg.sourceSettings.listenAddresses
+    else loopbackAddresses;
+  storagePackage = harborDbStoragePackage;
+  durable = "${storagePackage}/bin/harbor-db-durable";
+  pruneTool = "${storagePackage}/bin/harbor-db-backup-prune";
 
   # A hostname is also used as a directory component. Keep the legacy IPv4
   # paths stable while preventing IPv6 / URI punctuation from becoming path
@@ -50,11 +71,21 @@
       }
     '';
   in {
-    systemd.tmpfiles.rules = [
-      "d ${backupRoot} 0750 postgres postgres -"
-      "d ${backupRoot}/wal 0750 postgres postgres -"
-      "d ${backupRoot}/base 0750 postgres postgres -"
-    ];
+    systemd.tmpfiles.rules =
+      [
+        "d ${backupRoot} 0750 postgres postgres -"
+        "d ${backupRoot}/wal 0750 postgres postgres -"
+        "d ${backupRoot}/base 0750 postgres postgres -"
+      ]
+      ++ lib.optionals cfg.targetSettings.sourceLocalRecovery.enable [
+        "d ${backupRoot}/locks 0700 postgres postgres -"
+        "f ${backupRoot}/locks/mutate 0600 postgres postgres -"
+        "d ${backupRoot}/recovery 0700 postgres postgres -"
+        "d ${backupRoot}/recovery/captures 0700 postgres postgres -"
+        "d ${backupRoot}/recovery/snapshots 0700 postgres postgres -"
+        "d ${backupRoot}/recovery/pins 0700 postgres postgres -"
+        "f ${backupRoot}/recovery/PROTOCOL 0600 postgres postgres - source-local-v1"
+      ];
 
     # `--create-slot` is a one-shot operation. It must be an ExecStartPre;
     # passing it to the long-running command makes pg_receivewal exit 0 after
@@ -120,6 +151,14 @@
         set -euo pipefail
 
         backup_root="${backupRoot}"
+        ${lib.optionalString cfg.targetSettings.sourceLocalRecovery.enable ''
+          # Pin the recovery mutation inode before the legacy publication anchor.
+          # Opening an existing inode never creates or replaces either anchor.
+          test -f "$backup_root/locks/mutate"
+          test ! -L "$backup_root/locks/mutate"
+          exec 8<>"$backup_root/locks/mutate"
+          ${pkgs.util-linux}/bin/flock -n 8
+        ''}
         exec 9>>"$backup_root/BACKUP_LOCK"
         ${pkgs.util-linux}/bin/flock -n 9
         # Never replace the last good backup during another run on the same day.
@@ -168,15 +207,17 @@
     };
   };
 in {
+  imports = [./storage-package-argument.nix];
   options.services.harbor-db.pgBackup = {
     enable = mkEnableOption "PostgreSQL backup replication (source or target)";
 
     role = mkOption {
-      type = types.enum ["source" "target"];
+      type = types.enum ["source" "target" "both"];
       description = ''
         Whether this host is the backup source (runs the PostgreSQL being
         backed up) or the backup target (receives WAL archives and pulls
-        base backups).
+        base backups). Both selects source and target services on this host,
+        including source-local recovery production through a loopback connection.
       '';
     };
 
@@ -217,7 +258,7 @@ in {
         type = types.listOf types.str;
         default = [];
         example = ["192.168.1.10"];
-        description = "Exact IP addresses for PostgreSQL to listen on when replication is enabled.";
+        description = "Exact IP addresses for PostgreSQL to listen on when replication is enabled. An empty list derives loopback listeners for source-local recovery.";
       };
 
       allowedReplicationHosts = mkOption {
@@ -278,6 +319,8 @@ in {
         };
       };
 
+      sourceLocalRecovery.enable = mkEnableOption "the source-local-v1 capture namespace, authenticated loopback replication, and recovery-serialized backup publication";
+
       baseBackup = {
         enable = mkEnableOption "periodic base backup via pg_basebackup" // {default = true;};
         schedule = mkOption {
@@ -325,35 +368,39 @@ in {
       {
         assertions = [
           {
-            assertion = cfg.role == "source" -> config.services.postgresql.enable or false;
+            assertion = sourceRole -> config.services.postgresql.enable or false;
             message = "services.harbor-db.pgBackup (role=source) requires services.postgresql.enable = true on this host.";
           }
           {
-            assertion = cfg.role != "source" || cfg.sourceSettings.replicatorPasswordFile != null;
+            assertion = !sourceRole || cfg.sourceSettings.replicatorPasswordFile != null;
             message = "services.harbor-db.pgBackup (role=source) requires sourceSettings.replicatorPasswordFile to be set.";
           }
           {
-            assertion = cfg.role != "target" || cfg.targetSettings.receiveWal.enable || cfg.targetSettings.baseBackup.enable;
+            assertion = !targetRole || cfg.targetSettings.receiveWal.enable || cfg.targetSettings.baseBackup.enable;
             message = "services.harbor-db.pgBackup (role=target) requires at least one target operation to be enabled.";
           }
           {
-            assertion = cfg.role != "target" || cfg.targetSettings.retain.walDays >= cfg.targetSettings.retain.baseBackupDays + 1;
+            assertion = !targetRole || cfg.targetSettings.retain.walDays >= cfg.targetSettings.retain.baseBackupDays + 1;
             message = "services.harbor-db.pgBackup requires walDays >= baseBackupDays + 1 for safe PITR.";
           }
           {
-            assertion = cfg.role != "target" || cfg.targetSettings.replicatorPasswordFile != null;
+            assertion = !targetRole || cfg.targetSettings.replicatorPasswordFile != null;
             message = "services.harbor-db.pgBackup (role=target) requires targetSettings.replicatorPasswordFile to be set.";
+          }
+          {
+            assertion = !cfg.targetSettings.sourceLocalRecovery.enable || (sourceRole && targetRole && lib.elem cfg.source.hostName ["127.0.0.1" "localhost" "::1"]);
+            message = "services.harbor-db.pgBackup sourceLocalRecovery requires role=both and a loopback source for fence-compatible WAL reception.";
           }
         ];
       }
 
-      (mkIf (cfg.role == "source") {
+      (mkIf sourceRole {
         services.postgresql = {
           settings = mkMerge [
-            (lib.optionalAttrs (cfg.sourceSettings.listenAddresses != []) {
+            (lib.optionalAttrs (listenAddresses != []) {
               # NixOS' enableTCPIP setting otherwise forces '*'. Replication
               # should bind only to the explicitly selected interface addresses.
-              listen_addresses = lib.mkForce (lib.concatStringsSep "," cfg.sourceSettings.listenAddresses);
+              listen_addresses = lib.mkForce (lib.concatStringsSep "," listenAddresses);
             })
             {
               wal_level = lib.mkDefault cfg.sourceSettings.walLevel;
@@ -369,7 +416,7 @@ in {
           ];
           authentication = lib.mkAfter (
             lib.concatMapStringsSep "\n" (host: "host replication replicator ${host} scram-sha-256")
-            cfg.sourceSettings.allowedReplicationHosts
+            replicationHosts
           );
         };
 
@@ -387,11 +434,11 @@ in {
         );
       })
 
-      (mkIf (cfg.role == "source" && cfg.sourceSettings.firewallInterface != null && cfg.sourceSettings.allowedReplicationHosts != []) {
+      (mkIf (sourceRole && cfg.sourceSettings.firewallInterface != null && cfg.sourceSettings.allowedReplicationHosts != []) {
         networking.firewall.interfaces."${cfg.sourceSettings.firewallInterface}".allowedTCPPorts = [cfg.source.port];
       })
 
-      (mkIf (cfg.role == "target")
+      (mkIf targetRole
         (mkMerge [
           {
             # Preserve the legacy same-secret fallback for deployments that

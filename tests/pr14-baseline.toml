@@ -1,0 +1,307 @@
+# Frozen source evidence from the complete, open PR14 head. Contract entries
+# record original bytes; runtime and test entries are retained parity oracles.
+version = 1
+pull_request = "https://github.com/caniko/harbor-db/pull/14"
+base = "38ebf2cfbca678cc1ab79a96d6968002fb382b5e"
+head = "4b2850507a2e9bdfe198caf9178ea7b99ffb03a5"
+qualification = "https://github.com/caniko/harbor-db/actions/runs/37910539266"
+python_test_count = 174
+python_inventory_sha256 = "72e5e997f8f7153a3b9f7cd75e5f685d7451f974867624d11815f808886f4100"
+gates = [
+  ".#packages.x86_64-linux.storage-lifecycle",
+  ".#checks.x86_64-linux.postgres-lifecycle-test",
+  ".#checks.x86_64-linux.cutover-eval",
+  ".#packages.x86_64-linux.harbor-db-cached",
+  ".#checks.x86_64-linux.postgres-lifecycle-eval",
+  ".#checks.x86_64-linux.postgres-crash-rollback",
+  ".#checks.x86_64-linux.postgres-interrupted-upgrade",
+  ".#checks.x86_64-linux.postgres-recovery-acceptance",
+  ".#checks.x86_64-linux.postgres-writer-fence",
+  ".#checks.x86_64-linux.application-provision-eval",
+  ".#checks.x86_64-linux.application-provision",
+  ".#checks.x86_64-linux.application-backup",
+  ".#checks.x86_64-linux.application-transition",
+  ".#checks.x86_64-linux.application-postgres-transition",
+  ".#checks.x86_64-linux.pg-backup-eval",
+  ".#checks.x86_64-linux.module-eval",
+  ".#checks.x86_64-linux.module-smoke",
+  ".#checks.x86_64-linux.harbor-db",
+  ".#checks.x86_64-linux.cargo-fmt",
+  ".#checks.x86_64-linux.cargo-test",
+  ".#checks.x86_64-linux.cargo-doc",
+  ".#checks.x86_64-linux.cargo-clippy",
+]
+
+[[files]]
+path = ".github/workflows/nix-builds.yaml"
+sha256 = "d6a754f1acada1c0de1656dbe801d4ee8ce33c1b669fccad6f3b90f1f4037d2d"
+role = "contract"
+[[files]]
+path = "README.md"
+sha256 = "d541e768352162826f8d867624ae325705b56bad73f406a10cb3076269c2dd32"
+role = "contract"
+[[files]]
+path = "docs/application-storage.md"
+sha256 = "903350d7ff37fe8bcf20deba8615316b96edae2259ba336a683a461bf7d06696"
+role = "contract"
+[[files]]
+path = "flake.nix"
+sha256 = "15aed796dc5537e58bdfa920e0cf8bfebcc5652127ddb588826f09c711b013da"
+role = "contract"
+[[files]]
+path = "nix/application-backup.nix"
+sha256 = "6b7e9fbe9df20566e124635fc34104c9b2fbe4ee3a026589a01400d00d8a13d6"
+role = "contract"
+[[files]]
+path = "nix/application-provision-eval.nix"
+sha256 = "bb3b03fa148e0108fe7e2c7af13cb02f9385f4bbb7a961399d2c0016d1dd78e3"
+role = "contract"
+[[files]]
+path = "nix/application-provision.nix"
+sha256 = "a1a27f3b4dbfad121e38f721f62698b643c479518ffc4703244c759dcd599442"
+role = "contract"
+[[files]]
+path = "nix/application-transition.nix"
+sha256 = "ec38e75a5bc5c3610468dfbb4220d435b8faa4336382b74f78aa7ccf0287605b"
+role = "contract"
+[[files]]
+path = "nix/cutover.nix"
+sha256 = "ba01e388df66428e44002a9e9c71c1b1c5e2b1de13726c0ce028bc2485c179ab"
+role = "contract"
+[[files]]
+path = "nix/module.nix"
+sha256 = "82df33ff1e54f85f0de0f243e1a5f67a79645cda4f4ff0c9b57c163aedb5fce2"
+role = "contract"
+[[files]]
+path = "nix/postgres-lifecycle-eval.nix"
+sha256 = "f31ed4c6c852adea3e0479d55c3c7b8e5232162cbc76d32570d00ba41bd67339"
+role = "contract"
+[[files]]
+path = "nix/postgres-lifecycle.nix"
+sha256 = "7dc72caa75897a1ca11cf0083dafb98fe1211089f231ee51368e7d0c5527fcd4"
+role = "contract"
+[[files]]
+path = "nix/postgres-package.nix"
+sha256 = "931762735d85355ee05f69291ead378009a9f0c6bd8811655acfa4f1bb2d5231"
+role = "contract"
+[[files]]
+path = "nix/postgres-writer-clients.nix"
+sha256 = "21e342aaec9a9b6d7f442ebce7eb5f1c474000360c7412d02e6e33a74f1bbca4"
+role = "contract"
+[[files]]
+path = "nix/test-application-backup.nix"
+sha256 = "848c93325a0ecc73d1c026a24344463dc704d099e34d8532d01bd085daf983c9"
+role = "contract"
+[[files]]
+path = "nix/test-application-postgres-transition.py"
+sha256 = "c20b457b2c00fae4257add514eb4026079714255dc7c8711b20aa622337b8625"
+role = "contract"
+[[files]]
+path = "nix/test-application-provision.nix"
+sha256 = "b40dc18246febb42360587013c6f5fad2f1291e4327081eb96a11697e4caf62e"
+role = "contract"
+[[files]]
+path = "nix/test-application-transition.nix"
+sha256 = "ffe7dc52f0ae6f4fadc3a3b519d76fe6a5bfd4bdb79c148e5bcd8a2e4a4b5b07"
+role = "contract"
+[[files]]
+path = "nix/test-postgres-recovery.nix"
+sha256 = "bb4ef35c0eac286fe98918bf1dd958a8f3fc13c752a8c35896bf0817f822e467"
+role = "contract"
+[[files]]
+path = "nix/test-postgres-writer-fence.nix"
+sha256 = "0c4bd9a18f485d0c499ffd363b3bc2e5a50e1e1809e1f73f8f8224cce0420701"
+role = "contract"
+[[files]]
+path = "python/harbor_db/__init__.py"
+sha256 = "b1d438055e85a2730e66b0276522b4f10b0ac6a682a26c5bf5c93f9aa05055a2"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/application_backup.py"
+sha256 = "224b575b845d5a63d5d7c4f98dff4e0e205fce98be296b16bea853cf8f4db57f"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/application_transition.py"
+sha256 = "4754a7951373fa190690c2dcd2a56c08483b449eccb2f635daa8eb3104db530d"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/backup.py"
+sha256 = "fff776a9364470e980df992bf2dc99e4bdf9f2a20ff711e6cd5024497a567ea7"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/cutover.py"
+sha256 = "5806877e2a6e6d51772f6fbae62df165a969340f3bb44c6104db2fc0cfa65aaf"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/durable.py"
+sha256 = "677ba1a93df9cda7938a004d5b6e0bb699f2a6415485fa77436f2a54fad49384"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/login_shell.py"
+sha256 = "e66ac5a3994f2718d8cc4c7e3ab8003eb90ef6122908a2c30be1b5d5d25a1998"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/postgres.py"
+sha256 = "89e72ef1487cd5a76131f9fdf8f6777e18d8730aad1e743af287719ab02ac7dd"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/postgres_drill.py"
+sha256 = "14b0f35a3f6bae12cfbe69720837cfb6fe44352c0bede335e0cb816123cb1604"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/process.py"
+sha256 = "6a198f97ba9ee8fd5c4fa3bab00595b1f1a148834524e7400c22c7836ff74541"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/provision.py"
+sha256 = "5270b9fc8e6df93ab97af1bbe1cb3c3b06ca94df65fdb017a1358c1a369688f0"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/recovery.py"
+sha256 = "ca2b0b42929009388ded7d3589dcfc7f12c00995f7cd72b56940a3ef99b86d59"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/resource.py"
+sha256 = "13f83b6b9a277b0b8520a25a3fd95e35f09311c8316385b064dfe1a92129884c"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/startup_inhibition.py"
+sha256 = "113c4d74646f26fa993ecad9891e364285ab15f17fbe70adb0df3f3dfac0ef96"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/transition_manifest.py"
+sha256 = "0e62b5a95bd48e7d9c2e2df9b448b2fe399a5816341a6c49da03a4307172a6f3"
+role = "runtime"
+[[files]]
+path = "python/harbor_db/writer_fence.py"
+sha256 = "f262abcafb879bac0b7b9d3c6814742b59efdc8a950fff99a7e1ed0fae38f8e3"
+role = "runtime"
+[[files]]
+path = "simit.toml"
+sha256 = "c4b5125eebebebf50853c97cdaa2db80f3ed0bbc9055ef8a7f4a01d2bf794677"
+role = "contract"
+[[files]]
+path = "tests/test_application_backup.py"
+sha256 = "5731efff1c46883b6cb404f881b3b896784e6755f732b115da64783bb727b44c"
+role = "test"
+[[files]]
+path = "tests/test_application_provision.py"
+sha256 = "563a2cd5512e57ab14be849f13bf05652eb6a36649fbadd7611681495eb24745"
+role = "test"
+[[files]]
+path = "tests/test_application_transition.py"
+sha256 = "419025775676ec0af58254a0b4edf90267725f0cdb72f68a8d58b399d82e3611"
+role = "test"
+[[files]]
+path = "tests/test_backup_lifecycle.py"
+sha256 = "9689c7c08db6545f4596d4c533b4574fc4adfcc4f4eee2c5363a5a016ac0d55e"
+role = "test"
+[[files]]
+path = "tests/test_cutover.py"
+sha256 = "67ed7e759f5eab9b0175d1d8f9d7166557ae9b0a58b2a3a361a2064a2fadc021"
+role = "test"
+[[files]]
+path = "tests/test_cutover_process.py"
+sha256 = "9a1f895aeadc02f04d42dda6d776ede505fba1c7c366730d6e82f024aecdd079"
+role = "test"
+[[files]]
+path = "tests/test_durable_lifecycle.py"
+sha256 = "763ba7b31b30d24ed80b6a289dd4e7449f55b13dbbdf99367c001eeb27baf2c1"
+role = "test"
+[[files]]
+path = "tests/test_fence_recovery.py"
+sha256 = "002b8b8d8340878baee04336e06c93427cf5c8b84433a665dbcd666104a1785a"
+role = "test"
+[[files]]
+path = "tests/test_postgres_drill.py"
+sha256 = "c331767f4ce291b93be284b91740dd17c425a158758a5702f30e0d723c47365d"
+role = "test"
+[[files]]
+path = "tests/test_postgres_lifecycle.py"
+sha256 = "e39f708871a3099e1f7b19769c2efbedf69dec0fd90e8c04aeec86d7dfd2c2c3"
+role = "test"
+[[files]]
+path = "tests/test_receipt_process.py"
+sha256 = "05a89816cf1bdd2507d000c63560e1aa748a1e1215385e3a0616a7a04c85722a"
+role = "test"
+[[files]]
+path = "tests/test_recovery_readiness.py"
+sha256 = "431401fde3e7e83fa4bcba29a594dc8ce1ec78b1e612d32fcb093f9a01e31130"
+role = "test"
+[[files]]
+path = "tests/test_resource_lifecycle.py"
+sha256 = "772b25ee192f980377236aa3efebd563fcaaa2eeb82d5d826e2eb9d0b2084158"
+role = "test"
+[[files]]
+path = "tests/test_startup_inhibition.py"
+sha256 = "3f3fbc19e058cf20b8389489ecc27e92993809005e9590d6446f7da225f774b0"
+role = "test"
+[[files]]
+path = "tests/test_writer_fence.py"
+sha256 = "6a76083163498137b0a37a7450d4d251a47f111900ad08f70c3e297ff9744bf7"
+role = "test"
+
+[[modules]]
+source = "python/harbor_db/__init__.py"
+rust = ["src/storage/mod.rs"]
+commands = []
+[[modules]]
+source = "python/harbor_db/application_backup.py"
+rust = ["src/storage/application_backup.rs"]
+commands = ["harbor-db-application-backup"]
+[[modules]]
+source = "python/harbor_db/application_transition.py"
+rust = ["src/storage/application_transition.rs"]
+commands = ["harbor-db-transition"]
+[[modules]]
+source = "python/harbor_db/backup.py"
+rust = ["src/storage/backup.rs"]
+commands = ["harbor-db-backup-prune"]
+[[modules]]
+source = "python/harbor_db/cutover.py"
+rust = ["src/storage/cutover.rs", "src/storage/custody.rs"]
+commands = ["harbor-db-cutover"]
+[[modules]]
+source = "python/harbor_db/durable.py"
+rust = ["src/storage/durable.rs"]
+commands = ["harbor-db-durable"]
+[[modules]]
+source = "python/harbor_db/login_shell.py"
+rust = ["src/storage/login_shell.rs"]
+commands = ["harbor-db-cutover-shell"]
+[[modules]]
+source = "python/harbor_db/postgres.py"
+rust = ["src/storage/postgres.rs", "src/storage/pg_core.rs"]
+commands = ["harbor-db-postgres"]
+[[modules]]
+source = "python/harbor_db/postgres_drill.py"
+rust = ["src/storage/postgres_drill.rs"]
+commands = ["harbor-db-postgres-drill"]
+[[modules]]
+source = "python/harbor_db/process.py"
+rust = ["src/storage/process.rs"]
+commands = []
+[[modules]]
+source = "python/harbor_db/provision.py"
+rust = ["src/storage/provision.rs"]
+commands = ["harbor-db-provision"]
+[[modules]]
+source = "python/harbor_db/recovery.py"
+rust = ["src/storage/recovery.rs"]
+commands = []
+[[modules]]
+source = "python/harbor_db/resource.py"
+rust = ["src/storage/resource.rs"]
+commands = ["harbor-db-resource"]
+[[modules]]
+source = "python/harbor_db/startup_inhibition.py"
+rust = ["src/storage/startup_inhibition.rs"]
+commands = []
+[[modules]]
+source = "python/harbor_db/transition_manifest.py"
+rust = ["src/storage/transition_manifest.rs"]
+commands = ["harbor-db-transition-start"]
+[[modules]]
+source = "python/harbor_db/writer_fence.py"
+rust = ["src/storage/writer_fence.rs"]
+commands = []

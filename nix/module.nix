@@ -820,6 +820,9 @@
   };
 in {
   imports = [
+    ./application-provision.nix
+    ./application-backup.nix
+    ./application-transition.nix
     (lib.mkAliasOptionModule ["services" "harbor-db" "operations"] ["services" "harbor-db" "migrations"])
   ];
 
@@ -935,7 +938,7 @@ in {
       in
         [
           {
-            assertion = operations != {};
+            assertion = operations != {} || project.postgres.provision.enable || project.backup.enable || project.transition.enable;
             message = "services.harbor-db.projects.${name}: configure runner or at least one enabled operation";
           }
           {
@@ -982,7 +985,7 @@ in {
         ++ operationAssertions)
       enabledProjects);
 
-      services.harbor-db.migrations = lib.mapAttrs projectToMigration enabledProjects;
+      services.harbor-db.migrations = lib.mapAttrs projectToMigration (lib.filterAttrs (_: project: enabledOperations project != {}) enabledProjects);
     })
 
     (mkIf (enabledMigrations != {}) {

@@ -63,6 +63,16 @@ The flake module injects its own `harbor-db` package. When importing
 `nix/module.nix` directly, set `services.harbor-db.package` to the package
 output explicitly.
 
+Storage lifecycle commands are Rust by default. The `storage-lifecycle`,
+`postgres-lifecycle` and `storage-lifecycle-rust` package exports select the
+same native package. Flake modules inject that package through
+`harborDbStoragePackage`; direct storage-module imports build the native
+package in `nix/native-package.nix`. The Python sources and original regression
+suites are retained as migration evidence and test-only interoperability peers.
+See [storage durability](docs/storage-durability.md) and the
+[migration contract](docs/rust-migration-baseline.md) for receipt, journal and
+recovery compatibility.
+
 This generates `harbor-db-my-app.service` and, when `checkArgs` or
 `checkCommand` is set, `harbor-db-my-app-check.service`. Runtime units are
 ordered after the migration unit and require it, so each start can re-run the
@@ -269,6 +279,68 @@ and incomplete upgrade journals fail. Normal service startup never adopts.
 Remove the `switchAdoption` request after the rollout; keep the persistent
 authority record and its backups. This option verifies identity, not recovery
 coverage or application-record freshness, which remain consumer rollout gates.
+
+### Explicit PostgreSQL writer fence
+
+`lib.postgresWriterFence = 3` exposes stopped `fence-open` / `fence-close`,
+live `inspect-fence`, persistent systemd startup inhibition, client startup
+gates and enforced snapshot-bound recovery admission. The storage-owner engine
+retains original configuration and fence history; no failure or cancellation
+automatically thaws the primary or starts an application.
+
+Configure `writerFence.replicationRoles` for physical localhost SCRAM replication
+users and `writerFence.allowedPreloadLibraries` for audited non-writing preload
+libraries. Only local OS-peer PostgreSQL control SQL and physical replication
+remain available. Ordinary SQL is rejected even for a reconnecting superuser or
+replication role. `writerFence.blockedUnits` adds a startup condition to explicitly
+named migration/runtime clients while retaining their existing conditions.
+
+Before stopping the primary, root runs `inhibit-startup --system-identifier ID`
+using the immutable manifest. The persistent root-owned gate must be installed
+and read back from systemd before stopping the service. `writerFence.setupUnits`
+defaults to `postgresql-setup.service`; its persistent gate is installed before
+the inhibition marker and read back alongside the primary gate. This prevents
+legacy activation from running setup SQL while the primary is deliberately
+inhibited, including after an interrupted thaw. Then the PostgreSQL OS
+identity runs `fence-open --system-identifier ID`. It returns `prepared-offline`,
+never live readiness. Root releases only the startup gate with
+`release-startup --token STARTUP_TOKEN --fence-token FENCE_TOKEN --phase prepared`
+after stopped readback. Starting the primary is a separate service-manager
+operation; `inspect-fence --token FENCE_TOKEN` must pass afterwards.
+
+`recovery.requireWriterFence = true` rejects missing/unready exclusion before
+managed preparation, source capture, live adoption and preflight/activation/
+certification. Source snapshots retain `writer_fence_token`; existing snapshots
+must match that token before preparation reuse or deployment admission. A shared
+fence anchor is retained across those operations, blocking an offline thaw until
+their verification/publication finishes. Off-host certification remains bound
+to the source snapshot digest and never contacts the production primary.
+
+Read-only `inspect-recovery`, offline adoption and off-host receipt import also
+pin the retained fence and reject snapshots from an unfenced or replacement
+window. Their offline boundary verifies the durable selector and declared
+physical identity; live capture, adoption and cutover additionally inspect the
+running primary. Disposable certifiers validate the copied token format and
+snapshot binding without reading the primary's authority tree. The policy
+requirement is a strict boolean. Enrollment retirement permits ordinary
+historical acceptance, while an existing unfinished fence still fails closed.
+
+The consumer keeps its activation/campaign lease and stopped application writers
+through recovery, independent restore acceptance, adoption and deployment
+post-verification. It explicitly decides when a qualified deployment is accepted.
+After acceptance it inhibits startup again, stops the primary, runs
+`fence-close --token FENCE_TOKEN` under the PostgreSQL OS identity, verifies the
+stopped closed boundary, releases startup with `--phase closed`, and separately
+starts PostgreSQL and its clients. Unfinished thaw retains startup inhibition;
+the same token must complete the transition. No anchor is deleted.
+
+After accepted bootstrap retirement, disabling `requireWriterFence` permits
+ordinary historical recovery admission. An existing fence remains inspected and
+enforced at startup; retirement never creates identity, removes evidence or
+thaws a pending fence. The native real-PostgreSQL regression and
+`checks.x86_64-linux.postgres-writer-fence` exercise reconnecting superusers,
+rollback/reboot, interrupted acquisition/thaw and client startup conditions.
+Those fixtures do not certify a consumer's production recovery or activation.
 
 ### Executed recovery admission
 

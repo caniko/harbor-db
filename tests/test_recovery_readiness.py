@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harbor_db import postgres, recovery
+from harbor_db import postgres, recovery, writer_fence
 from harbor_db.durable import lock, write_json
 
 
@@ -70,6 +70,123 @@ class RecoveryReadinessTest(unittest.TestCase):
         with patch.object(recovery, "inspect_restored", return_value=self.observed):
             return recovery.certify(self.config, str(self.restored), "/restore/socket", 55432,
                                     now=self.now, hostname="primary-host", **kwargs)
+
+    def require_fence(self, *, opened=True):
+        primary, state = Path(self.config["data_dir"]), self.root / "authority"
+        primary.mkdir()
+        state.mkdir(mode=0o700)
+        (primary / "postgresql.auto.conf").write_text("# original\n")
+        self.config.update(resource="fixture", state_dir=str(state), required_mounts=[])
+        self.config["recovery"]["require_writer_fence"] = True
+        if opened:
+            with patch.object(postgres, "require_stopped"):
+                token = writer_fence.open_fence(self.config, "12345")["token"]
+            probe = patch.object(writer_fence, "inspect_live", return_value={"status": "ready", "token": token})
+            probe.start()
+            self.addCleanup(probe.stop)
+            return token
+
+    def test_required_fence_rejects_unfenced_snapshot_and_preparation(self):
+        self.require_fence(opened=False)
+        preparation = {"readiness_command": ["/fixture/readiness"], "backup_command": ["/fixture/backup"], "restore_command": ["/fixture/restore"]}
+        with self.assertRaisesRegex(postgres.LifecycleError, "writer fence"):
+            self.snapshot()
+        with patch.object(postgres, "run") as execute, self.assertRaisesRegex(postgres.LifecycleError, "writer fence"):
+            recovery.prepare(self.config, preparation, "/run/postgresql", 5432)
+        execute.assert_not_called()
+        self.assertFalse(Path(self.config["recovery"]["snapshot_file"]).exists())
+
+    def test_required_fence_must_pass_live_inspection_before_capture(self):
+        self.require_fence()
+        with patch.object(writer_fence, "inspect_live", side_effect=postgres.LifecycleError("other writers")), self.assertRaisesRegex(postgres.LifecycleError, "other writers"):
+            self.snapshot()
+        self.assertFalse(Path(self.config["recovery"]["snapshot_file"]).exists())
+        self.snapshot()
+        self.certify()
+        with patch.object(recovery.time, "time", return_value=self.now), patch.object(writer_fence, "inspect_live", side_effect=postgres.LifecycleError("other writers")), self.assertRaisesRegex(postgres.LifecycleError, "other writers"):
+            postgres.adopt_live(self.config, "12345", "/run/postgresql", 5432)
+        self.assertFalse((Path(self.config["state_dir"]) / "identity.json").exists())
+
+    def test_required_fence_is_bound_to_snapshot_and_independent_receipts(self):
+        token = self.require_fence()
+        self.snapshot()
+        source = json.loads(Path(self.config["recovery"]["snapshot_file"]).read_text())
+        self.assertEqual(source["writer_fence_token"], token)
+        with patch.object(writer_fence, "startup", side_effect=AssertionError("primary state on recovery executor")):
+            receipt = self.certify()
+        self.assertEqual(receipt["snapshot_sha256"], recovery.digest(self.config["recovery"]["snapshot_file"]))
+        self.assertEqual(recovery.check(self.config, now=self.now)["status"], "ready")
+        source["writer_fence_token"] = "0" * 32
+        write_json(Path(self.config["recovery"]["snapshot_file"]), source)
+        # Retirement cannot make an independently accepted snapshot match new bytes.
+        self.config["recovery"]["require_writer_fence"] = False
+        with self.assertRaisesRegex(ValueError, "record-level recovery"):
+            recovery.check(self.config, now=self.now)
+
+    def test_required_fence_cannot_thaw_during_snapshot_or_authority_publication(self):
+        token = self.require_fence()
+
+        def publish(path, value):
+            with patch.object(postgres, "require_stopped"), self.assertRaises(BlockingIOError):
+                writer_fence.close_fence(self.config, token)
+            write_json(path, value)
+
+        with patch.object(recovery, "write_json", side_effect=publish):
+            self.snapshot()
+        self.certify()
+        with patch.object(recovery.time, "time", return_value=self.now), patch.object(postgres, "write_json", side_effect=publish):
+            postgres.adopt_live(self.config, "12345", "/run/postgresql", 5432)
+        self.assertTrue((Path(self.config["state_dir"]) / "identity.json").exists())
+
+    def test_required_fence_rejects_prior_snapshot_and_replacement_window(self):
+        self.snapshot()
+        self.certify()
+        token = self.require_fence()
+        with self.assertRaisesRegex(ValueError, "writer fence"):
+            recovery.check(self.config, now=self.now)
+        self.snapshot()
+        self.certify()
+        with patch.object(postgres, "require_stopped"):
+            writer_fence.close_fence(self.config, token)
+            writer_fence.open_fence(self.config, "12345")
+        with self.assertRaisesRegex(ValueError, "writer fence"):
+            recovery.check(self.config, now=self.now)
+        self.config["recovery"]["require_writer_fence"] = False
+        self.assertEqual(recovery.check(self.config, now=self.now)["status"], "ready")
+
+    def test_writer_fence_requirement_is_a_boolean(self):
+        for value in ("true", "false", 1, None):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "writer fence"):
+                recovery.policy(self.config | {"recovery": self.config["recovery"] | {"require_writer_fence": value}})
+
+    def test_import_rejects_a_replacement_fence_before_receipt_publication(self):
+        token = self.require_fence()
+        self.snapshot()
+        self.certify()
+        receipt = json.loads(Path(self.config["recovery"]["receipt_file"]).read_text())
+        receipt["executor_host"] = "independent-host"
+        incoming = self.root / "incoming.json"
+        write_json(incoming, receipt)
+        destination = self.backup / "evidence/off-host.json"
+        self.config["recovery"]["off_host_receipt_file"] = str(destination)
+        with patch.object(postgres, "require_stopped"):
+            writer_fence.close_fence(self.config, token)
+            writer_fence.open_fence(self.config, "12345")
+        with self.assertRaisesRegex(ValueError, "writer fence"):
+            recovery.import_off_host(self.config, incoming, now=self.now)
+        self.assertFalse(destination.exists())
+
+    def test_disposable_certifier_rejects_missing_or_invalid_copied_fence(self):
+        self.require_fence()
+        self.snapshot()
+        source = json.loads(Path(self.config["recovery"]["snapshot_file"]).read_text())
+        for binding in (None, "other-window", "a" * 31, 17):
+            with self.subTest(binding=binding):
+                changed = source | {"writer_fence_token": binding}
+                write_json(Path(self.config["recovery"]["snapshot_file"]), changed)
+                with self.assertRaisesRegex(ValueError, "writer fence"):
+                    self.certify()
+                self.assertFalse(Path(self.config["recovery"]["receipt_file"]).exists())
 
     def test_missing_evidence_is_not_recovery_readiness(self):
         with self.assertRaisesRegex(ValueError, "snapshot"):
