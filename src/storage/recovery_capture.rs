@@ -127,7 +127,12 @@ fn required_segments(ranges: &[WalRange], target: u64, segment: u64) -> Result<(
     if target <= stop {
         return Err(invalid("capture target must follow actual backup stop LSN"));
     }
-    let last = (target - 1) / segment;
+    // pg_switch_wal returns the END of its switch record. Recovery's inclusive
+    // LSN target compares record START positions, so replay also needs a record
+    // in the following segment, not only the just-completed target carrier.
+    let last = ((target - 1) / segment)
+        .checked_add(1)
+        .ok_or_else(|| invalid("invalid replay stop segment"))?;
     let count = last
         .checked_sub(first)
         .and_then(|n| n.checked_add(1))
@@ -210,7 +215,13 @@ fn query_json(
     )?)
 }
 
-fn switch_wal(config: &Value, socket: &Path, port: u16, leases: &[RawFd]) -> Result<Value> {
+fn control_lsn(
+    config: &Value,
+    socket: &Path,
+    port: u16,
+    leases: &[RawFd],
+    sql: &str,
+) -> Result<Value> {
     let mut environment = std::env::vars()
         .filter(|(key, _)| !key.starts_with("PG"))
         .collect::<BTreeMap<_, _>>();
@@ -231,7 +242,7 @@ fn switch_wal(config: &Value, socket: &Path, port: u16, leases: &[RawFd]) -> Res
         "--tuples-only".into(),
         "--no-align".into(),
         "--command".into(),
-        "SET default_transaction_read_only=off; SELECT to_json(pg_switch_wal()::text);".into(),
+        sql.into(),
     ]);
     spec.environment = Some(environment);
     spec.leases = leases.to_vec();
@@ -239,6 +250,16 @@ fn switch_wal(config: &Value, socket: &Path, port: u16, leases: &[RawFd]) -> Res
     let observed: Value = serde_json::from_slice(&process::execute(&spec)?)?;
     recovery::lsn(&observed)?;
     Ok(observed)
+}
+
+fn switch_wal(config: &Value, socket: &Path, port: u16, leases: &[RawFd]) -> Result<Value> {
+    control_lsn(
+        config,
+        socket,
+        port,
+        leases,
+        "SET default_transaction_read_only=off; SELECT to_json(pg_switch_wal()::text);",
+    )
 }
 
 fn immutable(root: &Path, path: &Path, content: &[u8], capture_id: &str) -> Result<()> {
@@ -506,6 +527,27 @@ pub fn finalize(
         recovery::lsn(&metadata["post_backup_lsn"])?,
         segment,
     )?;
+    // Emit a genuine post-target recovery stop record and complete its carrier.
+    // An accepted repeat already has this segment and needs no further WAL.
+    // The immutable target and pin remain those of the first switch, including
+    // when reception was interrupted before this second segment was available.
+    let stop_segment = root.join("wal").join(wal_name(timeline, last, segment));
+    match fs::symlink_metadata(&stop_segment) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let stop = control_lsn(
+                config,
+                &socket,
+                port,
+                &leases,
+                "SET default_transaction_read_only=off; CHECKPOINT; SELECT to_json(pg_switch_wal()::text);",
+            )?;
+            if recovery::lsn(&stop)? <= recovery::lsn(&metadata["post_backup_lsn"])? {
+                return Err(invalid("replay stop must follow the frozen capture target"));
+            }
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => (),
+    }
     wait_wal(&root.join("wal"), timeline, first, last, segment, wal_wait)?;
     let result = json!({"version":1,"backup_id":backup_id,"system_identifier":settings["system_identifier"],"major":writer_fence::major(config)?,
         "epoch_id":metadata["epoch_id"],"manifest_sha256":metadata["manifest_sha256"],"recovery_target_lsn":metadata["post_backup_lsn"],
@@ -717,7 +759,11 @@ mod tests {
         }];
         assert_eq!(
             required_segments(&ranges, 3 * segment, segment).unwrap(),
-            (1, 2)
+            (1, 3)
+        );
+        assert_eq!(
+            required_segments(&ranges, 3 * segment + 4, segment).unwrap(),
+            (1, 4)
         );
         assert!(required_segments(&ranges, 2 * segment, segment).is_err());
         assert_eq!(wal_name(1, 256, segment), "000000010000000100000000");
