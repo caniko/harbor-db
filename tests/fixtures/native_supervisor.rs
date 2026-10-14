@@ -91,6 +91,23 @@ fn property(unit: &str, name: &str) -> Result<String> {
     )
 }
 
+fn wait_unit_exit(unit: &str) -> Result<()> {
+    wait(|| {
+        let (_, bytes) = command(
+            Path::new("systemctl"),
+            &["--user", "show", unit, "--property=LoadState,ActiveState"],
+            false,
+        )?;
+        let state = String::from_utf8(bytes)?;
+        Ok(state.lines().any(|line| {
+            matches!(
+                line,
+                "LoadState=not-found" | "ActiveState=failed" | "ActiveState=inactive"
+            )
+        }))
+    })
+}
+
 struct Owned(Child);
 impl Drop for Owned {
     fn drop(&mut self) {
@@ -519,25 +536,7 @@ fn qualify(root: &Path, cli: &Path) -> Result<()> {
         units.len() == 2,
         "early worker launch must acknowledge both units",
     )?;
-    wait(|| {
-        let (_, bytes) = command(
-            Path::new("systemctl"),
-            &[
-                "--user",
-                "show",
-                &units[1],
-                "--property=LoadState,ActiveState",
-            ],
-            false,
-        )?;
-        let state = String::from_utf8(bytes)?;
-        Ok(state.lines().any(|line| {
-            matches!(
-                line,
-                "LoadState=not-found" | "ActiveState=failed" | "ActiveState=inactive"
-            )
-        }))
-    })?;
+    wait_unit_exit(&units[1])?;
     drop(busy);
     wait(|| Ok(supervisor::status(&early)?.terminal))?;
     let failed = supervisor::status(&early)?;
@@ -547,6 +546,9 @@ fn qualify(root: &Path, cli: &Path) -> Result<()> {
             && failed.verification.verdict == Verdict::Failed,
         "pre-registration worker loss must be terminal without inventing execution",
     )?;
+    // Failure evidence can precede the observer's final sampling/notification.
+    // Reattachment must wait for that pass to release its observation lease.
+    wait_unit_exit(&units[0])?;
     let original = fs::read(early.join("launch-failed.json"))?;
     command(
         cli,
