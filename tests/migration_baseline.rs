@@ -167,6 +167,25 @@ fn edit_extension_manifest(root: &Path, edit: impl FnOnce(&mut toml::Value)) {
 }
 
 #[test]
+fn original_contract_binds_retained_oracles_instead_of_extended_runtime_bytes() {
+    let (root, baseline, suite) = extension_fixture();
+    let contract = baseline.original_contract(root.path(), &suite).unwrap();
+    let frozen = contract
+        .oracle_files
+        .iter()
+        .find(|(path, _)| path.starts_with("tests/oracles/pr14"))
+        .unwrap();
+    for (path, hash) in &contract.oracle_files {
+        assert_eq!(
+            harbor_db::storage::codec::digest(&fs::read(root.path().join(path)).unwrap()),
+            *hash
+        );
+    }
+    fs::write(root.path().join(frozen.0), b"changed frozen oracle").unwrap();
+    assert!(baseline.original_contract(root.path(), &suite).is_err());
+}
+
+#[test]
 fn extension_requires_exact_hash_and_explicit_changed_scope() {
     for path in [
         "python/harbor_db/backup.py",
