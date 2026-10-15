@@ -3,6 +3,63 @@ version = 1
 
 [[inventories]]
 origin = "rust"
+id_prefix = "native.original_contract."
+selector_prefix = ""
+source = "tests/original_contract.rs"
+argv_prefix = ["cargo", "test", "--locked", "--features", "testing", "--test", "original_contract"]
+argv_suffix = ["--", "--exact"]
+profile = "fast"
+maturity = "crystallized"
+selectors = ["native_export_retains_every_original_selector_and_disclaims_execution", "original_contract_cannot_select_a_successful_subset_or_drop_original_gates"]
+
+[[inventories]]
+origin = "rust"
+id_prefix = "native.migration_baseline."
+selector_prefix = ""
+source = "tests/migration_baseline.rs"
+argv_prefix = ["cargo", "test", "--locked", "--features", "testing", "--test", "migration_baseline"]
+argv_suffix = ["--", "--exact"]
+profile = "fast"
+maturity = "crystallized"
+selectors = ["original_contract_binds_retained_oracles_instead_of_extended_runtime_bytes"]
+
+[[coverage]]
+case = "native.original_contract.native_export_retains_every_original_selector_and_disclaims_execution"
+capability = "suite-cli"
+operation = "harbor-db-test.original-contract"
+dimension = "positive"
+evidence = "The actual native CLI exports all 174 original selectors, all 22 original gates, bound catalog cases and original oracle hashes, with executed=false and runtime_qualified=false."
+
+[[coverage]]
+case = "native.original_contract.native_export_retains_every_original_selector_and_disclaims_execution"
+capability = "suite-cli"
+operation = "harbor-db-test.original-contract"
+dimension = "repetition"
+evidence = "Repeated native exports emit byte-identical contracts from the unchanged complete original scope."
+
+[[coverage]]
+case = "native.original_contract.native_export_retains_every_original_selector_and_disclaims_execution"
+capability = "suite-cli"
+operation = "harbor-db-test.original-contract"
+dimension = "concurrency"
+evidence = "Two concurrent native CLI exports return the same complete deterministic contract without shared output state."
+
+[[coverage]]
+case = "native.original_contract.original_contract_cannot_select_a_successful_subset_or_drop_original_gates"
+capability = "suite-cli"
+operation = "harbor-db-test.original-contract"
+dimension = "rejection"
+evidence = "The shared exporter rejects a missing original method binding or removed original qualification gate before emission."
+
+[[coverage]]
+case = "native.migration_baseline.original_contract_binds_retained_oracles_instead_of_extended_runtime_bytes"
+capability = "suite-cli"
+operation = "harbor-db-test.original-contract"
+dimension = "compatibility"
+evidence = "Reviewed runtime extensions retain the original oracle hashes in the export; changing a frozen oracle rejects instead of adopting the extended bytes as the original contract."
+
+[[inventories]]
+origin = "rust"
 id_prefix = "native.resource_storage."
 selector_prefix = ""
 source = "tests/resource_storage.rs"
@@ -2143,12 +2200,20 @@ required = ["positive", "rejection", "repetition", "concurrency", "interruption"
 
 [[capabilities]]
 id = "suite-cli"
-operations = ["harbor-db-test.catalog", "harbor-db-test.plan", "harbor-db-test.retain", "harbor-db-test.create", "harbor-db-test.run", "harbor-db-test.worker", "harbor-db-test.observe", "harbor-db-test.status", "harbor-db-test.watch", "harbor-db-test.cancel", "harbor-db-test.verify", "harbor-db-test.execute", "harbor-db-test.check-baseline"]
+operations = ["harbor-db-test.catalog", "harbor-db-test.plan", "harbor-db-test.retain", "harbor-db-test.create", "harbor-db-test.run", "harbor-db-test.worker", "harbor-db-test.observe", "harbor-db-test.status", "harbor-db-test.watch", "harbor-db-test.cancel", "harbor-db-test.verify", "harbor-db-test.execute", "harbor-db-test.check-baseline", "harbor-db-test.original-contract"]
 required = ["positive", "rejection", "repetition", "concurrency", "interruption", "recovery", "compatibility"]
 [[capabilities.not_applicable]]
 operation = "harbor-db-test.catalog"
 dimension = "recovery"
 reason = "Static catalog output does not execute cases or publish lifecycle authority."
+[[capabilities.not_applicable]]
+operation = "harbor-db-test.original-contract"
+dimension = "recovery"
+reason = "Read-only original-scope export has no durable execution or lifecycle authority to recover."
+[[capabilities.not_applicable]]
+operation = "harbor-db-test.original-contract"
+dimension = "interruption"
+reason = "Export performs only reads and stdout emission, creates no run or accepted receipt, and cannot modify lifecycle authority. A partial stdout document establishes no acceptance."
 [[capabilities.not_applicable]]
 operation = "harbor-db-test.plan"
 dimension = "recovery"

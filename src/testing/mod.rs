@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod evidence;
 pub mod executor;
 pub mod host;
+pub mod original_contract;
 pub mod protocol;
 pub mod runner;
 pub mod supervisor;

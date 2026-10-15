@@ -24,6 +24,11 @@ an observer's disconnect or stdout EOF as successful completion.
 `catalog` exposes the expanded static inventory. `plan` exposes selected cases
 and their static coverage report. These views are not passing run receipts.
 
+`original-contract` exports the complete frozen PR14 method/gate inventory and
+original oracle hashes for independent hosted selection. See the
+[original obligation contract](original-obligation-contract.md) for its wire
+schema and execution/acceptance boundaries.
+
 Observers sample resources every 10 seconds and summarize every 30 seconds.
 Log activity, heartbeat liveness, and meaningful case progress have independent
 timestamps. After five minutes without meaningful progress the observer retains

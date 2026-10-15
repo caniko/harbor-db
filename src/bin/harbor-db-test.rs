@@ -40,6 +40,15 @@ struct Create {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Export the complete frozen original-method contract; does not execute tests.
+    OriginalContract {
+        #[arg(long, default_value = "tests/pr14-baseline.toml")]
+        baseline: PathBuf,
+        #[arg(long, default_value = "tests/suite.toml")]
+        suite: PathBuf,
+        #[arg(long, default_value = ".")]
+        source: PathBuf,
+    },
     CheckBaseline {
         #[arg(long, default_value = "tests/pr14-baseline.toml")]
         baseline: PathBuf,
@@ -151,6 +160,13 @@ fn main() -> ExitCode {
 }
 fn run() -> supervisor::Result<ExitCode> {
     match Cli::parse().command {
+        Action::OriginalContract {
+            baseline,
+            suite,
+            source,
+        } => {
+            print(&Baseline::load(baseline)?.original_contract(&source, &Suite::load(suite)?)?)?;
+        }
         Action::CheckBaseline {
             baseline,
             suite,
