@@ -6,13 +6,13 @@ mkBtrfsCrashTest {
   inherit pkgs;
   name = "harbor-db-btrfs-crash";
   node = {};
-  testScript = ''
+  testScript = {nodes, ...}: ''
     import json
     import os
     import shlex
     from pathlib import Path
 
-    root = storage_fixture.mount_point
+    root = "${nodes.machine.virtualisation.fileSystems."/var/lib/harbor-db-btrfs".mountPoint}"
     with subtest("synchronous mounts are rejected"):
         machine.succeed("mount -o remount,sync " + shlex.quote(root))
         try:

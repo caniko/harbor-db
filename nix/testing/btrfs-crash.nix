@@ -7,6 +7,10 @@
   compressionLevel ? 9,
 }: let
   inherit (pkgs) lib;
+  script =
+    if lib.isFunction testScript
+    then testScript
+    else lib.const testScript;
 in
   assert lib.hasPrefix "/" mountPoint && mountPoint != "/";
   assert builtins.isInt compressionLevel && compressionLevel >= 1 && compressionLevel <= 15;
@@ -42,7 +46,7 @@ in
           '';
         };
       };
-      testScript = args: ''
+      testScript = lib.mirrorFunctionArgs script (args: ''
         ${builtins.readFile ./btrfs-crash.py}
 
         storage_fixture = BtrfsCrashFixture(machine, ${builtins.toJSON mountPoint}, ${toString compressionLevel})
@@ -50,10 +54,6 @@ in
         with subtest("ordinary compressed checksummed RAID1 without synchronous mount"):
             storage_fixture.verify()
 
-        ${
-          if builtins.isFunction testScript
-          then testScript args
-          else testScript
-        }
-      '';
+        ${script args}
+      '');
     }
