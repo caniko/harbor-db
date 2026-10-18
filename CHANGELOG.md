@@ -4,6 +4,8 @@
 
 ### Added
 
+- Reusable compressed-Btrfs RAID1 crash-test builder with ordinary asynchronous
+  mounts, measured compression and crash receipts, and a standalone KVM gate.
 - Rust-default storage lifecycle commands with durable fencing, recovery,
   application transitions, and coordinated writer lease inheritance. Flake and
   direct module imports share native package selection; Python is a test-only

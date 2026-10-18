@@ -24,6 +24,9 @@ jobs:
       max-parallel: 2
       matrix:
         include:
+          - installable: ".#checks.x86_64-linux.btrfs-crash"
+            system: "x86_64-linux"
+            runner: "ubuntu-24.04"
           - installable: ".#packages.aarch64-linux.storage-lifecycle-rust"
             system: "aarch64-linux"
             runner: "ubuntu-24.04-arm"

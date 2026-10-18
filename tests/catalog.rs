@@ -219,7 +219,7 @@ fn committed_inventory_is_individual_and_migration_bound() {
             .iter()
             .filter(|case| case.id.starts_with("vm."))
             .count(),
-        29
+        30
     );
     for profile in [
         Profile::Fast,
