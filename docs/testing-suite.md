@@ -254,6 +254,9 @@ asynchronous mounts. Pass `pkgs`, `name`, an application `node` module and a
 `testScript` (string or the usual NixOS test-script function). Optional
 `mountPoint` defaults to `/var/lib/harbor-db-btrfs`; `compressionLevel` defaults
 to 9. VM memory/cores default to 4096 MiB/two and can be overridden by the node.
+The fixture appends its disks after ordinary consumer `emptyDiskImages` and
+addresses them by reserved virtio serials `harbor-db-btrfs-1` and
+`harbor-db-btrfs-2`, so consumer disks retain their existing device positions.
 
 The builder starts the VM and verifies the mount, both RAID1 profiles and actual
 Zstd-compressed extents before the consumer script runs. It exposes
@@ -268,8 +271,9 @@ Check recovered authority before retrying a mutation; an idempotent retry can
 otherwise repair a lost acknowledgement and hide a durability failure.
 Application provisioning, credentials, schemas, acceptance, rights, projections
 and reconstruction remain consumer-owned. `checks.x86_64-linux.btrfs-crash`
-qualifies the generic fixture, including rejection of a synchronous mount and
-recovery of explicitly fsynced bytes after abrupt VM loss.
+qualifies the generic fixture, including an independent consumer ext4 disk,
+rejection of a synchronous mount and recovery of explicitly fsynced bytes on
+both filesystems after abrupt VM loss.
 
 The focused catalog gate is:
 
