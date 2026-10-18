@@ -3192,7 +3192,7 @@ namespace = "checks"
 id_prefix = "vm."
 source = "flake.nix"
 systems = ["x86_64-linux"]
-names = ["native-postgres-crash-rollback", "native-postgres-interrupted-upgrade", "native-postgres-recovery-acceptance", "native-application-backup"]
+names = ["btrfs-crash", "native-postgres-crash-rollback", "native-postgres-interrupted-upgrade", "native-postgres-recovery-acceptance", "native-application-backup"]
 profile = "vm"
 deadline_seconds = 7200
 resources = { cpu = 2, memory_mib = 8192, disk_mib = 32768, exclusive = ["nixos-vm"] }

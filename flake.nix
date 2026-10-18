@@ -104,6 +104,7 @@
     lib.applicationBackendTransition = 1;
     lib.cutoverPreflight = 3;
     lib.timezone = harbor-meta.lib.timezone;
+    lib.testing.mkBtrfsCrashTest = import ./nix/testing/btrfs-crash.nix;
     nixosModules.harbor-db = {
       lib,
       pkgs,
@@ -329,6 +330,9 @@
           });
       }
       // pkgs.lib.optionalAttrs (pkgs.system == "x86_64-linux") {
+        btrfs-crash = pkgs.callPackage ./nix/test-btrfs-crash.nix {
+          inherit (self.lib.testing) mkBtrfsCrashTest;
+        };
         native-supervisor = pkgs.callPackage ./nix/test-native-supervisor.nix {
           testPackage = self.packages.${pkgs.system}.harbor-db-test;
         };

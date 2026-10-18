@@ -8,6 +8,7 @@ with_docs = false
 provider = "actions"
 platform = "github"
 nix_builds = [
+  ".#checks.x86_64-linux.btrfs-crash",
   ".#packages.aarch64-linux.storage-lifecycle-rust",
   ".#packages.aarch64-linux.harbor-db-test",
   ".#checks.aarch64-linux.cargo-test",
@@ -61,7 +62,7 @@ nix_builds = [
 
 # cargo-test already realizes all-targets/all-features native storage and harness tests.
 # Native ARM rows qualify both packages and all eight original non-VM gates.
-# Put them first so the bounded matrix establishes ARM evidence promptly.
+# Run the compressed crash fixture first, then establish native ARM evidence.
 # Generated with qualified Simit a84c67c04b555c06112cc74b23c9c7030ab01d52,
 # production artifact 11796731199 (run 38360956608, attempt 1).
 # Its execution tree and all 317 source hashes match the signed producer.

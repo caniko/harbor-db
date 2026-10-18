@@ -246,6 +246,31 @@ suite targets disposable fixtures, not an ambient production database.
 
 ## Developer checks
 
+### Compressed Btrfs crash fixtures
+
+`lib.testing.mkBtrfsCrashTest` builds a single-machine NixOS test on two disposable
+2 GiB Btrfs disks, with RAID1 data/metadata, checksums, copy-on-write and ordinary
+asynchronous mounts. Pass `pkgs`, `name`, an application `node` module and a
+`testScript` (string or the usual NixOS test-script function). Optional
+`mountPoint` defaults to `/var/lib/harbor-db-btrfs`; `compressionLevel` defaults
+to 9. VM memory/cores default to 4096 MiB/two and can be overridden by the node.
+
+The builder starts the VM and verifies the mount, both RAID1 profiles and actual
+Zstd-compressed extents before the consumer script runs. It exposes
+`storage_fixture.power_cut(phase, recover)` and `storage_fixture.receipt()`.
+Power cuts kill the VM without guest sync or service shutdown, restart it and
+run the caller's recovery callback before recording the phase. Receipts contain
+measured mount options, RAID profiles, compression and recovered phase names.
+Consumers add their exact source/package identity and application assertions.
+
+Expected acknowledgements must stay in the driver, outside the guest filesystem.
+Check recovered authority before retrying a mutation; an idempotent retry can
+otherwise repair a lost acknowledgement and hide a durability failure.
+Application provisioning, credentials, schemas, acceptance, rights, projections
+and reconstruction remain consumer-owned. `checks.x86_64-linux.btrfs-crash`
+qualifies the generic fixture, including rejection of a synchronous mount and
+recovery of explicitly fsynced bytes after abrupt VM loss.
+
 The focused catalog gate is:
 
 ```sh
