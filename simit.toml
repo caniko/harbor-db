@@ -62,20 +62,24 @@ nix_builds = [
 
 # cargo-test already realizes all-targets/all-features native storage and harness tests.
 # Native ARM rows qualify both packages and all eight original non-VM gates.
-# Run the compressed crash fixture first, then establish native ARM evidence.
-# Generated with qualified Simit a84c67c04b555c06112cc74b23c9c7030ab01d52,
-# production artifact 11796731199 (run 38360956608, attempt 1).
-# Its execution tree and all 317 source hashes match the signed producer.
-# Generator SHA-256: 18d67d1cb692a58c2d820451078bed63a6edc37545244155c574f5e018f138aa.
+# Generated with Simit de3325be17104fbdb0d70f1da38149d4016f1790 (Canix's
+# qualified simit-ci-generator pin), realized from
+# github:caniko/simit/de3325be17104fbdb0d70f1da38149d4016f1790#default.
+# Generator SHA-256: a8b6be1cc52f27a37473abfb346b959ab9f65be435904baad75fb7381415ab10.
+# Grouped jobs provision the engine from the repository variable
+# SIMIT_CI_ENGINE_REVISION, enrolled at the same revision.
 # Regenerate: simit init ci --platform github --ci-provider actions --runtime nix
 # Verify with the same command plus --check --diff, then retain native ARM runs.
 # The ten native VM checks are exported only on x86_64-linux and require KVM.
 [ci.nix_build]
 only = true
+# Pull requests qualify their exact head once; trunk keeps its push run.
+push_branches = ["trunk"]
 timeout_minutes = 90
-max_parallel = 2
+# Four groups run at once, the runner budget of the former push and PR pair.
+max_parallel = 4
 max_jobs = 1
-cores = 2
+cores = 4
 kvm = true
 capture_results = true
 artifact_retention_days = 14
@@ -97,3 +101,67 @@ nix config show sandbox-paths | grep -F /var/cache/sccache
 [ci.nix_build.system_runners]
 "aarch64-linux" = "ubuntu-24.04-arm"
 "x86_64-linux" = "ubuntu-24.04"
+
+# Jobs share one store per group, so each builds the toolchain, harbor-db and
+# harbor-db-test once instead of once per installable. Every grouped job also
+# provisions the Simit engine (about 8 minutes), so groups stay few and large.
+# The compressed Btrfs crash fixture still runs first, within its VM group.
+[ci.nix_build.groups]
+aarch64 = [
+  ".#packages.aarch64-linux.storage-lifecycle-rust",
+  ".#packages.aarch64-linux.harbor-db-test",
+  ".#checks.aarch64-linux.cargo-test",
+  ".#checks.aarch64-linux.cutover-eval",
+  ".#checks.aarch64-linux.native-cli-smoke",
+  ".#checks.aarch64-linux.native-package-eval",
+  ".#checks.aarch64-linux.native-storage-eval",
+  ".#checks.aarch64-linux.postgres-lifecycle-eval",
+  ".#checks.aarch64-linux.application-provision-eval",
+  ".#checks.aarch64-linux.module-eval",
+]
+x86-rust = [
+  ".#checks.x86_64-linux.cargo-fmt",
+  ".#packages.x86_64-linux.storage-lifecycle-rust",
+  ".#packages.x86_64-linux.storage-lifecycle",
+  ".#packages.x86_64-linux.harbor-db-test",
+  ".#packages.x86_64-linux.harbor-db-cached",
+  ".#checks.x86_64-linux.harbor-db",
+  ".#checks.x86_64-linux.cargo-clippy",
+  ".#checks.x86_64-linux.cargo-test",
+  ".#checks.x86_64-linux.cargo-doc",
+  ".#checks.x86_64-linux.postgres-lifecycle-test",
+  ".#checks.x86_64-linux.postgres-lifecycle-oracle-test",
+  ".#checks.x86_64-linux.native-package-eval",
+  ".#checks.x86_64-linux.native-storage-eval",
+  ".#checks.x86_64-linux.native-cli-smoke",
+  ".#checks.x86_64-linux.cutover-eval",
+  ".#checks.x86_64-linux.postgres-lifecycle-eval",
+  ".#checks.x86_64-linux.application-provision-eval",
+  ".#checks.x86_64-linux.pg-backup-eval",
+  ".#checks.x86_64-linux.module-eval",
+]
+x86-native-vm = [
+  ".#checks.x86_64-linux.native-supervisor",
+  ".#checks.x86_64-linux.native-postgres-backup-service",
+  ".#checks.x86_64-linux.native-source-local-recovery",
+  ".#checks.x86_64-linux.native-postgres-crash-rollback",
+  ".#checks.x86_64-linux.native-postgres-interrupted-upgrade",
+  ".#checks.x86_64-linux.native-postgres-recovery-acceptance",
+  ".#checks.x86_64-linux.native-postgres-writer-fence",
+  ".#checks.x86_64-linux.native-application-provision",
+  ".#checks.x86_64-linux.native-application-backup",
+  ".#checks.x86_64-linux.native-application-transition",
+  ".#checks.x86_64-linux.native-application-postgres-transition",
+]
+x86-lifecycle-vm = [
+  ".#checks.x86_64-linux.btrfs-crash",
+  ".#checks.x86_64-linux.module-smoke",
+  ".#checks.x86_64-linux.postgres-crash-rollback",
+  ".#checks.x86_64-linux.postgres-interrupted-upgrade",
+  ".#checks.x86_64-linux.postgres-recovery-acceptance",
+  ".#checks.x86_64-linux.postgres-writer-fence",
+  ".#checks.x86_64-linux.application-provision",
+  ".#checks.x86_64-linux.application-backup",
+  ".#checks.x86_64-linux.application-transition",
+  ".#checks.x86_64-linux.application-postgres-transition",
+]

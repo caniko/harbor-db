@@ -3,7 +3,8 @@ name: Nix installable builds
 
 on:
   push:
-    branches: ["**"]
+    branches:
+      - "trunk"
   pull_request:
   workflow_dispatch:
 
@@ -11,167 +12,33 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  group: ${{ github.workflow_ref }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.ref_type == 'tag' && github.ref || format('refs/heads/{0}', github.event.pull_request.head.ref || github.ref_name) }}
   cancel-in-progress: true
 
 jobs:
   build:
+    name: build (${{ matrix.group }})
     runs-on: ${{ matrix.runner }}
-    name: build (${{ matrix.installable }})
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       matrix:
         include:
-          - installable: ".#checks.x86_64-linux.btrfs-crash"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#packages.aarch64-linux.storage-lifecycle-rust"
+          - group: "aarch64"
+            installables: '[".#packages.aarch64-linux.storage-lifecycle-rust",".#packages.aarch64-linux.harbor-db-test",".#checks.aarch64-linux.cargo-test",".#checks.aarch64-linux.cutover-eval",".#checks.aarch64-linux.native-cli-smoke",".#checks.aarch64-linux.native-package-eval",".#checks.aarch64-linux.native-storage-eval",".#checks.aarch64-linux.postgres-lifecycle-eval",".#checks.aarch64-linux.application-provision-eval",".#checks.aarch64-linux.module-eval"]'
             system: "aarch64-linux"
             runner: "ubuntu-24.04-arm"
-          - installable: ".#packages.aarch64-linux.harbor-db-test"
-            system: "aarch64-linux"
-            runner: "ubuntu-24.04-arm"
-          - installable: ".#checks.aarch64-linux.cargo-test"
-            system: "aarch64-linux"
-            runner: "ubuntu-24.04-arm"
-          - installable: ".#checks.aarch64-linux.cutover-eval"
-            system: "aarch64-linux"
-            runner: "ubuntu-24.04-arm"
-          - installable: ".#checks.aarch64-linux.native-cli-smoke"
-            system: "aarch64-linux"
-            runner: "ubuntu-24.04-arm"
-          - installable: ".#checks.aarch64-linux.native-package-eval"
-            system: "aarch64-linux"
-            runner: "ubuntu-24.04-arm"
-          - installable: ".#checks.aarch64-linux.native-storage-eval"
-            system: "aarch64-linux"
-            runner: "ubuntu-24.04-arm"
-          - installable: ".#checks.aarch64-linux.postgres-lifecycle-eval"
-            system: "aarch64-linux"
-            runner: "ubuntu-24.04-arm"
-          - installable: ".#checks.aarch64-linux.application-provision-eval"
-            system: "aarch64-linux"
-            runner: "ubuntu-24.04-arm"
-          - installable: ".#checks.aarch64-linux.module-eval"
-            system: "aarch64-linux"
-            runner: "ubuntu-24.04-arm"
-          - installable: ".#packages.x86_64-linux.storage-lifecycle-rust"
+          - group: "x86-lifecycle-vm"
+            installables: '[".#checks.x86_64-linux.btrfs-crash",".#checks.x86_64-linux.module-smoke",".#checks.x86_64-linux.postgres-crash-rollback",".#checks.x86_64-linux.postgres-interrupted-upgrade",".#checks.x86_64-linux.postgres-recovery-acceptance",".#checks.x86_64-linux.postgres-writer-fence",".#checks.x86_64-linux.application-provision",".#checks.x86_64-linux.application-backup",".#checks.x86_64-linux.application-transition",".#checks.x86_64-linux.application-postgres-transition"]'
             system: "x86_64-linux"
             runner: "ubuntu-24.04"
-          - installable: ".#packages.x86_64-linux.harbor-db-test"
+          - group: "x86-native-vm"
+            installables: '[".#checks.x86_64-linux.native-supervisor",".#checks.x86_64-linux.native-postgres-backup-service",".#checks.x86_64-linux.native-source-local-recovery",".#checks.x86_64-linux.native-postgres-crash-rollback",".#checks.x86_64-linux.native-postgres-interrupted-upgrade",".#checks.x86_64-linux.native-postgres-recovery-acceptance",".#checks.x86_64-linux.native-postgres-writer-fence",".#checks.x86_64-linux.native-application-provision",".#checks.x86_64-linux.native-application-backup",".#checks.x86_64-linux.native-application-transition",".#checks.x86_64-linux.native-application-postgres-transition"]'
             system: "x86_64-linux"
             runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-package-eval"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-storage-eval"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-cli-smoke"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-supervisor"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-postgres-backup-service"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-source-local-recovery"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-postgres-crash-rollback"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-postgres-interrupted-upgrade"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-postgres-recovery-acceptance"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-postgres-writer-fence"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-application-provision"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-application-backup"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-application-transition"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.native-application-postgres-transition"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#packages.x86_64-linux.storage-lifecycle"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.postgres-lifecycle-test"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.postgres-lifecycle-oracle-test"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.cutover-eval"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#packages.x86_64-linux.harbor-db-cached"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.postgres-lifecycle-eval"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.postgres-crash-rollback"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.postgres-interrupted-upgrade"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.postgres-recovery-acceptance"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.postgres-writer-fence"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.application-provision-eval"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.application-provision"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.application-backup"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.application-transition"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.application-postgres-transition"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.pg-backup-eval"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.module-eval"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.module-smoke"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.harbor-db"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.cargo-fmt"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.cargo-test"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.cargo-doc"
-            system: "x86_64-linux"
-            runner: "ubuntu-24.04"
-          - installable: ".#checks.x86_64-linux.cargo-clippy"
+          - group: "x86-rust"
+            installables: '[".#checks.x86_64-linux.cargo-fmt",".#packages.x86_64-linux.storage-lifecycle-rust",".#packages.x86_64-linux.storage-lifecycle",".#packages.x86_64-linux.harbor-db-test",".#packages.x86_64-linux.harbor-db-cached",".#checks.x86_64-linux.harbor-db",".#checks.x86_64-linux.cargo-clippy",".#checks.x86_64-linux.cargo-test",".#checks.x86_64-linux.cargo-doc",".#checks.x86_64-linux.postgres-lifecycle-test",".#checks.x86_64-linux.postgres-lifecycle-oracle-test",".#checks.x86_64-linux.native-package-eval",".#checks.x86_64-linux.native-storage-eval",".#checks.x86_64-linux.native-cli-smoke",".#checks.x86_64-linux.cutover-eval",".#checks.x86_64-linux.postgres-lifecycle-eval",".#checks.x86_64-linux.application-provision-eval",".#checks.x86_64-linux.pg-backup-eval",".#checks.x86_64-linux.module-eval"]'
             system: "x86_64-linux"
             runner: "ubuntu-24.04"
     env:
@@ -180,15 +47,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - name: Prepare Nix build evidence
-        env:
-          INSTALLABLE: ${{ matrix.installable }}
         run: |
           SIMIT_NIX_BUILD_RESULTS="$RUNNER_TEMP/simit-nix-build-${{ strategy.job-index }}"
-          printf '%s\n' "SIMIT_NIX_BUILD_RESULTS=$SIMIT_NIX_BUILD_RESULTS" >> "$GITHUB_ENV"
           mkdir -p "$SIMIT_NIX_BUILD_RESULTS"
+          printf '%s\n' "SIMIT_NIX_BUILD_RESULTS=$SIMIT_NIX_BUILD_RESULTS" >> "$GITHUB_ENV"
           git rev-parse HEAD > "$SIMIT_NIX_BUILD_RESULTS/revision"
-          printf '%s\n' "$INSTALLABLE" > "$SIMIT_NIX_BUILD_RESULTS/installable"
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
 
@@ -200,6 +68,8 @@ jobs:
       - name: Verify native Nix runner
         env:
           EXPECTED_NIX_SYSTEM: ${{ matrix.system }}
+          BASH_ENV: ''
+          ENV: ''
         run: |
           set -euo pipefail
           machine="$(uname -m)"
@@ -230,6 +100,29 @@ jobs:
             exit 1
           fi
           printf 'Verified native hardware %s and Nix system %s\n' "$actual_system" "$nix_system"
+      - name: Provision grouped-build Rust engine
+        shell: bash
+        env:
+          SIMIT_CI_ENGINE_REVISION: ${{ vars.SIMIT_CI_ENGINE_REVISION }}
+          BASH_ENV: ''
+          ENV: ''
+          NIX_CONFIG: 'experimental-features = nix-command flakes'
+          NIX_USER_CONF_FILES: /dev/null
+          NIX_PATH: ''
+        run: |
+          [[ "$SIMIT_CI_ENGINE_REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo 'Enroll an immutable SIMIT_CI_ENGINE_REVISION containing ci nix-group' >&2; exit 1; }
+          case "$(uname -s):$(uname -m)" in
+            Linux:x86_64|Linux:aarch64|Linux:arm64|Darwin:arm64|Darwin:aarch64) ;;
+            *) echo 'unsupported grouped engine runner system' >&2; exit 1 ;;
+          esac
+          engine_path=$(env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_OAUTH_TOKEN -u ATTIC_TOKEN -u CACHIX_AUTH_TOKEN -u CACHIX_SIGNING_KEY nix build --no-link --no-update-lock-file --print-out-paths --option accept-flake-config false --option access-tokens '' --option substituters https://cache.nixos.org "github:caniko/simit/$SIMIT_CI_ENGINE_REVISION#default")
+          [[ "$engine_path" =~ ^/nix/store/[0-9a-z]{32}-[A-Za-z0-9+._?=-]+$ ]] || { echo 'Invalid engine output inventory' >&2; exit 1; }
+          test -x "$engine_path/bin/simit"
+          "$engine_path/bin/simit" ci nix-group --help > /dev/null
+          printf '%s\n' "$SIMIT_CI_ENGINE_REVISION" > "$SIMIT_NIX_BUILD_RESULTS/engine-source-revision"
+          engine_digest=$(nix hash file --type sha256 --base16 "$engine_path/bin/simit")
+          printf '%s  %s\n' "$engine_digest" "$engine_path/bin/simit" > "$SIMIT_NIX_BUILD_RESULTS/engine-executable.sha256"
+          printf '%s\n' "SIMIT_CI_ENGINE=$engine_path/bin/simit" >> "$GITHUB_ENV"
       - name: Enable hosted KVM
         if: ${{ matrix.system == 'x86_64-linux' }}
         run: |
@@ -252,18 +145,27 @@ jobs:
           sudo systemctl restart nix-daemon.service
           nix config show sandbox-paths | grep -F /var/cache/sccache
 
-      - name: Build ${{ matrix.installable }}
+      - name: Build Nix group
+        shell: bash
         env:
-          INSTALLABLE: ${{ matrix.installable }}
+          SIMIT_NIX_GROUP: ${{ matrix.group }}
         run: |
-          set -euo pipefail
-          exec 3> >(tee "$SIMIT_NIX_BUILD_RESULTS/build.log" >&2)
-          log_pid=$!
-          status=0
-          nix build --no-link --no-update-lock-file --max-jobs 1 --cores 2 --json "$INSTALLABLE" 2>&3 | tee "$SIMIT_NIX_BUILD_RESULTS/result.json" || status=$?
-          exec 3>&-
-          wait "$log_pid"
-          exit "$status"
+          case "$SIMIT_NIX_GROUP" in
+            aarch64)
+              (umask 077; set -C; printf '%s' '{"schema":"simit.nix-group-spec.v1","members":[".#packages.aarch64-linux.storage-lifecycle-rust",".#packages.aarch64-linux.harbor-db-test",".#checks.aarch64-linux.cargo-test",".#checks.aarch64-linux.cutover-eval",".#checks.aarch64-linux.native-cli-smoke",".#checks.aarch64-linux.native-package-eval",".#checks.aarch64-linux.native-storage-eval",".#checks.aarch64-linux.postgres-lifecycle-eval",".#checks.aarch64-linux.application-provision-eval",".#checks.aarch64-linux.module-eval"],"plan":[".#checks.x86_64-linux.btrfs-crash",".#packages.aarch64-linux.storage-lifecycle-rust",".#packages.aarch64-linux.harbor-db-test",".#checks.aarch64-linux.cargo-test",".#checks.aarch64-linux.cutover-eval",".#checks.aarch64-linux.native-cli-smoke",".#checks.aarch64-linux.native-package-eval",".#checks.aarch64-linux.native-storage-eval",".#checks.aarch64-linux.postgres-lifecycle-eval",".#checks.aarch64-linux.application-provision-eval",".#checks.aarch64-linux.module-eval",".#packages.x86_64-linux.storage-lifecycle-rust",".#packages.x86_64-linux.harbor-db-test",".#checks.x86_64-linux.native-package-eval",".#checks.x86_64-linux.native-storage-eval",".#checks.x86_64-linux.native-cli-smoke",".#checks.x86_64-linux.native-supervisor",".#checks.x86_64-linux.native-postgres-backup-service",".#checks.x86_64-linux.native-source-local-recovery",".#checks.x86_64-linux.native-postgres-crash-rollback",".#checks.x86_64-linux.native-postgres-interrupted-upgrade",".#checks.x86_64-linux.native-postgres-recovery-acceptance",".#checks.x86_64-linux.native-postgres-writer-fence",".#checks.x86_64-linux.native-application-provision",".#checks.x86_64-linux.native-application-backup",".#checks.x86_64-linux.native-application-transition",".#checks.x86_64-linux.native-application-postgres-transition",".#packages.x86_64-linux.storage-lifecycle",".#checks.x86_64-linux.postgres-lifecycle-test",".#checks.x86_64-linux.postgres-lifecycle-oracle-test",".#checks.x86_64-linux.cutover-eval",".#packages.x86_64-linux.harbor-db-cached",".#checks.x86_64-linux.postgres-lifecycle-eval",".#checks.x86_64-linux.postgres-crash-rollback",".#checks.x86_64-linux.postgres-interrupted-upgrade",".#checks.x86_64-linux.postgres-recovery-acceptance",".#checks.x86_64-linux.postgres-writer-fence",".#checks.x86_64-linux.application-provision-eval",".#checks.x86_64-linux.application-provision",".#checks.x86_64-linux.application-backup",".#checks.x86_64-linux.application-transition",".#checks.x86_64-linux.application-postgres-transition",".#checks.x86_64-linux.pg-backup-eval",".#checks.x86_64-linux.module-eval",".#checks.x86_64-linux.module-smoke",".#checks.x86_64-linux.harbor-db",".#checks.x86_64-linux.cargo-fmt",".#checks.x86_64-linux.cargo-test",".#checks.x86_64-linux.cargo-doc",".#checks.x86_64-linux.cargo-clippy"],"check_systems":[],"limits":["--max-jobs","1","--cores","4"],"post_build":[],"post_build_always":[],"fresh_installables":[]}' > "$SIMIT_NIX_BUILD_RESULTS/group-spec.json")
+              ;;
+            x86-lifecycle-vm)
+              (umask 077; set -C; printf '%s' '{"schema":"simit.nix-group-spec.v1","members":[".#checks.x86_64-linux.btrfs-crash",".#checks.x86_64-linux.module-smoke",".#checks.x86_64-linux.postgres-crash-rollback",".#checks.x86_64-linux.postgres-interrupted-upgrade",".#checks.x86_64-linux.postgres-recovery-acceptance",".#checks.x86_64-linux.postgres-writer-fence",".#checks.x86_64-linux.application-provision",".#checks.x86_64-linux.application-backup",".#checks.x86_64-linux.application-transition",".#checks.x86_64-linux.application-postgres-transition"],"plan":[".#checks.x86_64-linux.btrfs-crash",".#packages.aarch64-linux.storage-lifecycle-rust",".#packages.aarch64-linux.harbor-db-test",".#checks.aarch64-linux.cargo-test",".#checks.aarch64-linux.cutover-eval",".#checks.aarch64-linux.native-cli-smoke",".#checks.aarch64-linux.native-package-eval",".#checks.aarch64-linux.native-storage-eval",".#checks.aarch64-linux.postgres-lifecycle-eval",".#checks.aarch64-linux.application-provision-eval",".#checks.aarch64-linux.module-eval",".#packages.x86_64-linux.storage-lifecycle-rust",".#packages.x86_64-linux.harbor-db-test",".#checks.x86_64-linux.native-package-eval",".#checks.x86_64-linux.native-storage-eval",".#checks.x86_64-linux.native-cli-smoke",".#checks.x86_64-linux.native-supervisor",".#checks.x86_64-linux.native-postgres-backup-service",".#checks.x86_64-linux.native-source-local-recovery",".#checks.x86_64-linux.native-postgres-crash-rollback",".#checks.x86_64-linux.native-postgres-interrupted-upgrade",".#checks.x86_64-linux.native-postgres-recovery-acceptance",".#checks.x86_64-linux.native-postgres-writer-fence",".#checks.x86_64-linux.native-application-provision",".#checks.x86_64-linux.native-application-backup",".#checks.x86_64-linux.native-application-transition",".#checks.x86_64-linux.native-application-postgres-transition",".#packages.x86_64-linux.storage-lifecycle",".#checks.x86_64-linux.postgres-lifecycle-test",".#checks.x86_64-linux.postgres-lifecycle-oracle-test",".#checks.x86_64-linux.cutover-eval",".#packages.x86_64-linux.harbor-db-cached",".#checks.x86_64-linux.postgres-lifecycle-eval",".#checks.x86_64-linux.postgres-crash-rollback",".#checks.x86_64-linux.postgres-interrupted-upgrade",".#checks.x86_64-linux.postgres-recovery-acceptance",".#checks.x86_64-linux.postgres-writer-fence",".#checks.x86_64-linux.application-provision-eval",".#checks.x86_64-linux.application-provision",".#checks.x86_64-linux.application-backup",".#checks.x86_64-linux.application-transition",".#checks.x86_64-linux.application-postgres-transition",".#checks.x86_64-linux.pg-backup-eval",".#checks.x86_64-linux.module-eval",".#checks.x86_64-linux.module-smoke",".#checks.x86_64-linux.harbor-db",".#checks.x86_64-linux.cargo-fmt",".#checks.x86_64-linux.cargo-test",".#checks.x86_64-linux.cargo-doc",".#checks.x86_64-linux.cargo-clippy"],"check_systems":[],"limits":["--max-jobs","1","--cores","4"],"post_build":[],"post_build_always":[],"fresh_installables":[]}' > "$SIMIT_NIX_BUILD_RESULTS/group-spec.json")
+              ;;
+            x86-native-vm)
+              (umask 077; set -C; printf '%s' '{"schema":"simit.nix-group-spec.v1","members":[".#checks.x86_64-linux.native-supervisor",".#checks.x86_64-linux.native-postgres-backup-service",".#checks.x86_64-linux.native-source-local-recovery",".#checks.x86_64-linux.native-postgres-crash-rollback",".#checks.x86_64-linux.native-postgres-interrupted-upgrade",".#checks.x86_64-linux.native-postgres-recovery-acceptance",".#checks.x86_64-linux.native-postgres-writer-fence",".#checks.x86_64-linux.native-application-provision",".#checks.x86_64-linux.native-application-backup",".#checks.x86_64-linux.native-application-transition",".#checks.x86_64-linux.native-application-postgres-transition"],"plan":[".#checks.x86_64-linux.btrfs-crash",".#packages.aarch64-linux.storage-lifecycle-rust",".#packages.aarch64-linux.harbor-db-test",".#checks.aarch64-linux.cargo-test",".#checks.aarch64-linux.cutover-eval",".#checks.aarch64-linux.native-cli-smoke",".#checks.aarch64-linux.native-package-eval",".#checks.aarch64-linux.native-storage-eval",".#checks.aarch64-linux.postgres-lifecycle-eval",".#checks.aarch64-linux.application-provision-eval",".#checks.aarch64-linux.module-eval",".#packages.x86_64-linux.storage-lifecycle-rust",".#packages.x86_64-linux.harbor-db-test",".#checks.x86_64-linux.native-package-eval",".#checks.x86_64-linux.native-storage-eval",".#checks.x86_64-linux.native-cli-smoke",".#checks.x86_64-linux.native-supervisor",".#checks.x86_64-linux.native-postgres-backup-service",".#checks.x86_64-linux.native-source-local-recovery",".#checks.x86_64-linux.native-postgres-crash-rollback",".#checks.x86_64-linux.native-postgres-interrupted-upgrade",".#checks.x86_64-linux.native-postgres-recovery-acceptance",".#checks.x86_64-linux.native-postgres-writer-fence",".#checks.x86_64-linux.native-application-provision",".#checks.x86_64-linux.native-application-backup",".#checks.x86_64-linux.native-application-transition",".#checks.x86_64-linux.native-application-postgres-transition",".#packages.x86_64-linux.storage-lifecycle",".#checks.x86_64-linux.postgres-lifecycle-test",".#checks.x86_64-linux.postgres-lifecycle-oracle-test",".#checks.x86_64-linux.cutover-eval",".#packages.x86_64-linux.harbor-db-cached",".#checks.x86_64-linux.postgres-lifecycle-eval",".#checks.x86_64-linux.postgres-crash-rollback",".#checks.x86_64-linux.postgres-interrupted-upgrade",".#checks.x86_64-linux.postgres-recovery-acceptance",".#checks.x86_64-linux.postgres-writer-fence",".#checks.x86_64-linux.application-provision-eval",".#checks.x86_64-linux.application-provision",".#checks.x86_64-linux.application-backup",".#checks.x86_64-linux.application-transition",".#checks.x86_64-linux.application-postgres-transition",".#checks.x86_64-linux.pg-backup-eval",".#checks.x86_64-linux.module-eval",".#checks.x86_64-linux.module-smoke",".#checks.x86_64-linux.harbor-db",".#checks.x86_64-linux.cargo-fmt",".#checks.x86_64-linux.cargo-test",".#checks.x86_64-linux.cargo-doc",".#checks.x86_64-linux.cargo-clippy"],"check_systems":[],"limits":["--max-jobs","1","--cores","4"],"post_build":[],"post_build_always":[],"fresh_installables":[]}' > "$SIMIT_NIX_BUILD_RESULTS/group-spec.json")
+              ;;
+            x86-rust)
+              (umask 077; set -C; printf '%s' '{"schema":"simit.nix-group-spec.v1","members":[".#checks.x86_64-linux.cargo-fmt",".#packages.x86_64-linux.storage-lifecycle-rust",".#packages.x86_64-linux.storage-lifecycle",".#packages.x86_64-linux.harbor-db-test",".#packages.x86_64-linux.harbor-db-cached",".#checks.x86_64-linux.harbor-db",".#checks.x86_64-linux.cargo-clippy",".#checks.x86_64-linux.cargo-test",".#checks.x86_64-linux.cargo-doc",".#checks.x86_64-linux.postgres-lifecycle-test",".#checks.x86_64-linux.postgres-lifecycle-oracle-test",".#checks.x86_64-linux.native-package-eval",".#checks.x86_64-linux.native-storage-eval",".#checks.x86_64-linux.native-cli-smoke",".#checks.x86_64-linux.cutover-eval",".#checks.x86_64-linux.postgres-lifecycle-eval",".#checks.x86_64-linux.application-provision-eval",".#checks.x86_64-linux.pg-backup-eval",".#checks.x86_64-linux.module-eval"],"plan":[".#checks.x86_64-linux.btrfs-crash",".#packages.aarch64-linux.storage-lifecycle-rust",".#packages.aarch64-linux.harbor-db-test",".#checks.aarch64-linux.cargo-test",".#checks.aarch64-linux.cutover-eval",".#checks.aarch64-linux.native-cli-smoke",".#checks.aarch64-linux.native-package-eval",".#checks.aarch64-linux.native-storage-eval",".#checks.aarch64-linux.postgres-lifecycle-eval",".#checks.aarch64-linux.application-provision-eval",".#checks.aarch64-linux.module-eval",".#packages.x86_64-linux.storage-lifecycle-rust",".#packages.x86_64-linux.harbor-db-test",".#checks.x86_64-linux.native-package-eval",".#checks.x86_64-linux.native-storage-eval",".#checks.x86_64-linux.native-cli-smoke",".#checks.x86_64-linux.native-supervisor",".#checks.x86_64-linux.native-postgres-backup-service",".#checks.x86_64-linux.native-source-local-recovery",".#checks.x86_64-linux.native-postgres-crash-rollback",".#checks.x86_64-linux.native-postgres-interrupted-upgrade",".#checks.x86_64-linux.native-postgres-recovery-acceptance",".#checks.x86_64-linux.native-postgres-writer-fence",".#checks.x86_64-linux.native-application-provision",".#checks.x86_64-linux.native-application-backup",".#checks.x86_64-linux.native-application-transition",".#checks.x86_64-linux.native-application-postgres-transition",".#packages.x86_64-linux.storage-lifecycle",".#checks.x86_64-linux.postgres-lifecycle-test",".#checks.x86_64-linux.postgres-lifecycle-oracle-test",".#checks.x86_64-linux.cutover-eval",".#packages.x86_64-linux.harbor-db-cached",".#checks.x86_64-linux.postgres-lifecycle-eval",".#checks.x86_64-linux.postgres-crash-rollback",".#checks.x86_64-linux.postgres-interrupted-upgrade",".#checks.x86_64-linux.postgres-recovery-acceptance",".#checks.x86_64-linux.postgres-writer-fence",".#checks.x86_64-linux.application-provision-eval",".#checks.x86_64-linux.application-provision",".#checks.x86_64-linux.application-backup",".#checks.x86_64-linux.application-transition",".#checks.x86_64-linux.application-postgres-transition",".#checks.x86_64-linux.pg-backup-eval",".#checks.x86_64-linux.module-eval",".#checks.x86_64-linux.module-smoke",".#checks.x86_64-linux.harbor-db",".#checks.x86_64-linux.cargo-fmt",".#checks.x86_64-linux.cargo-test",".#checks.x86_64-linux.cargo-doc",".#checks.x86_64-linux.cargo-clippy"],"check_systems":[],"limits":["--max-jobs","1","--cores","4"],"post_build":[],"post_build_always":[],"fresh_installables":[]}' > "$SIMIT_NIX_BUILD_RESULTS/group-spec.json")
+              ;;
+            *) echo 'Unknown Nix execution group' >&2; exit 1 ;;
+          esac
+          "$SIMIT_CI_ENGINE" ci nix-group --spec "$SIMIT_NIX_BUILD_RESULTS/group-spec.json"
       - name: Upload Nix build evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -271,6 +173,6 @@ jobs:
         with:
           name: nix-build-${{ strategy.job-index }}
           retention-days: 14
-          if-no-files-found: warn
+          if-no-files-found: error
           path: |
             ${{ runner.temp }}/simit-nix-build-${{ strategy.job-index }}
