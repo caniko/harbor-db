@@ -357,13 +357,15 @@ fn selected_backup(
         None,
     ))
 }
-fn verify_backup(config: &Value, directory: &Path, leases: &[RawFd]) -> Result<()> {
+fn verify_timeout(config: &Value) -> Result<Duration> {
     let seconds = config["recovery"]["verify_timeout_seconds"]
         .as_f64()
         .filter(|v| *v > 0.0)
         .ok_or_else(|| invalid("invalid backup verification timeout"))?;
-    let timeout = Duration::try_from_secs_f64(seconds)
-        .map_err(|_| invalid("invalid backup verification timeout"))?;
+    Duration::try_from_secs_f64(seconds).map_err(|_| invalid("invalid backup verification timeout"))
+}
+fn verify_backup(config: &Value, directory: &Path, leases: &[RawFd]) -> Result<()> {
+    let timeout = verify_timeout(config)?;
     let mut spec = process::CommandSpec::new(vec![
         path(config, "package")?
             .join("bin/pg_verifybackup")
@@ -402,6 +404,11 @@ pub fn query_leased(
     env.insert("PGCONNECT_TIMEOUT".into(), "5".into());
     spec.environment = Some(env);
     spec.leases = leases.to_vec();
+    // Record checks hash whole relations; the generic 60 s bound kills them
+    // on large clusters. Recovery configs carry the operator's bound.
+    if !config["recovery"]["verify_timeout_seconds"].is_null() {
+        spec.timeout = verify_timeout(config)?;
+    }
     process::text(&process::execute(&spec)?)
 }
 /// One PostgreSQL-parsed statement inside a read-only boundary. Custody workers
@@ -780,6 +787,16 @@ pub(crate) fn storage_identities_until(
     }
     Ok(())
 }
+/// The source primary's path names storage on the certified host. On an
+/// independent executor it is either absent or, when the executor runs its own
+/// cluster there, unsearchable; a restore the executor can write cannot live
+/// inside a tree it cannot search, so neither can alias the copy.
+fn foreign_primary(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+    )
+}
 fn isolated_restore(restored: &Path, authoritative: &Path, backup: &Path) -> Result<()> {
     let restored_root = fs::symlink_metadata(restored)?;
     for root in [authoritative, backup] {
@@ -793,15 +810,14 @@ fn isolated_restore(restored: &Path, authoritative: &Path, backup: &Path) -> Res
                 ));
             }
             Ok(_) => {}
-            Err(error) if root == authoritative && error.kind() == std::io::ErrorKind::NotFound => {
-            }
+            Err(error) if root == authoritative && foreign_primary(&error) => {}
             Err(error) => return Err(error.into()),
         }
     }
     let mut primary = BTreeSet::new();
     match fs::symlink_metadata(authoritative) {
         Ok(_) => storage_identities(authoritative, &mut primary, true)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if foreign_primary(&error) => {}
         Err(error) => return Err(error.into()),
     }
     let mut protected = BTreeSet::new();
@@ -1501,6 +1517,25 @@ pub fn prepare_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_executor_tolerates_an_unsearchable_source_primary_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let (restored, backup, locked) = (
+            root.path().join("restored"),
+            root.path().join("backup"),
+            root.path().join("executor-postgresql"),
+        );
+        for dir in [&restored, &backup, &locked] {
+            fs::create_dir(dir).unwrap();
+        }
+        fs::write(restored.join("PG_VERSION"), "17").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = isolated_restore(&restored, &locked.join("17"), &backup);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+        result.unwrap();
+    }
 
     #[test]
     fn managed_backup_outlives_the_short_probe_deadline() {

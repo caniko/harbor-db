@@ -745,6 +745,9 @@ except ValueError as error: assert 'redirected or special' in str(error)
 else: raise AssertionError('redirected restoration admitted')
 (restored/'redirected-config').unlink()
 recovery.isolated_restore(restored,root/'data',root/'backup/base/base-1')
+locked=root/'executor-postgresql'; locked.mkdir(); locked.chmod(0)
+try: recovery.isolated_restore(restored,locked/'17',root/'backup/base/base-1')
+finally: locked.chmod(0o700)
 (restored/'shared-config').hardlink_to(configuration)
 try: recovery.isolated_restore(restored,root/'data',root/'backup/base/base-1')
 except ValueError as error: assert 'shared storage' in str(error)
@@ -1642,6 +1645,47 @@ fn queries_are_local_read_only_normalized_and_workers_retain_explicit_leases() {
         .is_err()
     );
     assert!(recovery::query(&f.config, Path::new("/local/socket"), 0, "app", "SELECT 1").is_err());
+}
+
+#[test]
+fn record_queries_use_the_recovery_verification_bound_in_both_engines() {
+    let _workers = WORKERS.lock().unwrap();
+    let f = Fixture::new();
+    executable(&f.p("package/bin/psql"), "sleep 2\nprintf 'rows\\n'");
+    let mut short = f.config.clone();
+    short["recovery"]["verify_timeout_seconds"] = json!(0.5);
+    assert!(recovery::query(&short, Path::new("/local/socket"), 5432, "app", "SELECT 1").is_err());
+    let mut long = f.config.clone();
+    long["recovery"]["verify_timeout_seconds"] = json!(30);
+    assert_eq!(
+        recovery::query(&long, Path::new("/local/socket"), 5432, "app", "SELECT 1").unwrap(),
+        "rows\n"
+    );
+    let script = r#"import json,subprocess,sys
+from harbor_db import recovery
+c=json.loads(sys.argv[1])
+c['recovery']['verify_timeout_seconds']=0.5
+try: recovery.query(c,'/local/socket',5432,'app','SELECT 1')
+except subprocess.TimeoutExpired: pass
+else: raise AssertionError('record query outlived the recovery bound')
+c['recovery']['verify_timeout_seconds']=30
+assert recovery.query(c,'/local/socket',5432,'app','SELECT 1')=='rows\n'
+"#;
+    let mut spec = harbor_db::storage::process::CommandSpec::new(vec![
+        "python3".into(),
+        "-B".into(),
+        "-c".into(),
+        script.into(),
+        f.config.to_string(),
+    ]);
+    spec.environment = Some(std::collections::BTreeMap::from([
+        (
+            "PYTHONPATH".into(),
+            format!("{}/python", env!("CARGO_MANIFEST_DIR")),
+        ),
+        ("PATH".into(), std::env::var("PATH").unwrap()),
+    ]));
+    harbor_db::storage::process::execute(&spec).unwrap();
 }
 
 #[test]

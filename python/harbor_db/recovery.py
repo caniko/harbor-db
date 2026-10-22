@@ -250,8 +250,10 @@ def query(config, socket_dir, port, database, sql):
     argv = query_argv(config, socket_dir, port, database, sql)
     env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
     env["PGCONNECT_TIMEOUT"] = "5"
+    # Record checks hash whole relations; recovery configs carry the bound.
+    timeout = (config.get("recovery") or {}).get("verify_timeout_seconds") or 60
     return postgres.run(
-        argv, env=env, capture_output=True, text=True, timeout=60
+        argv, env=env, capture_output=True, text=True, timeout=timeout
     ).stdout
 
 
@@ -521,7 +523,9 @@ def isolated_restore(restored, authoritative, backup):
     for root in (authoritative, backup):
         try:
             info = root.lstat()
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError):
+            # The source primary's path names storage on the certified host;
+            # an independent executor may find it absent or unsearchable.
             if root == authoritative:
                 continue
             raise
@@ -532,7 +536,7 @@ def isolated_restore(restored, authoritative, backup):
     primary = set()
     try:
         authoritative.lstat()
-    except FileNotFoundError:
+    except (FileNotFoundError, PermissionError):
         pass
     else:
         storage_identities(authoritative, primary, primary=True)
