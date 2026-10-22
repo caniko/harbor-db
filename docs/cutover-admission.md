@@ -182,3 +182,33 @@ that an identically incomplete source and restore contain all referenced files.
 The default early budget is 30 seconds total; exceeding it blocks admission. The
 healthy-local sub-five-second target must be measured against the real inventory.
 The activation/deep-verification budget is separate and bounded at 900 seconds.
+
+## Rollout CLI
+
+`services.harbor-db.postgresql.rollout` (opt-in) renders
+`/etc/harbor-db/postgresql-rollout.json`. It binds the fenced maintenance
+manifest, the preparation argv, the client inventory (defaults to
+`writerFence.blockedUnits`), setup units, WAL receivers, publishers to pause and
+the independent executor. One resumable journal under `stateDir` sequences the
+existing verbs:
+
+```console
+# harbor-db-postgres --config /etc/harbor-db/postgresql-rollout.json rollout next
+```
+
+| Step | Phase after | What it does |
+| --- | --- | --- |
+| `fence` | `fenced` | inhibit startup, pause publishers, stop clients and the primary, open the fence, start the primary, **wait for setup units to settle**, inspect the live fence |
+| `prepare` | `prepared` | run `prepare-recovery` with receivers stopped; stops at the independent-certification hand-off and records the export and its SHA-256 |
+| `certify` | (executor) | as the declared unprivileged executor, run its restore/certify argv on the transported export |
+| `import --receipt --sha256` | `imported` | stage the digest-verified receipt and re-run preparation to admission |
+| `adopt` | `adopted` | re-verify live records against the accepted snapshot, then `adopt-live` and `check` |
+| `activated` | `activated` | record that the candidate generation is active under the fence |
+| `thaw --acceptance` | `thawed` | verify a root-owned acceptance bound to host, primary, manifest, fence token and snapshot; close the fence, restart the primary and clients, lift the pause |
+| `abort` | `aborted` | before activation only: close (or confirm closed) the fence, restart the primary and recorded clients, lift the pause; evidence is kept |
+
+`rollout next` performs the next local step or prints the exact external action
+(executor certification, activation, thaw), and `rollout status` shows the
+journal. Every step is idempotent; rerun it after an interruption. Steps are
+bound to the manifest that opened the journal, but `abort` accepts another
+manifest of the same primary so a superseded candidate can always be unwound.

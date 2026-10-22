@@ -71,6 +71,21 @@
       }
     ];
   };
+  withRollout = withPreparation.extendModules {
+    modules = [
+      {
+        services.harbor-db.postgresql.rollout = {
+          exportRoot = "/srv/export";
+          pausedPublishers = ["fixture-backup.service"];
+          executor = {
+            host = "executor";
+            user = "operator";
+            command = ["/fixture/certify"];
+          };
+        };
+      }
+    ];
+  };
   preparationHook = pkgs.writeText "recovery-preparation-hook" withPreparation.config.system.preSwitchChecks."00-0-harbor-db-postgresql-prepare";
   sourceLocalPolicy = {
     prepare,
@@ -320,6 +335,28 @@ in
         in
           manifest.startup_inhibition.setup_units == ["postgresql-setup.service"];
         message = "Persistent startup inhibition must cover setup so a legacy switch cannot run setup SQL against the inhibited primary.";
+      }
+      {
+        name = "rollout-coordinator-manifest";
+        assertion = let
+          etc = withRollout.config.environment.etc;
+          rollout = builtins.fromJSON (builtins.unsafeDiscardStringContext etc."harbor-db/postgresql-rollout.json".source.text);
+        in
+          !(eval.config.environment.etc ? "harbor-db/postgresql-rollout.json")
+          && rollout.system_identifier == "12345"
+          && rollout.clients == ["fixture-client.service"]
+          && rollout.setup_units == ["postgresql-setup.service"]
+          && rollout.paused_publishers == ["fixture-backup.service"]
+          && rollout.import_slot == "/srv/import/off-host.json"
+          && rollout.executor.command == ["/fixture/certify"]
+          && lib.last rollout.prepare.provision_directories
+          == {
+            path = "/srv/export";
+            group = "users";
+            mode = 488;
+          }
+          && rollout.maintenance == builtins.unsafeDiscardStringContext (toString etc."harbor-db/postgresql.json".source);
+        message = "The opt-in rollout manifest must bind the fenced primary, client inventory, setup units, publishers and executor.";
       }
       {
         name = "managed-preactivation-preparation";

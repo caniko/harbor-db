@@ -15,6 +15,7 @@ pub mod login_shell;
 pub mod pg_core;
 pub mod postgres;
 pub mod postgres_drill;
+pub mod postgres_rollout;
 pub mod process;
 pub mod provision;
 pub mod recovery;

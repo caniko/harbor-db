@@ -91,6 +91,50 @@
     restore_command = preparation.restoreCommand;
     export_command = preparation.exportCommand;
   });
+  inherit (cfg) rollout;
+  rolloutManifest = pkgs.writeText "harbor-db-postgresql-rollout.json" (builtins.toJSON {
+    version = 1;
+    host = config.networking.hostName;
+    system_identifier = cfg.recovery.systemIdentifier;
+    harbor = lib.getExe cfg.package;
+    systemctl = "${pkgs.systemd}/bin/systemctl";
+    runuser = "${pkgs.util-linux}/bin/runuser";
+    systemd_run = "${pkgs.systemd}/bin/systemd-run";
+    maintenance = toString rollout.maintenance;
+    preparation = toString preparationManifest;
+    state_dir = rollout.stateDir;
+    socket_dir = preparation.socketDir;
+    inherit (preparation) port;
+    inherit (rollout) clients;
+    retired_clients = rollout.retiredClients;
+    setup_units = cfg.writerFence.setupUnits;
+    receiver_units = rollout.receiverUnits;
+    paused_publishers = rollout.pausedPublishers;
+    setup_settle_seconds = rollout.setupSettleSeconds;
+    prepare = {
+      export_root = rollout.exportRoot;
+      read_write_paths = preparation.readWritePaths;
+      required_mounts = cfg.requiredMounts ++ preparation.requiredMounts;
+      supplementary_groups = preparation.supplementaryGroups;
+      provision_directories =
+        map (path: {
+          inherit path;
+          group = "postgres";
+          mode = 448;
+        })
+        preparation.provisionDirectories
+        ++ [
+          {
+            path = rollout.exportRoot;
+            group = rollout.exportGroup;
+            mode = 488;
+          }
+        ];
+    };
+    import_slot = preparation.offHostReceiptImportFile;
+    executor = {inherit (rollout.executor) host user command;};
+    inherit (rollout) cutover;
+  });
 in {
   imports = [./postgres-writer-clients.nix ./storage-package-argument.nix];
   options.services.harbor-db.postgresql = {
@@ -287,6 +331,78 @@ in {
         };
       });
     };
+    rollout = mkOption {
+      default = null;
+      description = ''
+        Opt-in first-rollout coordinator manifest for `harbor-db-postgres
+        --config /etc/harbor-db/postgresql-rollout.json rollout ...`. It sequences
+        the writer fence, preparation, independent certification hand-off,
+        adoption and thaw (or abort) from one resumable journal.
+      '';
+      type = types.nullOr (types.submodule {
+        options = {
+          maintenance = mkOption {
+            type = types.path;
+            default = manifest;
+            defaultText = "the module's PostgreSQL manifest";
+            description = "Fenced maintenance manifest; its recovery must require the writer fence.";
+          };
+          stateDir = mkOption {
+            type = types.strMatching "/.*";
+            default = "/var/lib/harbor-db/postgresql-rollout";
+          };
+          clients = mkOption {
+            type = types.listOf types.nonEmptyStr;
+            default = cfg.writerFence.blockedUnits;
+            defaultText = "services.harbor-db.postgresql.writerFence.blockedUnits";
+            description = "Writer services stopped by the fence and restarted by thaw/abort (template `name@.service` allowed).";
+          };
+          retiredClients = mkOption {
+            type = types.listOf types.nonEmptyStr;
+            default = [];
+            description = "Legacy writers that are stopped but never restarted.";
+          };
+          receiverUnits = mkOption {
+            type = types.listOf types.nonEmptyStr;
+            default = [];
+            description = "Installed WAL receivers stopped around preparation and restored afterwards.";
+          };
+          pausedPublishers = mkOption {
+            type = types.listOf types.nonEmptyStr;
+            default = [];
+            description = "Backup/evidence publishers skipped (via a drop-in condition) for the whole rollout.";
+          };
+          setupSettleSeconds = mkOption {
+            type = types.ints.positive;
+            default = 120;
+            description = "Bound for setup units to finish after a primary start before fence inspection.";
+          };
+          exportRoot = mkOption {type = types.strMatching "/.*";};
+          exportGroup = mkOption {
+            type = types.nonEmptyStr;
+            default = "users";
+          };
+          executor = {
+            host = mkOption {type = types.nonEmptyStr;};
+            user = mkOption {type = types.nonEmptyStr;};
+            command = mkOption {
+              type = types.listOf types.nonEmptyStr;
+              description = "Independent restore/certify argv; `--export/--export-sha256/--workspace` are appended.";
+            };
+          };
+          cutover = mkOption {
+            type = types.nullOr (types.submodule {
+              options = {
+                checker = mkOption {type = types.strMatching "/.*";};
+                contract = mkOption {type = types.strMatching "/.*";};
+              };
+            });
+            default = null;
+            description = "Optional cutover checker run in `certify` phase before thaw.";
+          };
+        };
+      });
+    };
     upgrade = mkOption {
       default = null;
       description = "Explicit offline copy upgrade contract. Never runs automatically at boot.";
@@ -424,12 +540,17 @@ in {
         message = "Managed recovery preparation requires normalized absolute writable, provisioned and protected paths before containment checks.";
       }
       {
+        assertion = rollout == null || (cfg.recovery != null && preparation != null && preparation.offHostReceiptImportFile != null && rollout.clients != []);
+        message = "The rollout coordinator needs recovery, recoveryPreparation with an off-host receipt import file, and an explicit client inventory.";
+      }
+      {
         assertion = preparation == null || lib.all (path: lib.any (writable: path == writable || lib.hasPrefix "${writable}/" path) preparation.readWritePaths) preparation.provisionDirectories;
         message = "Managed recovery provisioning must stay within the explicit writable preparation paths.";
       }
     ];
     environment.systemPackages = [cfg.package];
     environment.etc."harbor-db/postgresql.json".source = manifest;
+    environment.etc."harbor-db/postgresql-rollout.json" = mkIf (rollout != null) {source = rolloutManifest;};
     systemd.tmpfiles.rules = ["d ${cfg.stateDir} 0700 postgres postgres -"];
     system.preSwitchChecks = lib.mkMerge [
       (lib.mkIf (preparation != null) {
