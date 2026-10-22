@@ -414,13 +414,13 @@ the consumer's next explicitly coordinated consistency window.
 
 1. Create and verify the completed backup and post-backup recovery point.
 2. Run `harbor-db-postgres --config <candidate-manifest> snapshot-records
-   --socket-dir /run/postgresql --port 5432` as the PostgreSQL service user.
+--socket-dir /run/postgresql --port 5432` as the PostgreSQL service user.
 3. Restore into a disposable directory, replay through `post_backup_lsn`,
    promote the disposable copy and start it with
    `default_transaction_read_only = on`. The primary is never the drill target.
 4. Run `harbor-db-postgres --config <candidate-manifest> certify-recovery
-   --data-dir <disposable-directory> --socket-dir <local-restore-socket>
-   --port <restore-port>` while that recovered endpoint is running.
+--data-dir <disposable-directory> --socket-dir <local-restore-socket>
+--port <restore-port>` while that recovered endpoint is running.
 5. For required off-host recovery, copy the same backup/metadata/snapshot and
    query contract to the independent host. Perform a fresh restore and execute
    the same certifier there, with that host's configured `receiptFile` selecting

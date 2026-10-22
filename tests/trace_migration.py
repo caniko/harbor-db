@@ -50,7 +50,8 @@ def main():
                 # Decorators can precede the AST definition's line number.
                 if key not in functions:
                     matches = [
-                        k for k, value in functions.items()
+                        k
+                        for k, value in functions.items()
                         if value["file"] == name
                         and value["name"] == frame.f_code.co_name
                         and value["start"] <= frame.f_lineno <= value["end"]
@@ -92,7 +93,10 @@ def main():
         "status": "trace_generated" if accepted else "failed",
         "tests_run": result.testsRun,
         "skipped": len(result.skipped),
-        "limitations": ["Child interpreter execs are not traced", "Executed lines do not imply assertions or Rust parity"],
+        "limitations": [
+            "Child interpreter execs are not traced",
+            "Executed lines do not imply assertions or Rust parity",
+        ],
         "functions": functions,
         "tests": {key: sorted(values) for key, values in executed.items()},
         "uncovered": [key for key, value in functions.items() if not value["tests"]],

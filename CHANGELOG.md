@@ -26,9 +26,10 @@
   candidate `preflight`/`activate` admission; the live/physical identity and
   recovery checks still run. Cutover workers now report their own bounded error
   line instead of a suppressed-diagnostics placeholder.
-- Keep the recovery-preparation pre-switch hook ShellCheck-clean (SC2329 on its
-  EXIT-trap cleanup) so consumer system builds succeed; the lifecycle eval check
-  now builds the assembled NixOS pre-switch script.
+- Keep the generated recovery-preparation pre-switch check accepted by
+  ShellCheck 0.11, which flagged its trap-only cleanup function (SC2329) and
+  failed consumers' `pre-switch-checks` builds. The lifecycle eval check now
+  builds the assembled NixOS pre-switch script.
 - Preserve graceful shutdown and post-stop hooks while transitions inhibit startup.
 - Bind runtime credential sources into version-2 backup policies so forced transition
   captures receive private worker credentials without depending on a service environment.

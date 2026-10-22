@@ -30,7 +30,9 @@ class DurablePublicationTest(unittest.TestCase):
 
     def test_failed_directory_flush_is_not_acknowledged(self):
         target = self.root / "identity"
-        with patch.object(durable, "sync_directory", side_effect=OSError("directory flush failed")):
+        with patch.object(
+            durable, "sync_directory", side_effect=OSError("directory flush failed")
+        ):
             with self.assertRaises(OSError):
                 durable.atomic_write(target, b"new")
         self.assertEqual(target.stat().st_mode & 0o777, 0o600)

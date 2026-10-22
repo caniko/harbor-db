@@ -65,12 +65,12 @@ and require callers to exclude concurrent forks until exec or flag restoration.
 
 ## Cumulative profiles
 
-| Profile | Included work |
-| --- | --- |
-| `fast` | Fast native catalog/protocol/evidence checks and baseline Rust tests |
+| Profile       | Included work                                                                                            |
+| ------------- | -------------------------------------------------------------------------------------------------------- |
+| `fast`        | Fast native catalog/protocol/evidence checks and baseline Rust tests                                     |
 | `integration` | Fast cases, individual Python and native storage/process tests, prerequisites, and Nix evaluation checks |
-| `vm` | Integration cases and the declared NixOS VM checks |
-| `full` | VM cases and the remaining exported flake checks and production package builds |
+| `vm`          | Integration cases and the declared NixOS VM checks                                                       |
+| `full`        | VM cases and the remaining exported flake checks and production package builds                           |
 
 Selection is stable and dependency-first. Dependencies must be registered and
 belong to the same or an earlier profile; unknown references, cycles, duplicate
@@ -184,7 +184,11 @@ write the catalog's relative artifact descriptors there. If no required typed
 acceptance descriptor exists, the runner requires `acceptance.json` containing:
 
 ```json
-{"schema":1,"case_id":"case-<sha256>","assertions":[{"name":"actual assertion","passed":true}]}
+{
+  "schema": 1,
+  "case_id": "case-<sha256>",
+  "assertions": [{ "name": "actual assertion", "passed": true }]
+}
 ```
 
 Assertions must be nonempty, uniquely named, and true. JUnit requires nonempty
@@ -538,6 +542,17 @@ Startup-barrier ancestry checks use that same filesystem ownership view; process
 privilege checks still require effective UID 0. The transition compatibility
 helper maps only this fixture UID back to root in Python's `lstat` observations,
 leaving the retained Python validation logic and all journal bytes intact.
+
+The standalone Python regression runner applies the same namespace ownership
+model only to the declared immutable Git executable and its store ancestry.
+It validates independent ownership, read-only modes, regular executable type
+and store-confined links before mapping the observed store UID to root for those
+exact paths. The runner records the actual and modeled UIDs in
+`python-regressions-fixtures.json`; other paths keep their actual metadata.
+Both the 174-method frozen corpus and the expanded catalog execute their original
+Git-custody assertions against the real pinned Git binary. Production Python
+sources and frozen oracle files retain their bytes and enforce UID 0 directly.
+
 Runtime credential sources always require real UID 0. A private user/mount/chroot
 fixture tests both credential readers against root-controlled relative aliases
 and retained inodes after pathname replacement.

@@ -875,7 +875,9 @@ fn native_postmaster_retains_main_pid_lease_and_logical_restore_is_private() {
 from pathlib import Path
 sys.stderr=sys.stdout
 root=Path(sys.argv[1]);source=Path(sys.argv[2]);corpus=Path(sys.argv[3]);binary=sys.argv[4]
-paths=[Path('/nix'),Path('/proc'),Path('/dev'),source,corpus]
+# An external Cargo target directory is outside the mounted source tree.
+# Retain the exact current test executable for its namespace continuation.
+paths=[Path('/nix'),Path('/proc'),Path('/dev'),source,corpus,Path(binary).parent]
 # Registrations without F resolve the interpreter again inside this chroot.
 if Path('/run/binfmt').is_dir(): paths.append(Path('/run/binfmt'))
 for path in paths:

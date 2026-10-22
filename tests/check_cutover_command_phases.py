@@ -30,7 +30,9 @@ def main():
     manifest = json.loads(original_manifest.read_text())
     with tempfile.TemporaryDirectory(prefix="harbor-db-command-phases-") as temporary:
         root = Path(temporary)
-        source, restore, authority = (root / name for name in ("source", "restore", "authority"))
+        source, restore, authority = (
+            root / name for name in ("source", "restore", "authority")
+        )
         for path in (source, restore, authority):
             path.mkdir(mode=0o700)
         for path in (source, restore):
@@ -51,67 +53,150 @@ def main():
         resource["custody_file"] = str(authority / "custody.json")
         contract = root / "contract.json"
         contract.write_text(json.dumps(manifest))
-        certify = [fixture["checker"], "certify", "--contract", str(contract), "--host", "fixture",
-                   "--resource", "history", "--identity", "historical-fixture", "--restore-root", str(restore)]
+        certify = [
+            fixture["checker"],
+            "certify",
+            "--contract",
+            str(contract),
+            "--host",
+            "fixture",
+            "--resource",
+            "history",
+            "--identity",
+            "historical-fixture",
+            "--restore-root",
+            str(restore),
+        ]
         subprocess.run(certify, check=True, capture_output=True, text=True, timeout=15)
         results = []
         for phase, expected_exit in (("ExecCondition", 17), ("ExecReload", 23)):
             commands = fixture["commands"][phase]
             assert len(commands) == 1, (phase, commands)
             command = shlex.split(commands[0])
-            assert command[0] == fixture["checker"] and command[1] == "serve", (phase, command)
+            assert command[0] == fixture["checker"] and command[1] == "serve", (
+                phase,
+                command,
+            )
             contract_index = command.index("--contract") + 1
             assert command[contract_index] == str(original_manifest)
             command[contract_index] = str(contract)
             ready = root / f"{phase}-ready.json"
             command[command.index("HARBOR_DB_PHASE_READY")] = str(ready)
-            with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE, text=True) as process:
+            with subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ) as process:
                 try:
                     deadline = time.monotonic() + 5
-                    while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                    while (
+                        not ready.exists()
+                        and process.poll() is None
+                        and time.monotonic() < deadline
+                    ):
                         time.sleep(0.01)
                     if not ready.exists():
                         stdout, stderr = process.communicate(timeout=10)
-                        raise AssertionError((phase, "guarded writer did not reach its ready barrier", stdout, stderr))
-                    assert json.loads(ready.read_text()) == {"phase": phase, "arguments": [fixture["literalArgument"]]}
+                        raise AssertionError(
+                            (
+                                phase,
+                                "guarded writer did not reach its ready barrier",
+                                stdout,
+                                stderr,
+                            )
+                        )
+                    assert json.loads(ready.read_text()) == {
+                        "phase": phase,
+                        "arguments": [fixture["literalArgument"]],
+                    }
                     try:
                         with lock(authority / "lock"):
-                            raise AssertionError(f"{phase} did not retain its authority lease through exec")
+                            raise AssertionError(
+                                f"{phase} did not retain its authority lease through exec"
+                            )
                     except BlockingIOError:
                         pass
-                    blocked = subprocess.run(certify, check=False, capture_output=True, text=True, timeout=15)
-                    assert blocked.returncode != 0, (phase, "certification accepted a live writer")
+                    blocked = subprocess.run(
+                        certify, check=False, capture_output=True, text=True, timeout=15
+                    )
+                    assert blocked.returncode != 0, (
+                        phase,
+                        "certification accepted a live writer",
+                    )
                     assert process.stdin is not None
                     process.stdin.write("x")
                     process.stdin.flush()
                     stdout, stderr = process.communicate(timeout=10)
-                    assert process.returncode == expected_exit, (phase, process.returncode, stdout, stderr)
+                    assert process.returncode == expected_exit, (
+                        phase,
+                        process.returncode,
+                        stdout,
+                        stderr,
+                    )
                 finally:
                     if process.poll() is None:
                         process.terminate()
                         process.communicate(timeout=5)
             with lock(authority / "lock"):
                 pass
-            subprocess.run(certify, check=True, capture_output=True, text=True, timeout=15)
-            results.append({"phase": phase, "exit_code": expected_exit, "literal_arguments_preserved": True,
-                            "exclusive_lease_blocked_until_exit": True, "certification_resumed_after_exit": True})
+            subprocess.run(
+                certify, check=True, capture_output=True, text=True, timeout=15
+            )
+            results.append(
+                {
+                    "phase": phase,
+                    "exit_code": expected_exit,
+                    "literal_arguments_preserved": True,
+                    "exclusive_lease_blocked_until_exit": True,
+                    "certification_resumed_after_exit": True,
+                }
+            )
         # Quiescing deliberately rejects ordinary startup. Shutdown hooks must
         # still reach the application, preserving literal argv and exit status.
         (authority / "transition.json").write_text(json.dumps({"phase": "quiescing"}))
-        startup = [fixture["checker"], "check", "--contract", str(contract), "--host", "fixture", "--phase", "startup"]
-        blocked = subprocess.run(startup, check=False, capture_output=True, text=True, timeout=15)
-        assert blocked.returncode != 0, "unfinished transition admitted ordinary custody inspection"
+        startup = [
+            fixture["checker"],
+            "check",
+            "--contract",
+            str(contract),
+            "--host",
+            "fixture",
+            "--phase",
+            "startup",
+        ]
+        blocked = subprocess.run(
+            startup, check=False, capture_output=True, text=True, timeout=15
+        )
+        assert blocked.returncode != 0, (
+            "unfinished transition admitted ordinary custody inspection"
+        )
         for phase, expected_exit in (("ExecStop", 31), ("ExecStopPost", 37)):
             commands = fixture["commands"][phase]
             assert len(commands) == 1, (phase, commands)
             command = shlex.split(commands[0])
             ready = root / f"{phase}-ready.json"
             command[command.index("HARBOR_DB_PHASE_READY")] = str(ready)
-            completed = subprocess.run(command, input="x", capture_output=True, text=True, timeout=15)
-            assert completed.returncode == expected_exit, (phase, completed.returncode, completed.stderr)
-            assert json.loads(ready.read_text()) == {"phase": phase, "arguments": [fixture["literalArgument"]]}
-            results.append({"phase": phase, "exit_code": expected_exit, "quiescing_shutdown_executed": True})
+            completed = subprocess.run(
+                command, input="x", capture_output=True, text=True, timeout=15
+            )
+            assert completed.returncode == expected_exit, (
+                phase,
+                completed.returncode,
+                completed.stderr,
+            )
+            assert json.loads(ready.read_text()) == {
+                "phase": phase,
+                "arguments": [fixture["literalArgument"]],
+            }
+            results.append(
+                {
+                    "phase": phase,
+                    "exit_code": expected_exit,
+                    "quiescing_shutdown_executed": True,
+                }
+            )
         print(json.dumps({"status": "ok", "commands": results}))
 
 

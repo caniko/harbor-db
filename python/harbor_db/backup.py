@@ -18,11 +18,18 @@ def prune(root, base_days, wal_days, segment_bytes, *, now=None):
     Unknown manifests/timelines fail conservatively: no WAL deletion. Partial
     transfers are never complete backups and are preserved for diagnosis.
     """
-    if segment_bytes < 1024 * 1024 or segment_bytes > 1024 * 1024 * 1024 or segment_bytes & (segment_bytes - 1):
+    if (
+        segment_bytes < 1024 * 1024
+        or segment_bytes > 1024 * 1024 * 1024
+        or segment_bytes & (segment_bytes - 1)
+    ):
         raise ValueError("invalid PostgreSQL WAL segment size")
     root = Path(root)
     now = time.time() if now is None else now
-    with protection(root, segment_bytes) as pinned, lock(root / "BACKUP_LOCK", create=True):
+    with (
+        protection(root, segment_bytes) as pinned,
+        lock(root / "BACKUP_LOCK", create=True),
+    ):
         base = root / "base"
         backups = [p for p in base.iterdir() if not p.name.endswith(".partial")]
         if any(p.is_symlink() or not p.is_dir() for p in backups):
@@ -30,7 +37,11 @@ def prune(root, base_days, wal_days, segment_bytes, *, now=None):
         backups.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         retained, expired = [], []
         for index, path in enumerate(backups):
-            if index < 2 or path.stat().st_mtime >= now - base_days * 86400 or path.name in pinned:
+            if (
+                index < 2
+                or path.stat().st_mtime >= now - base_days * 86400
+                or path.name in pinned
+            ):
                 retained.append(path)
             else:
                 expired.append(path)
@@ -54,7 +65,9 @@ def prune(root, base_days, wal_days, segment_bytes, *, now=None):
                     limits = []
                     for key in ("Start-LSN", "End-LSN"):
                         lsn = entry[key]
-                        if not isinstance(lsn, str) or not re.fullmatch(r"[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}", lsn):
+                        if not isinstance(lsn, str) or not re.fullmatch(
+                            r"[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}", lsn
+                        ):
                             return
                         high, low = lsn.split("/")
                         limits.append((int(high, 16) << 32) + int(low, 16))
@@ -70,15 +83,26 @@ def prune(root, base_days, wal_days, segment_bytes, *, now=None):
             shutil.rmtree(path)
         sync_directory(base)
         wal = root / "wal"
-        segments = [p for p in wal.iterdir() if re.fullmatch(r"[0-9A-F]{24}", p.name)
-                    and p.is_file() and not p.is_symlink()]
+        segments = [
+            p
+            for p in wal.iterdir()
+            if re.fullmatch(r"[0-9A-F]{24}", p.name)
+            and p.is_file()
+            and not p.is_symlink()
+        ]
         # A consumer size mismatch must never translate into unsafe LSN floors.
         if {p.stat().st_size for p in segments} != {segment_bytes}:
             return
         for path in segments:
             timeline = int(path.name[:8], 16)
-            segment = int(path.name[8:16], 16) * (2**32 // segment_bytes) + int(path.name[16:], 16)
-            if timeline in floors and segment < floors[timeline] and path.stat().st_mtime < now - wal_days * 86400:
+            segment = int(path.name[8:16], 16) * (2**32 // segment_bytes) + int(
+                path.name[16:], 16
+            )
+            if (
+                timeline in floors
+                and segment < floors[timeline]
+                and path.stat().st_mtime < now - wal_days * 86400
+            ):
                 path.unlink()
         sync_directory(wal)
 

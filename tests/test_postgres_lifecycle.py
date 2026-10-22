@@ -95,7 +95,12 @@ class ClusterLifecycleTest(unittest.TestCase):
             self.assertFalse((self.state / "lock").exists())
 
     def test_interrupted_first_adoption_reuses_the_original_lock(self):
-        with patch.object(postgres, "write_json", side_effect=OSError("publication interrupted")), self.assertRaisesRegex(OSError, "interrupted"):
+        with (
+            patch.object(
+                postgres, "write_json", side_effect=OSError("publication interrupted")
+            ),
+            self.assertRaisesRegex(OSError, "interrupted"),
+        ):
             self.adopt()
         inode = (self.state / "lock").stat().st_ino
         self.assertFalse((self.state / "identity.json").exists())
@@ -105,19 +110,32 @@ class ClusterLifecycleTest(unittest.TestCase):
 
     def live_probe(self, **changes):
         observed = {
-            "data_dir": str(self.data), "major": "18", "system_identifier": "12345",
-            "fsync": "on", "full_page_writes": "on", "synchronous_commit": "on",
+            "data_dir": str(self.data),
+            "major": "18",
+            "system_identifier": "12345",
+            "fsync": "on",
+            "full_page_writes": "on",
+            "synchronous_commit": "on",
             "in_recovery": False,
         }
         observed.update(changes)
         return subprocess.CompletedProcess([], 0, json.dumps(observed), "")
 
     def test_live_inspection_is_read_only_and_ignores_ambient_routing(self):
-        with patch.object(postgres, "run", return_value=self.live_probe()) as probe, patch.dict(
-            os.environ, {"PGHOSTADDR": "192.0.2.1", "PGSERVICE": "wrong",
-                         "PGOPTIONS": "-c synchronous_commit=off"},
+        with (
+            patch.object(postgres, "run", return_value=self.live_probe()) as probe,
+            patch.dict(
+                os.environ,
+                {
+                    "PGHOSTADDR": "192.0.2.1",
+                    "PGSERVICE": "wrong",
+                    "PGOPTIONS": "-c synchronous_commit=off",
+                },
+            ),
         ):
-            observed = postgres.inspect_live(self.config, "12345", "/run/postgresql", 5432)
+            observed = postgres.inspect_live(
+                self.config, "12345", "/run/postgresql", 5432
+            )
         self.assertEqual(observed["system_identifier"], "12345")
         self.assertFalse((self.state / "identity.json").exists())
         self.assertFalse((self.state / "lock").exists())
@@ -133,20 +151,34 @@ class ClusterLifecycleTest(unittest.TestCase):
 
     def test_live_adoption_rejects_wrong_endpoint_or_nondurable_primary(self):
         for changed in [
-            {"data_dir": str(self.root / "other")}, {"major": "17"},
-            {"system_identifier": "67890"}, {"fsync": "off"},
-            {"full_page_writes": "off"}, {"synchronous_commit": "off"},
+            {"data_dir": str(self.root / "other")},
+            {"major": "17"},
+            {"system_identifier": "67890"},
+            {"fsync": "off"},
+            {"full_page_writes": "off"},
+            {"synchronous_commit": "off"},
             {"in_recovery": True},
         ]:
             with self.subTest(changed=changed):
-                with patch.object(postgres, "run", return_value=self.live_probe(**changed)), self.assertRaises(postgres.LifecycleError):
+                with (
+                    patch.object(
+                        postgres, "run", return_value=self.live_probe(**changed)
+                    ),
+                    self.assertRaises(postgres.LifecycleError),
+                ):
                     postgres.adopt_live(self.config, "12345", "/run/postgresql", 5432)
                 self.assertFalse((self.state / "identity.json").exists())
 
     def test_live_and_physical_identifiers_must_match(self):
-        with patch.object(postgres, "run", return_value=self.live_probe()), patch.object(
-            postgres, "inspect_cluster", return_value="67890",
-        ), self.assertRaises(postgres.LifecycleError):
+        with (
+            patch.object(postgres, "run", return_value=self.live_probe()),
+            patch.object(
+                postgres,
+                "inspect_cluster",
+                return_value="67890",
+            ),
+            self.assertRaises(postgres.LifecycleError),
+        ):
             postgres.adopt_live(self.config, "12345", "/run/postgresql", 5432)
         self.assertFalse((self.state / "identity.json").exists())
 
@@ -158,16 +190,26 @@ class ClusterLifecycleTest(unittest.TestCase):
             # A running guarded primary holds a shared authority lease. A normal
             # later switch verifies it without acquiring an exclusive adoption lock.
             with lock(self.state / "lock", shared=True):
-                result = postgres.adopt_live(self.config, "12345", "/run/postgresql", 5432)
+                result = postgres.adopt_live(
+                    self.config, "12345", "/run/postgresql", 5432
+                )
             self.assertFalse(result["changed"])
             self.assertEqual((self.state / "identity.json").read_bytes(), original)
         postgres.check(self.config)
 
     def test_required_recovery_fails_before_any_adoption_state_is_created(self):
         self.config["recovery"] = {}
-        for operation in (lambda: postgres.adopt(self.config, "12345"),
-                          lambda: postgres.adopt_live(self.config, "12345", "/run/postgresql", 5432)):
-            with patch("harbor_db.recovery.admission", side_effect=ValueError("missing recovery acceptance")), self.assertRaisesRegex(ValueError, "missing recovery"):
+        for operation in (
+            lambda: postgres.adopt(self.config, "12345"),
+            lambda: postgres.adopt_live(self.config, "12345", "/run/postgresql", 5432),
+        ):
+            with (
+                patch(
+                    "harbor_db.recovery.admission",
+                    side_effect=ValueError("missing recovery acceptance"),
+                ),
+                self.assertRaisesRegex(ValueError, "missing recovery"),
+            ):
                 operation()
             self.assertFalse((self.state / "identity.json").exists())
             self.assertFalse((self.state / "lock").exists())
@@ -176,7 +218,10 @@ class ClusterLifecycleTest(unittest.TestCase):
         journal = self.state / "upgrade.json"
         journal.write_text('{"phase":"building"}')
         original = journal.read_bytes()
-        with patch.object(postgres, "run") as probe, self.assertRaisesRegex(postgres.LifecycleError, "upgrade"):
+        with (
+            patch.object(postgres, "run") as probe,
+            self.assertRaisesRegex(postgres.LifecycleError, "upgrade"),
+        ):
             postgres.adopt_live(self.config, "12345", "/run/postgresql", 5432)
         probe.assert_not_called()
         self.assertEqual(journal.read_bytes(), original)
@@ -185,30 +230,45 @@ class ClusterLifecycleTest(unittest.TestCase):
     def test_existing_live_adoption_does_not_recreate_a_missing_lock(self):
         self.adopt()
         (self.state / "lock").unlink()
-        with patch.object(postgres, "run") as probe, self.assertRaises(FileNotFoundError):
+        with (
+            patch.object(postgres, "run") as probe,
+            self.assertRaises(FileNotFoundError),
+        ):
             postgres.adopt_live(self.config, "12345", "/run/postgresql", 5432)
         probe.assert_not_called()
         self.assertFalse((self.state / "lock").exists())
 
     def test_authority_removed_before_shared_lock_is_not_readopted(self):
         self.adopt()
+
         def remove_authority(*args, **kwargs):
             (self.state / "identity.json").unlink()
             return lock(*args, **kwargs)
-        with patch.object(postgres, "lock", side_effect=remove_authority), patch.object(
-            postgres, "run",
-        ) as probe, self.assertRaisesRegex(postgres.LifecycleError, "not adopted"):
+
+        with (
+            patch.object(postgres, "lock", side_effect=remove_authority),
+            patch.object(
+                postgres,
+                "run",
+            ) as probe,
+            self.assertRaisesRegex(postgres.LifecycleError, "not adopted"),
+        ):
             postgres.adopt_live(self.config, "12345", "/run/postgresql", 5432)
         probe.assert_not_called()
         self.assertFalse((self.state / "identity.json").exists())
 
     def test_live_inspection_rejects_remote_or_invalid_socket_endpoints(self):
-        for socket, port, identifier in [("localhost", 5432, "12345"),
-                                         ("/run/postgresql,192.0.2.1", 5432, "12345"),
-                                         ("/run/postgresql", 0, "12345"),
-                                         ("/run/postgresql", 65536, "12345"),
-                                         ("/run/postgresql", 5432, "")]:
-            with patch.object(postgres, "run") as probe, self.assertRaises(postgres.LifecycleError):
+        for socket, port, identifier in [
+            ("localhost", 5432, "12345"),
+            ("/run/postgresql,192.0.2.1", 5432, "12345"),
+            ("/run/postgresql", 0, "12345"),
+            ("/run/postgresql", 65536, "12345"),
+            ("/run/postgresql", 5432, ""),
+        ]:
+            with (
+                patch.object(postgres, "run") as probe,
+                self.assertRaises(postgres.LifecycleError),
+            ):
                 postgres.inspect_live(self.config, identifier, socket, port)
             probe.assert_not_called()
 
@@ -233,19 +293,32 @@ class ClusterLifecycleTest(unittest.TestCase):
             f"postgres.serve({config!r})"
         )
         process = subprocess.Popen(
-            [sys.executable, "-B", "-c", command], stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+            [sys.executable, "-B", "-c", command],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
             env={**os.environ, "PGDATA": str(self.root / "wrong-storage")},
         )
         try:
             self.assertTrue(select.select([process.stdout], [], [], 10)[0])
             ready = json.loads(process.stdout.readline())
             self.assertEqual(ready["pid"], process.pid)
-            self.assertEqual(ready["args"], [
-                "-D", str(self.data), "-c", f"data_directory={self.data}",
-                "-c", "fsync=on", "-c", "full_page_writes=on",
-                "-c", "synchronous_commit=on",
-            ])
+            self.assertEqual(
+                ready["args"],
+                [
+                    "-D",
+                    str(self.data),
+                    "-c",
+                    f"data_directory={self.data}",
+                    "-c",
+                    "fsync=on",
+                    "-c",
+                    "full_page_writes=on",
+                    "-c",
+                    "synchronous_commit=on",
+                ],
+            )
             with self.assertRaises(BlockingIOError), lock(self.state / "lock"):
                 self.fail("offline operation acquired a live writer's lease")
             _, error = process.communicate(input=b"x", timeout=10)
@@ -274,19 +347,28 @@ class ClusterLifecycleTest(unittest.TestCase):
         validator.write_text("fixture validator\n")
         self.config["package"] = str(new_package)
         self.config["upgrade"] = {
-            "data_dir": str(self.old), "major": "17", "package": str(old_package),
+            "data_dir": str(self.old),
+            "major": "17",
+            "package": str(old_package),
             "validate_command": [str(validator)],
         }
-        source = dict(self.config, data_dir=str(self.old), major="17", package=str(old_package))
+        source = dict(
+            self.config, data_dir=str(self.old), major="17", package=str(old_package)
+        )
         postgres.adopt(source, "12345")
         stage = self.root / "18.harbor-staging"
         stage.mkdir()
         (stage / "PG_VERSION").write_text("18\n")
         journal = {
-            "version": 2, "phase": "ready", "source": postgres.identity(source, "12345"),
+            "version": 2,
+            "phase": "ready",
+            "source": postgres.identity(source, "12345"),
             "source_control": "digest",
-            "target": {k: self.config[k] for k in ("resource", "data_dir", "major", "package")},
-            "staging": str(stage), "identity": postgres.identity(self.config, "12345"),
+            "target": {
+                k: self.config[k] for k in ("resource", "data_dir", "major", "package")
+            },
+            "staging": str(stage),
+            "identity": postgres.identity(self.config, "12345"),
             "source_copy": str(self.root / "18.harbor-source"),
             "contract": postgres.upgrade_contract(self.config),
         }
@@ -297,7 +379,10 @@ class ClusterLifecycleTest(unittest.TestCase):
         stage, journal = self.ready_upgrade()
         stage.rename(self.data)
         write_json(self.state / "identity.json", journal["identity"])
-        with patch.object(postgres, "require_stopped"), patch.object(postgres, "control_digest", return_value="digest"):
+        with (
+            patch.object(postgres, "require_stopped"),
+            patch.object(postgres, "control_digest", return_value="digest"),
+        ):
             postgres.upgrade(self.config)
         postgres.check(self.config)
         self.assertTrue(self.old.exists())
@@ -305,9 +390,17 @@ class ClusterLifecycleTest(unittest.TestCase):
 
     def test_changed_source_prevents_publication(self):
         stage, _ = self.ready_upgrade()
-        with patch.object(postgres, "require_stopped"), patch.object(
-            postgres, "control_digest", return_value="changed",
-        ), self.assertRaisesRegex(postgres.LifecycleError, "source or contract changed"):
+        with (
+            patch.object(postgres, "require_stopped"),
+            patch.object(
+                postgres,
+                "control_digest",
+                return_value="changed",
+            ),
+            self.assertRaisesRegex(
+                postgres.LifecycleError, "source or contract changed"
+            ),
+        ):
             postgres.upgrade(self.config)
         self.assertTrue(stage.exists())
         self.assertFalse(self.data.exists())
@@ -320,7 +413,10 @@ class ClusterLifecycleTest(unittest.TestCase):
                     (self.state / "upgrade.json").unlink()
                 with lock(self.state / "lock", shared=True):
                     (self.state / "lock").unlink()
-                    with patch.object(postgres, "require_stopped") as stopped, self.assertRaises(FileNotFoundError):
+                    with (
+                        patch.object(postgres, "require_stopped") as stopped,
+                        self.assertRaises(FileNotFoundError),
+                    ):
                         postgres.upgrade(self.config)
                     stopped.assert_not_called()
                     self.assertFalse((self.state / "lock").exists())
@@ -340,17 +436,29 @@ class ClusterLifecycleTest(unittest.TestCase):
             if path.name == filename:
                 raise OSError("publication interrupted")
 
-        with patch.object(postgres, "require_stopped"), patch.object(
-            postgres, "write_json", side_effect=interrupt,
-        ), self.assertRaisesRegex(OSError, "publication interrupted"):
+        with (
+            patch.object(postgres, "require_stopped"),
+            patch.object(
+                postgres,
+                "write_json",
+                side_effect=interrupt,
+            ),
+            self.assertRaisesRegex(OSError, "publication interrupted"),
+        ):
             postgres.publish(self.config, journal)
         self.assertTrue((self.state / "upgrade.json").exists())
         with self.assertRaisesRegex(postgres.LifecycleError, "upgrade"):
             postgres.check(self.config)
-        with patch.object(postgres, "require_stopped"), patch.object(postgres, "control_digest", return_value="digest"):
+        with (
+            patch.object(postgres, "require_stopped"),
+            patch.object(postgres, "control_digest", return_value="digest"),
+        ):
             postgres.upgrade(self.config)
         postgres.check(self.config)
-        self.assertEqual(json.loads((self.state / "previous-identity.json").read_text()), journal["source"])
+        self.assertEqual(
+            json.loads((self.state / "previous-identity.json").read_text()),
+            journal["source"],
+        )
 
     def test_interruption_after_previous_identity_publication_can_resume(self):
         self.interrupt_authority_publication("previous-identity.json")
@@ -368,21 +476,35 @@ class ClusterLifecycleTest(unittest.TestCase):
                 raise OSError("destination publication is not durable")
             real_sync(path)
 
-        with patch.object(postgres, "require_stopped"), patch.object(
-            postgres, "sync_directory", side_effect=fail_destination_parent,
-        ), self.assertRaisesRegex(OSError, "publication is not durable"):
+        with (
+            patch.object(postgres, "require_stopped"),
+            patch.object(
+                postgres,
+                "sync_directory",
+                side_effect=fail_destination_parent,
+            ),
+            self.assertRaisesRegex(OSError, "publication is not durable"),
+        ):
             postgres.publish(self.config, journal)
         self.assertTrue((self.state / "upgrade.json").exists())
-        self.assertEqual(json.loads((self.state / "identity.json").read_text()), journal["source"])
+        self.assertEqual(
+            json.loads((self.state / "identity.json").read_text()), journal["source"]
+        )
 
     def test_interruption_after_initdb_cannot_authorize_target(self):
         stage, journal = self.ready_upgrade()
         journal["phase"] = "building"
         del journal["identity"]
         write_json(self.state / "upgrade.json", journal)
-        with patch.object(postgres, "require_stopped"), patch.object(
-            postgres, "control_digest", return_value="digest",
-        ), self.assertRaisesRegex(postgres.LifecycleError, "incomplete upgrade"):
+        with (
+            patch.object(postgres, "require_stopped"),
+            patch.object(
+                postgres,
+                "control_digest",
+                return_value="digest",
+            ),
+            self.assertRaisesRegex(postgres.LifecycleError, "incomplete upgrade"),
+        ):
             postgres.upgrade(self.config)
         with self.assertRaises(postgres.LifecycleError):
             postgres.check(self.config)

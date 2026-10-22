@@ -190,14 +190,26 @@ fn prototype_is_static_coverage_and_dependencies_are_selected_first() {
 #[test]
 fn committed_inventory_is_individual_and_migration_bound() {
     let suite = Suite::load("tests/suite.toml").unwrap();
-    assert_eq!(
-        suite
-            .cases
-            .iter()
-            .filter(|case| case.python_migration_id.is_some())
-            .count(),
-        174
-    );
+    let frozen = harbor_db::testing::baseline::Baseline::load("tests/pr14-baseline.toml")
+        .unwrap()
+        .python_tests(std::path::Path::new("."))
+        .unwrap();
+    assert_eq!(frozen.len(), 174);
+    let registered: std::collections::BTreeSet<_> = suite
+        .cases
+        .iter()
+        .filter_map(|case| case.python_migration_id.clone())
+        .collect();
+    assert!(frozen.is_subset(&registered));
+    assert_eq!(registered.difference(&frozen).count(), 10);
+    for name in [
+        "test_wrong_fence_plan_leaves_no_journal_and_allows_corrected_retry",
+        "test_stale_fence_before_prepare_preserves_plan_and_running_writers",
+    ] {
+        assert!(registered.contains(&format!(
+            "test_transition_fence_admission.BorrowedFenceAdmissionTest.{name}"
+        )));
+    }
     assert_eq!(
         suite
             .cases

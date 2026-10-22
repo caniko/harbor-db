@@ -2,10 +2,14 @@
   description = "harbor-db - secure generic lifecycle plans and NixOS systemd wiring";
 
   inputs = {
-    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=feat/portable-release-files&rev=195f8a7e81d67102868631015b6794280b492c88";
+    harbor-rs = {
+      url = "github:caniko/harbor-rs";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.harbor-meta.follows = "harbor-meta";
+    };
     rs-harbor.follows = "harbor-rs";
     harbor-meta = {
-      url = "git+https://github.com/caniko/harbor-meta.git?ref=feat/shared-timezone-env&rev=1f272a44dea9dc531b30efb384720ddb46f083e3";
+      url = "github:caniko/harbor-meta";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -18,7 +22,10 @@
     harbor-meta,
     nixpkgs,
     ...
-  }: let
+  } @ outputArgs: let
+    # harbor's superproject root passes its shared formatter; a formal
+    # argument would make standalone Nix resolve it as a registry flake.
+    harborFormatting = outputArgs.harborFormatting or null;
     systems = [
       "x86_64-linux"
       "aarch64-linux"
@@ -148,8 +155,8 @@
             mainProgram = "harbor-db";
           };
         };
-      # Production receipt authority must not execute in a caller-controlled
-      # dynamic loader. Testing builds retain preload-based fault injection.
+      # Receipt authority cannot execute through a caller-controlled loader.
+      # Test builds keep dynamic linkage for preload fault-injection fixtures.
       productionArgs =
         commonArgs
         // {
@@ -231,6 +238,7 @@
           HARBOR_DB_TEST_POSTGRES_17 = pkgs.postgresql_17;
           HARBOR_DB_TEST_CONFIG_FIXTURE = configurationFixture pkgs;
           HARBOR_DB_TEST_MACHINE_ID = pkgs.writeText "harbor-db-test-machine-id" "00000000000000000000000000000001\n";
+          HARBOR_DB_TEST_PRIVATE_ROOT = "1";
           preBuild = ''
             export HARBOR_DB_TEST_ROOT_UID=$(${pkgs.coreutils}/bin/stat -Lc %u "$HARBOR_DB_TEST_CONFIG_FIXTURE/postgresql.json")
           '';
@@ -239,9 +247,8 @@
             namespaceTools=${pkgs.util-linux}/bin
             if ! "$namespaceTools/unshare" --user --map-root-user --mount -- true 2>namespace-probe.log; then
               ${pkgs.lib.optionalString (pkgs.system == "aarch64-linux") ''
-              # QEMU user emulation returns EINVAL for unshare. Keep the
-              # AArch64 lifecycle binaries under test, and perform host
-              # namespace/mount syscalls with pinned kernel-native tools.
+              # Keep ARM lifecycle executables under test when QEMU's user
+              # emulation cannot perform namespace syscalls itself.
               if grep -q 'unshare failed: Invalid argument' namespace-probe.log; then
                 namespaceTools=${nixpkgs.legacyPackages.x86_64-linux.util-linux}/bin
               fi
@@ -308,10 +315,15 @@
         };
         postgres-lifecycle-oracle-test = pkgs.callPackage ./nix/test-postgres-oracle.nix {};
         harbor-db = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db;
-        cargo-fmt = craneLib.cargoFmt {
-          inherit src;
-          pname = "harbor-db";
-        };
+        # Inside harbor, formatting is owned by the monorepo's shared policy.
+        cargo-fmt =
+          if harborFormatting == null
+          then
+            craneLib.cargoFmt {
+              inherit src;
+              pname = "harbor-db";
+            }
+          else harborFormatting pkgs.stdenv.hostPlatform.system;
         cargo-test = craneLib.cargoTest (commonArgs
           // {
             inherit cargoArtifacts;

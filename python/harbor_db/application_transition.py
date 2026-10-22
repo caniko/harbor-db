@@ -12,8 +12,23 @@ from pathlib import Path
 
 from . import application_backup, resource
 from .durable import immutable_store_reference, lock, read_json, sync_directory
-from .transition_manifest import (candidate_path, custody_entry, fence, generation, inspect_barriers, install_barriers,
-                                  independent_receipt, intent, release_barriers, require_root, stop_units, validate, validate_operator_policy, worker, write_owned)
+from .transition_manifest import (
+    candidate_path,
+    custody_entry,
+    fence,
+    generation,
+    inspect_barriers,
+    install_barriers,
+    independent_receipt,
+    intent,
+    release_barriers,
+    require_root,
+    stop_units,
+    validate,
+    validate_operator_policy,
+    worker,
+    write_owned,
+)
 
 
 def journal_path(config):
@@ -30,13 +45,18 @@ def save(config, record, phase=None):
 def status(config):
     record = read_json(journal_path(config))
     if record["version"] != 1 or record["intent"] != intent(config):
-        raise ValueError("transition intent or executable identity changed; use the original manifest")
+        raise ValueError(
+            "transition intent or executable identity changed; use the original manifest"
+        )
     validate_run_id(record)
     return record
 
 
 def validate_run_id(record):
-    if "run_id" in record and (not isinstance(record["run_id"], str) or not re.fullmatch(r"[0-9a-f]{32}", record["run_id"])):
+    if "run_id" in record and (
+        not isinstance(record["run_id"], str)
+        or not re.fullmatch(r"[0-9a-f]{32}", record["run_id"])
+    ):
         raise ValueError("invalid transition run identity")
 
 
@@ -49,19 +69,28 @@ def release_pending(config):
 
 
 def terminal(config, record):
-    return (record["phase"] in ("complete", "aborted")
-            or (record["phase"] == "write-enabled" and not release_pending(config)))
+    return record["phase"] in ("complete", "aborted") or (
+        record["phase"] == "write-enabled" and not release_pending(config)
+    )
 
 
 @contextlib.contextmanager
 def transaction(config, held=None):
     require_root()
-    acquisition = contextlib.nullcontext(held) if held is not None else lock(Path(config["barrier_dir"]) / "lock")
+    acquisition = (
+        contextlib.nullcontext(held)
+        if held is not None
+        else lock(Path(config["barrier_dir"]) / "lock")
+    )
     with acquisition as transition_lease:
         record = status(config)
         source, target = validate(config)
-        with lock(Path(source["state_dir"]) / "lock", shared=terminal(config, record)) as authority_lease:
-            with pin_source(config, record, [transition_lease, authority_lease]) as leases:
+        with lock(
+            Path(source["state_dir"]) / "lock", shared=terminal(config, record)
+        ) as authority_lease:
+            with pin_source(
+                config, record, [transition_lease, authority_lease]
+            ) as leases:
                 yield record, source, target, leases
 
 
@@ -79,32 +108,61 @@ def plan(config, candidate, writer_fence_token):
     require_root()
     kind = candidate_path(candidate, config)
     source, target = validate(config)
-    if config["postgres_manifest"] is not None and not re.fullmatch(r"[0-9a-f]{32}", writer_fence_token or ""):
-        raise ValueError("PostgreSQL transition requires the borrowed capability-3 fence token")
+    if config["postgres_manifest"] is not None and not re.fullmatch(
+        r"[0-9a-f]{32}", writer_fence_token or ""
+    ):
+        raise ValueError(
+            "PostgreSQL transition requires the borrowed capability-3 fence token"
+        )
     if config["postgres_manifest"] is None and writer_fence_token is not None:
-        raise ValueError("a non-PostgreSQL transition cannot borrow an undeclared fence")
+        raise ValueError(
+            "a non-PostgreSQL transition cannot borrow an undeclared fence"
+        )
     path = journal_path(config)
-    with lock(Path(config["barrier_dir"]) / "lock", create=not path.exists()):
+    with lock(
+        Path(config["barrier_dir"]) / "lock", create=not path.exists()
+    ) as transition_lease:
         if path.exists():
             record = status(config)
-            if candidate not in (record["candidate"], record["preparation_contract"]) or record["writer_fence_token"] != writer_fence_token:
-                raise ValueError("transition resume candidate or fence identity differs")
+            if (
+                candidate not in (record["candidate"], record["preparation_contract"])
+                or record["writer_fence_token"] != writer_fence_token
+            ):
+                raise ValueError(
+                    "transition resume candidate or fence identity differs"
+                )
+            if not terminal(config, record):
+                with fence(config, record, [transition_lease]):
+                    pass
             return record
         with resource.inspection(source) as authority:
-            record = {"version": 1, "phase": "planned", "run_id": secrets.token_hex(16), "intent": intent(config),
-                      "candidate": candidate if kind == "generation" else None,
-                      "preparation_contract": candidate if kind == "contract" else None,
-                      "barrier_candidate": candidate if kind == "generation" else None,
-                      "writer_fence_token": writer_fence_token, "source_authority": authority,
-                      "source_generation": generation(),
-                      "created_at": int(time.time()), "fence": None}
-            if config["custody_manifest"] is not None:
-                entry = read_json(config["custody_manifest"])
-                custody = Path(entry["custody_file"])
-                if custody.parent != Path(source["state_dir"]):
-                    raise ValueError("target custody publication must stay in the established authority directory")
-                record["source_custody"] = read_json(custody) if custody.exists() else None
-            save(config, record)
+            record = {
+                "version": 1,
+                "phase": "planned",
+                "run_id": secrets.token_hex(16),
+                "intent": intent(config),
+                "candidate": candidate if kind == "generation" else None,
+                "preparation_contract": candidate if kind == "contract" else None,
+                "barrier_candidate": candidate if kind == "generation" else None,
+                "writer_fence_token": writer_fence_token,
+                "source_authority": authority,
+                "source_generation": generation(),
+                "created_at": int(time.time()),
+                "fence": None,
+            }
+            # Admit and retain the borrowed fence before publishing immutable intent.
+            with fence(config, record, [transition_lease]):
+                if config["custody_manifest"] is not None:
+                    entry = read_json(config["custody_manifest"])
+                    custody = Path(entry["custody_file"])
+                    if custody.parent != Path(source["state_dir"]):
+                        raise ValueError(
+                            "target custody publication must stay in the established authority directory"
+                        )
+                    record["source_custody"] = (
+                        read_json(custody) if custody.exists() else None
+                    )
+                save(config, record)
             return record
 
 
@@ -118,58 +176,108 @@ def capture_source(config, record, leases):
     attempt = "transition-" + application_backup.identity(record["intent"])[:32]
     if "run_id" in record:
         attempt += "-" + record["run_id"]
-    command = {"user": user, "argv": [str(Path(config["storage_package"]) / "harbor-db-application-backup"),
-               "--config", config["backup_manifest"], "capture", "--attempt", attempt, "--retry-incomplete"]}
+    command = {
+        "user": user,
+        "argv": [
+            str(Path(config["storage_package"]) / "harbor-db-application-backup"),
+            "--config",
+            config["backup_manifest"],
+            "capture",
+            "--attempt",
+            attempt,
+            "--retry-incomplete",
+        ],
+    }
     backup = root / attempt
     if not backup.exists():
         # One retry cleanup plus capture/restore/verify/cleanup and bounded slack.
-        worker({"timeout_seconds": backup_config["timeout_seconds"] * 5 + 60}, command, {}, leases)
+        worker(
+            {"timeout_seconds": backup_config["timeout_seconds"] * 5 + 60},
+            command,
+            {},
+            leases,
+        )
     # A completed tree whose pointer publication was interrupted may be reused
     # only after complete byte, tool and freshness verification.
     result = application_backup.inspect(backup_config, backup)
     if result["consistency"] != "quiesced":
-        raise ValueError("cutover capture requires quiesced sequence and filesystem state")
+        raise ValueError(
+            "cutover capture requires quiesced sequence and filesystem state"
+        )
     return backup, result
 
 
 def source_bytes(config, record, *, retained=False):
-    inspect = application_backup.inspect_retained if retained else application_backup.inspect
+    inspect = (
+        application_backup.inspect_retained if retained else application_backup.inspect
+    )
     result = inspect(read_json(config["backup_manifest"]), Path(record["backup"]))
-    if application_backup.digest(Path(record["backup"]) / "acceptance.json") != record["source_acceptance_sha256"]:
+    if (
+        application_backup.digest(Path(record["backup"]) / "acceptance.json")
+        != record["source_acceptance_sha256"]
+    ):
         raise ValueError("source backup evidence changed")
     return result
 
 
 def run_action(config, stage, record, leases):
-    if record["candidate"] is None and "{candidate}" in config["commands"][stage]["argv"]:
-        raise ValueError("preparation workers must use the immutable target contract before a generation is bound")
-    return worker(config, config["commands"][stage], {"{backup}": record["backup"],
-                  "{candidate}": record["candidate"], "{source}": config["source_manifest"],
-                  "{target}": config["target_manifest"]}, leases)
+    if (
+        record["candidate"] is None
+        and "{candidate}" in config["commands"][stage]["argv"]
+    ):
+        raise ValueError(
+            "preparation workers must use the immutable target contract before a generation is bound"
+        )
+    return worker(
+        config,
+        config["commands"][stage],
+        {
+            "{backup}": record["backup"],
+            "{candidate}": record["candidate"],
+            "{source}": config["source_manifest"],
+            "{target}": config["target_manifest"],
+        },
+        leases,
+    )
 
 
 def semantic(receipt, expected):
-    if (not isinstance(receipt, dict) or set(receipt) != {"version", "status", "semantic_sha256"}
-            or receipt["version"] != 1 or receipt["status"] != "verified"
-            or receipt["semantic_sha256"] != expected):
-        raise ValueError("complete application semantic evidence differs from the captured source")
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != {"version", "status", "semantic_sha256"}
+        or receipt["version"] != 1
+        or receipt["status"] != "verified"
+        or receipt["semantic_sha256"] != expected
+    ):
+        raise ValueError(
+            "complete application semantic evidence differs from the captured source"
+        )
 
 
 def evidence(config, record):
     source = source_bytes(config, record)
     receipt, current = independent_receipt(config)
-    if (receipt["version"] != 1 or receipt["status"] != "verified" or receipt["resource"] != config["resource"]
-            or receipt["source_acceptance_sha256"] != record["source_acceptance_sha256"]
-            or receipt["semantic_sha256"] != source["semantic_sha256"]
-            or receipt["manifest_sha256"] != source["manifest_sha256"]
-            or receipt["executables"] != source["executables"]
-            or receipt["executor_machine_sha256"] == source["executor_machine_sha256"]
-            or receipt["executor"] == source["executor"]):
-        raise ValueError("independent application restore evidence differs or is not independent")
+    if (
+        receipt["version"] != 1
+        or receipt["status"] != "verified"
+        or receipt["resource"] != config["resource"]
+        or receipt["source_acceptance_sha256"] != record["source_acceptance_sha256"]
+        or receipt["semantic_sha256"] != source["semantic_sha256"]
+        or receipt["manifest_sha256"] != source["manifest_sha256"]
+        or receipt["executables"] != source["executables"]
+        or receipt["executor_machine_sha256"] == source["executor_machine_sha256"]
+        or receipt["executor"] == source["executor"]
+    ):
+        raise ValueError(
+            "independent application restore evidence differs or is not independent"
+        )
     age = int(time.time()) - receipt["certified_at"]
     if not 0 <= age <= read_json(config["backup_manifest"])["maximum_age_seconds"]:
         raise ValueError("independent restoration is stale or from the future")
-    if record.get("independent_sha256") is not None and record["independent_sha256"] != current:
+    if (
+        record.get("independent_sha256") is not None
+        and record["independent_sha256"] != current
+    ):
         raise ValueError("independent restore evidence changed during resume")
     return source, current
 
@@ -177,20 +285,41 @@ def evidence(config, record):
 def primary_evidence(config, record, leases):
     if config["postgres_manifest"] is None:
         return None
-    result = worker(config, {"user": "postgres", "argv": [str(Path(config["storage_package"]) / "harbor-db-postgres"),
-                    "--config", config["postgres_manifest"], "inspect-recovery", "--socket-dir", config["postgres_socket"],
-                    "--port", str(config["postgres_port"])]}, {}, leases)
+    result = worker(
+        config,
+        {
+            "user": "postgres",
+            "argv": [
+                str(Path(config["storage_package"]) / "harbor-db-postgres"),
+                "--config",
+                config["postgres_manifest"],
+                "inspect-recovery",
+                "--socket-dir",
+                config["postgres_socket"],
+                "--port",
+                str(config["postgres_port"]),
+            ],
+        },
+        {},
+        leases,
+    )
     if result["status"] != "ready":
         raise ValueError("the whole primary recovery boundary is not accepted")
     from . import recovery
+
     database = read_json(config["postgres_manifest"])
     settings = database["recovery"]
     snapshot_path = recovery.source_snapshot_path(database, settings)
     snapshot = read_json(snapshot_path)
-    if (snapshot.get("writer_fence_token") != record["writer_fence_token"]
-            or application_backup.digest(snapshot_path) != result["snapshot_sha256"]):
+    if (
+        snapshot.get("writer_fence_token") != record["writer_fence_token"]
+        or application_backup.digest(snapshot_path) != result["snapshot_sha256"]
+    ):
         raise ValueError("primary snapshot does not bind the same held writer fence")
-    if record.get("primary_snapshot_sha256") is not None and record["primary_snapshot_sha256"] != result["snapshot_sha256"]:
+    if (
+        record.get("primary_snapshot_sha256") is not None
+        and record["primary_snapshot_sha256"] != result["snapshot_sha256"]
+    ):
         raise ValueError("primary recovery snapshot changed during transition resume")
     return result["snapshot_sha256"]
 
@@ -200,6 +329,7 @@ def target_custody(config, record, target, leases):
     if entry is None:
         return None
     from . import cutover
+
     expected = target
     if target.get("consumer_command"):
         prepared = record.get("target_authority")
@@ -211,25 +341,53 @@ def target_custody(config, record, target, leases):
     requirement = []
     checks = entry.get("database_inventory_checks", [])
     if checks and config["postgres_manifest"] is None:
-        raise ValueError("database-bound custody requires the borrowed PostgreSQL fence")
+        raise ValueError(
+            "database-bound custody requires the borrowed PostgreSQL fence"
+        )
     for check in checks:
         database = read_json(config["postgres_manifest"])
         from . import recovery
-        command = {"user": "postgres", "argv": recovery.query_argv(database, config["postgres_socket"], config["postgres_port"],
-                   check["database"], check["sql"], statement_timeout_seconds=30)}
+
+        command = {
+            "user": "postgres",
+            "argv": recovery.query_argv(
+                database,
+                config["postgres_socket"],
+                config["postgres_port"],
+                check["database"],
+                check["sql"],
+                statement_timeout_seconds=30,
+            ),
+        }
         paths = worker(config, command, {}, leases)
         if not isinstance(paths, list):
             raise ValueError("database corpus query did not produce a path array")
-        requirement.extend(cutover.database_entry(check["root"], item) for item in paths)
+        requirement.extend(
+            cutover.database_entry(check["root"], item) for item in paths
+        )
     contents = cutover.inventory(entry, contents=True)
-    cutover.require_database_paths(contents, requirement, roots=authority["directories"], git_executable=entry.get("git_executable"))
-    return {"version": 1, "resource": target["resource"], "identity": record["source_authority"]["identity"],
-            "binding": authority["binding"], "directories": authority["directories"],
-            "root_identities": cutover.root_identities(entry), "inventory": contents,
-            "metadata": cutover.inventory(entry, contents=False), "completed_at": int(time.time()),
-            "database_snapshot_sha256": record["primary_snapshot_sha256"], "database_requirements": requirement,
-            "transition_source_acceptance_sha256": record["source_acceptance_sha256"],
-            "independent_restore_sha256": record["independent_sha256"], "semantic_sha256": record["semantic_sha256"]}
+    cutover.require_database_paths(
+        contents,
+        requirement,
+        roots=authority["directories"],
+        git_executable=entry.get("git_executable"),
+    )
+    return {
+        "version": 1,
+        "resource": target["resource"],
+        "identity": record["source_authority"]["identity"],
+        "binding": authority["binding"],
+        "directories": authority["directories"],
+        "root_identities": cutover.root_identities(entry),
+        "inventory": contents,
+        "metadata": cutover.inventory(entry, contents=False),
+        "completed_at": int(time.time()),
+        "database_snapshot_sha256": record["primary_snapshot_sha256"],
+        "database_requirements": requirement,
+        "transition_source_acceptance_sha256": record["source_acceptance_sha256"],
+        "independent_restore_sha256": record["independent_sha256"],
+        "semantic_sha256": record["semantic_sha256"],
+    }
 
 
 def verify_custody(config, record, target, leases):
@@ -240,12 +398,15 @@ def verify_custody(config, record, target, leases):
 
 
 def custody_equal(observed, expected):
-    return (isinstance(expected, dict) and isinstance(observed, dict)
-            and type(expected.get("completed_at")) is int
-            and type(observed.get("completed_at")) is int
-            and 0 < expected["completed_at"] <= observed["completed_at"]
-            and {key: value for key, value in expected.items() if key != "completed_at"}
-                == {key: value for key, value in observed.items() if key != "completed_at"})
+    return (
+        isinstance(expected, dict)
+        and isinstance(observed, dict)
+        and type(expected.get("completed_at")) is int
+        and type(observed.get("completed_at")) is int
+        and 0 < expected["completed_at"] <= observed["completed_at"]
+        and {key: value for key, value in expected.items() if key != "completed_at"}
+        == {key: value for key, value in observed.items() if key != "completed_at"}
+    )
 
 
 def prepare(config):
@@ -254,24 +415,47 @@ def prepare(config):
     # Existing processes can drain; a reboot cannot start another generation.
     with lock(Path(config["barrier_dir"]) / "lock") as transition_lease:
         record = status(config)
-        if record["phase"] not in ("planned", "quiescing", "quiesced", "captured", "importing", "imported", "prepared"):
+        if record["phase"] not in (
+            "planned",
+            "quiescing",
+            "quiesced",
+            "captured",
+            "importing",
+            "imported",
+            "prepared",
+        ):
             raise ValueError("transition preparation is not permitted at this phase")
-        save(config, record, "quiescing" if record["phase"] == "planned" else None)
-        install_barriers(config, record)
-        stop_units(config)
-        return prepare_locked(config, transition_lease)
+        # A stale fence must not change the phase or inhibit/stop writers.
+        with fence(config, record, [transition_lease]):
+            save(config, record, "quiescing" if record["phase"] == "planned" else None)
+            install_barriers(config, record)
+            stop_units(config)
+            return prepare_locked(config, transition_lease)
 
 
 def prepare_locked(config, transition_lease):
-    with transaction(config, transition_lease) as (record, source, target, leases), fence(config, record, leases) as leases:
+    with (
+        transaction(config, transition_lease) as (record, source, target, leases),
+        fence(config, record, leases) as leases,
+    ):
         inspect_barriers(config)
-        if resource.verify(source, resource.contract(source)) != record["source_authority"]:
+        if (
+            resource.verify(source, resource.contract(source))
+            != record["source_authority"]
+        ):
             raise ValueError("old source authority changed during transition")
         if record["phase"] in ("quiescing", "quiesced"):
             save(config, record, "quiesced")
             backup, accepted = capture_source(config, record, leases)
-            record.update({"backup": str(backup), "source_acceptance_sha256": application_backup.digest(backup / "acceptance.json"),
-                           "semantic_sha256": accepted["semantic_sha256"]})
+            record.update(
+                {
+                    "backup": str(backup),
+                    "source_acceptance_sha256": application_backup.digest(
+                        backup / "acceptance.json"
+                    ),
+                    "semantic_sha256": accepted["semantic_sha256"],
+                }
+            )
             save(config, record, "captured")
         with pin_source(config, record, leases) as pinned:
             return prepare_target(config, record, target, pinned)
@@ -285,18 +469,25 @@ def prepare_target(config, record, target, leases):
     if record["phase"] not in ("imported", "prepared"):
         save(config, record, "importing")
         run_action(config, "import", record, leases)
-    semantic(run_action(config, "verify-target", record, leases), record["semantic_sha256"])
+    semantic(
+        run_action(config, "verify-target", record, leases), record["semantic_sha256"]
+    )
     evidence(config, record)
     if record["phase"] != "prepared":
         save(config, record, "imported")
     record["primary_snapshot_sha256"] = primary_evidence(config, record, leases)
     expected = resource.contract(target)
     prepared = {**expected, "identity": record["source_authority"]["identity"]}
-    if record.get("target_authority") is not None and record["target_authority"] != prepared:
+    if (
+        record.get("target_authority") is not None
+        and record["target_authority"] != prepared
+    ):
         raise ValueError("prepared target authority evidence changed")
     record["target_authority"] = prepared
     custody = target_custody(config, record, target, leases)
-    if record.get("custody") is not None and not custody_equal(custody, record["custody"]):
+    if record.get("custody") is not None and not custody_equal(
+        custody, record["custody"]
+    ):
         raise ValueError("prepared target corpus evidence changed")
     record.setdefault("custody", custody)
     save(config, record, "prepared")
@@ -307,7 +498,9 @@ def publish(config, target, expected, old):
     state = resource.state_directory(target)
     current = read_json(state / "identity.json")
     if current not in (old, expected):
-        raise ValueError("authority compare-and-swap rejected a different live identity")
+        raise ValueError(
+            "authority compare-and-swap rejected a different live identity"
+        )
     marker = {"resource": target["resource"], "identity": expected["identity"]}
     for directory in expected["directories"]:
         path = resource.anchor(target, directory)
@@ -318,7 +511,10 @@ def publish(config, target, expected, old):
 
 
 def commit(config):
-    with transaction(config) as (record, source, target, leases), fence(config, record, leases) as leases:
+    with (
+        transaction(config) as (record, source, target, leases),
+        fence(config, record, leases) as leases,
+    ):
         if record["phase"] not in ("prepared", "committing", "committed"):
             raise ValueError("authority commit requires a prepared transition")
         inspect_barriers(config)
@@ -326,12 +522,17 @@ def commit(config):
             raise ValueError("the exact accepted generation is not selected")
         evidence(config, record)
         primary_evidence(config, record, leases)
-        semantic(run_action(config, "verify-target", record, leases), record["semantic_sha256"])
+        semantic(
+            run_action(config, "verify-target", record, leases),
+            record["semantic_sha256"],
+        )
         custody = verify_custody(config, record, target, leases)
         if record["phase"] != "committed":
             record["custody"] = custody
             save(config, record, "committing")
-            publish(config, target, record["target_authority"], record["source_authority"])
+            publish(
+                config, target, record["target_authority"], record["source_authority"]
+            )
             if record["custody"] is not None:
                 entry = read_json(config["custody_manifest"])
                 write_owned(entry["custody_file"], record["custody"])
@@ -342,8 +543,13 @@ def commit(config):
 
 def bind_candidate(config, candidate):
     with transaction(config) as (record, source, target, leases):
-        if record["phase"] != "prepared" or candidate_path(candidate, config) != "generation":
-            raise ValueError("bind the realized generation only after transition preparation")
+        if (
+            record["phase"] != "prepared"
+            or candidate_path(candidate, config) != "generation"
+        ):
+            raise ValueError(
+                "bind the realized generation only after transition preparation"
+            )
         if record["candidate"] is not None and record["candidate"] != candidate:
             raise ValueError("a different generation is already bound")
         inspect_barriers(config)
@@ -356,21 +562,34 @@ def bind_candidate(config, candidate):
 def admission(config, phase, expected, candidate=None):
     """Target contract admission while authority publication remains pending."""
     record = status(config)
-    if record["phase"] not in ("prepared", "committing", "committed") or phase not in ("preflight", "activate"):
-        raise ValueError("prepared transition cannot authorize ordinary startup or incomplete preparation")
+    if record["phase"] not in ("prepared", "committing", "committed") or phase not in (
+        "preflight",
+        "activate",
+    ):
+        raise ValueError(
+            "prepared transition cannot authorize ordinary startup or incomplete preparation"
+        )
     _, target = validate(config)
     if target != expected:
-        raise ValueError("candidate transition authority differs from the prepared target contract")
+        raise ValueError(
+            "candidate transition authority differs from the prepared target contract"
+        )
     if phase == "activate" and record["candidate"] is None:
         raise ValueError("activation requires an explicitly bound realized generation")
     if phase == "activate" and candidate != record["candidate"]:
         raise ValueError("activation generation differs from the bound candidate")
     require_root()
-    with transaction(config) as (record, source, target, leases), fence(config, record, leases) as leases:
+    with (
+        transaction(config) as (record, source, target, leases),
+        fence(config, record, leases) as leases,
+    ):
         inspect_barriers(config)
         evidence(config, record)
         primary_evidence(config, record, leases)
-        semantic(run_action(config, "verify-target", record, leases), record["semantic_sha256"])
+        semantic(
+            run_action(config, "verify-target", record, leases),
+            record["semantic_sha256"],
+        )
         verify_custody(config, record, target, leases)
         if record["phase"] in ("prepared", "committing"):
             current = read_json(Path(source["state_dir"]) / "identity.json")
@@ -378,10 +597,16 @@ def admission(config, phase, expected, candidate=None):
                 raise ValueError("prepared transition authority changed")
         else:
             resource.verify(target, resource.contract(target))
-        return {"status": "prepared-with-writers-inhibited", "resource": config["resource"],
-                "candidate": record["candidate"], "semantic_sha256": record["semantic_sha256"],
-                "database_snapshot_sha256": record["primary_snapshot_sha256"],
-                "database_requirements": [] if record["custody"] is None else record["custody"]["database_requirements"]}
+        return {
+            "status": "prepared-with-writers-inhibited",
+            "resource": config["resource"],
+            "candidate": record["candidate"],
+            "semantic_sha256": record["semantic_sha256"],
+            "database_snapshot_sha256": record["primary_snapshot_sha256"],
+            "database_requirements": []
+            if record["custody"] is None
+            else record["custody"]["database_requirements"],
+        }
 
 
 def enable_writes(config):
@@ -395,7 +620,10 @@ def enable_writes(config):
                 inspect_barriers(config)
                 evidence(config, record)
                 primary_evidence(config, record, pinned)
-                semantic(run_action(config, "verify-target", record, pinned), record["semantic_sha256"])
+                semantic(
+                    run_action(config, "verify-target", record, pinned),
+                    record["semantic_sha256"],
+                )
                 verify_custody(config, record, target, pinned)
                 resource.verify(target, resource.contract(target))
                 # Durable point of no return BEFORE any app write is possible.
@@ -404,7 +632,11 @@ def enable_writes(config):
                 release_barriers(config, record)
         else:
             release_barriers(config, record)
-        return {**record, "status": "write-enabled", "borrowed_fence_release_required": config["postgres_manifest"] is not None}
+        return {
+            **record,
+            "status": "write-enabled",
+            "borrowed_fence_release_required": config["postgres_manifest"] is not None,
+        }
 
 
 def complete(config):
@@ -413,8 +645,13 @@ def complete(config):
     require_root()
     with lock(Path(config["barrier_dir"]) / "lock") as transition_lease:
         record = status(config)
-        if record["phase"] not in ("write-enabled", "complete") or generation() != record["candidate"]:
-            raise ValueError("completion requires the selected write-enabled generation")
+        if (
+            record["phase"] not in ("write-enabled", "complete")
+            or generation() != record["candidate"]
+        ):
+            raise ValueError(
+                "completion requires the selected write-enabled generation"
+            )
         if release_pending(config):
             raise ValueError("completion requires released writer barriers")
         _, target = validate(config)
@@ -432,21 +669,35 @@ def abort(config):
             release_barriers(config, record, aborted=True)
             return record
         if record["phase"] in ("write-enabled", "complete"):
-            raise ValueError("writers may have acknowledged changes; a fresh reverse transition is required")
+            raise ValueError(
+                "writers may have acknowledged changes; a fresh reverse transition is required"
+            )
         if generation() != record["source_generation"]:
-            raise ValueError("abort requires the exact retained source generation selected with writers inhibited")
+            raise ValueError(
+                "abort requires the exact retained source generation selected with writers inhibited"
+            )
         with fence(config, record, leases) as pinned:
             if "backup" in record:
                 source_bytes(config, record, retained=True)
-                semantic(run_action(config, "verify-source", record, pinned), record["semantic_sha256"])
+                semantic(
+                    run_action(config, "verify-source", record, pinned),
+                    record["semantic_sha256"],
+                )
             if record["phase"] in ("committing", "committed", "aborting"):
                 save(config, record, "aborting")
-                publish(config, source, record["source_authority"], record["target_authority"])
+                publish(
+                    config,
+                    source,
+                    record["source_authority"],
+                    record["target_authority"],
+                )
                 if record["custody"] is not None:
                     path = Path(read_json(config["custody_manifest"])["custody_file"])
                     current = read_json(path) if path.exists() else None
                     if current not in (record["custody"], record["source_custody"]):
-                        raise ValueError("custody compare-and-swap rejected changed evidence")
+                        raise ValueError(
+                            "custody compare-and-swap rejected changed evidence"
+                        )
                     if record["source_custody"] is not None:
                         write_owned(path, record["source_custody"])
                     elif path.exists():
@@ -467,7 +718,12 @@ def retire(config):
             raise ValueError("unfinished writer barrier release cannot be retired")
         active = target if record["phase"] == "complete" else source
         resource.verify(active, resource.contract(active))
-        archive = Path(config["barrier_dir"]) / (application_backup.identity(record["intent"]) + "-" + application_backup.identity(record) + ".history.json")
+        archive = Path(config["barrier_dir"]) / (
+            application_backup.identity(record["intent"])
+            + "-"
+            + application_backup.identity(record)
+            + ".history.json"
+        )
         if archive.exists():
             if read_json(archive) != record:
                 raise ValueError("transition history conflicts")
@@ -487,7 +743,15 @@ def main():
     planning.add_argument("--writer-fence-token")
     binding = commands.add_parser("bind-candidate")
     binding.add_argument("--candidate", required=True)
-    for name in ("status", "prepare", "commit", "enable-writes", "complete", "abort", "retire"):
+    for name in (
+        "status",
+        "prepare",
+        "commit",
+        "enable-writes",
+        "complete",
+        "abort",
+        "retire",
+    ):
         commands.add_parser(name)
     args = parser.parse_args()
     try:
@@ -499,8 +763,15 @@ def main():
         elif args.command == "bind-candidate":
             result = bind_candidate(config, args.candidate)
         else:
-            function = {"status": status, "prepare": prepare, "commit": commit, "enable-writes": enable_writes,
-                        "complete": complete, "abort": abort, "retire": retire}[args.command]
+            function = {
+                "status": status,
+                "prepare": prepare,
+                "commit": commit,
+                "enable-writes": enable_writes,
+                "complete": complete,
+                "abort": abort,
+                "retire": retire,
+            }[args.command]
             result = function(config)
         print(json.dumps(result, sort_keys=True))
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:

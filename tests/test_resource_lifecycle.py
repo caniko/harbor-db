@@ -19,7 +19,8 @@ class ResourceAuthorityTest(unittest.TestCase):
         for name in ("authority", "data", "state"):
             (self.root / name).mkdir()
         self.config = {
-            "resource": "annotations", "state_dir": str(self.root / "authority"),
+            "resource": "annotations",
+            "state_dir": str(self.root / "authority"),
             "binding": {"backend": "filesystem", "endpoint": str(self.root / "data")},
             "directories": [str(self.root / "data"), str(self.root / "state")],
             "required_mounts": [],
@@ -33,7 +34,10 @@ class ResourceAuthorityTest(unittest.TestCase):
     def test_backend_and_path_change_fail_closed(self):
         resource.adopt(self.config, "verified-archive")
         resource.check(self.config)
-        changed = dict(self.config, binding={"backend": "postgresql", "endpoint": "postgres:///other"})
+        changed = dict(
+            self.config,
+            binding={"backend": "postgresql", "endpoint": "postgres:///other"},
+        )
         with self.assertRaises(resource.AuthorityError):
             resource.check(changed)
         with self.assertRaises(resource.AuthorityError):
@@ -56,7 +60,10 @@ class ResourceAuthorityTest(unittest.TestCase):
                 raise OSError("authority publication interrupted")
             write_json(path, value)
 
-        with patch.object(resource, "write_json", side_effect=interrupt), self.assertRaisesRegex(OSError, "interrupted"):
+        with (
+            patch.object(resource, "write_json", side_effect=interrupt),
+            self.assertRaisesRegex(OSError, "interrupted"),
+        ):
             resource.adopt(self.config, "verified-archive")
         self.assertFalse(authority.exists())
         resource.adopt(self.config, "verified-archive")
@@ -83,13 +90,21 @@ class ResourceAuthorityTest(unittest.TestCase):
         output = self.root / "consumer.json"
         review = self.root / "state" / "review.toml"
         review.write_text("[sessions]\n")
-        output.write_text(json.dumps({
-            "binding": {"dataset": "one", "config_sha256": "verified"},
-            "directories": [str(self.root / "data")], "required_files": [str(review)],
-        }))
+        output.write_text(
+            json.dumps(
+                {
+                    "binding": {"dataset": "one", "config_sha256": "verified"},
+                    "directories": [str(self.root / "data")],
+                    "required_files": [str(review)],
+                }
+            )
+        )
         self.config["consumer_command"] = [
-            sys.executable, "-B", "-c",
-            "import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text())", str(output),
+            sys.executable,
+            "-B",
+            "-c",
+            "import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text())",
+            str(output),
         ]
         return output, review
 
@@ -109,7 +124,9 @@ class ResourceAuthorityTest(unittest.TestCase):
         with self.assertRaisesRegex(resource.AuthorityError, "required storage file"):
             resource.check(self.config)
 
-    def test_adopted_consumer_floors_reject_empty_and_older_records_but_allow_later_saves(self):
+    def test_adopted_consumer_floors_reject_empty_and_older_records_but_allow_later_saves(
+        self,
+    ):
         output, _ = self.consumer_contract()
         contract = json.loads(output.read_text())
         contract["minimum_counters"] = {"revision": 42, "review:one": 1}
@@ -123,22 +140,37 @@ class ResourceAuthorityTest(unittest.TestCase):
         later = self.root / "state" / "later.toml"
         later.write_text("[sessions]\n")
         contract["required_files"].append(str(later))
-        contract["minimum_counters"] = {"revision": 43, "review:one": 1, "review:two": 1}
+        contract["minimum_counters"] = {
+            "revision": 43,
+            "review:one": 1,
+            "review:two": 1,
+        }
         output.write_text(json.dumps(contract))
         resource.check(self.config)
 
     def test_consumer_failure_never_publishes_authority(self):
         self.config["consumer_command"] = [sys.executable, "-c", "raise SystemExit(1)"]
-        with self.assertRaisesRegex(resource.AuthorityError, "consumer storage validation failed"):
+        with self.assertRaisesRegex(
+            resource.AuthorityError, "consumer storage validation failed"
+        ):
             resource.adopt(self.config, "verified-archive")
         self.assertFalse((self.root / "authority" / "identity.json").exists())
 
     def test_consumer_writer_holds_authority_until_it_exits(self):
         resource.adopt(self.config, "verified-archive")
-        worker = [sys.executable, "-B", "-c", "import sys; print('ready', flush=True); sys.stdin.buffer.read(1)"]
+        worker = [
+            sys.executable,
+            "-B",
+            "-c",
+            "import sys; print('ready', flush=True); sys.stdin.buffer.read(1)",
+        ]
         command = f"from harbor_db import resource; resource.serve({self.config!r}, {worker!r})"
-        process = subprocess.Popen([sys.executable, "-B", "-c", command],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen(
+            [sys.executable, "-B", "-c", command],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         try:
             self.assertTrue(select.select([process.stdout], [], [], 10)[0])
             self.assertEqual(process.stdout.readline(), b"ready\n")

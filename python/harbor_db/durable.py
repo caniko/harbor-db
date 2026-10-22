@@ -50,10 +50,15 @@ def read_json(path):
 def immutable_store_reference(path, *, executable=False):
     """Resolve a regular immutable file without accepting mutable alias hops."""
     spelling = str(path)
-    if (not spelling.startswith("/") or "//" in spelling or spelling.endswith("/")
-            or any(part in (".", "..") for part in spelling.split("/"))):
+    if (
+        not spelling.startswith("/")
+        or "//" in spelling
+        or spelling.endswith("/")
+        or any(part in (".", "..") for part in spelling.split("/"))
+    ):
         raise ValueError("immutable store paths require normalized absolute spelling")
     store = Path("/nix/store")
+
     def reference(selected, depth=0):
         if not selected.is_relative_to(store) or depth > 64:
             raise ValueError("reference requires an immutable store file")
@@ -65,13 +70,22 @@ def immutable_store_reference(path, *, executable=False):
                 raise ValueError("reference requires root-owned immutable store paths")
             if stat.S_ISLNK(info.st_mode):
                 target = entry.readlink()
-                reference(target if target.is_absolute() else entry.parent.resolve(strict=True) / target, depth + 1)
+                reference(
+                    target
+                    if target.is_absolute()
+                    else entry.parent.resolve(strict=True) / target,
+                    depth + 1,
+                )
             elif info.st_mode & 0o222:
                 raise ValueError("reference requires read-only immutable store paths")
+
     selected = Path(spelling)
     reference(selected)
     resolved = selected.resolve(strict=True)
-    if not re.fullmatch(r"/nix/store/[0123456789abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+(?:/[^/]+)*", str(resolved)):
+    if not re.fullmatch(
+        r"/nix/store/[0123456789abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+(?:/[^/]+)*",
+        str(resolved),
+    ):
         raise ValueError("reference requires an immutable store file")
     for parent in resolved.parents:
         if parent == store:
@@ -142,10 +156,14 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     write = commands.add_parser("write", help="durably publish stdin to a file")
     write.add_argument("destination", type=Path)
-    publish = commands.add_parser("publish-tree", help="flush and publish an offline tree")
+    publish = commands.add_parser(
+        "publish-tree", help="flush and publish an offline tree"
+    )
     publish.add_argument("source", type=Path)
     publish.add_argument("destination", type=Path)
-    publish_file_parser = commands.add_parser("publish-file", help="flush and publish an immutable file")
+    publish_file_parser = commands.add_parser(
+        "publish-file", help="flush and publish an immutable file"
+    )
     publish_file_parser.add_argument("source", type=Path)
     publish_file_parser.add_argument("destination", type=Path)
     args = parser.parse_args()

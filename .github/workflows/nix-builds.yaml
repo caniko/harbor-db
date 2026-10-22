@@ -172,7 +172,7 @@ jobs:
 
         with:
           name: nix-build-${{ strategy.job-index }}
-          retention-days: 14
+          retention-days: 32
           if-no-files-found: error
           path: |
             ${{ runner.temp }}/simit-nix-build-${{ strategy.job-index }}

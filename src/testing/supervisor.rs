@@ -783,6 +783,24 @@ fn execute_case(
         artifacts: vec![],
         evidence_errors: vec![],
     };
+    // Bind each execution, not just worker startup or terminal verification.
+    // Inode/ctime continuity also rejects edits whose original bytes are restored
+    // before the case exits, which a second content hash alone would miss.
+    let inputs = match bound_input_identities(spec).and_then(|inputs| {
+        validate_spec(spec)?;
+        validate_service_executable(run)?;
+        if bound_input_identities(spec)? != inputs {
+            return Err(error("source/input changed during case admission"));
+        }
+        Ok(inputs)
+    }) {
+        Ok(inputs) => inputs,
+        Err(e) => {
+            result.reason = ExitReason::SpawnFailed;
+            result.evidence_errors.push(e.to_string());
+            return Ok(result);
+        }
+    };
     let mut command = match &case.execution {
         Execution::Argv { argv, env } => {
             let mut command = Command::new(&argv[0]);
@@ -895,6 +913,15 @@ fn execute_case(
     }
     result.finished = now();
     started.child = None;
+    if let Err(e) = validate_spec(spec).and_then(|()| {
+        validate_service_executable(run)?;
+        if bound_input_identities(spec)? != inputs {
+            return Err(error("source/input changed during case execution"));
+        }
+        Ok(())
+    }) {
+        result.evidence_errors.push(e.to_string());
+    }
     Ok(result)
 }
 
@@ -1023,7 +1050,16 @@ pub fn worker(run: &Path) -> Result<()> {
     )?;
     Ok(())
 }
-fn artifact_identity(path: &Path) -> Result<(u64, u64, i64, i64, i64, i64, u64)> {
+type FileIdentity = (u64, u64, i64, i64, i64, i64, u64);
+
+fn bound_input_identities(spec: &RunSpec) -> Result<Vec<FileIdentity>> {
+    spec.inputs
+        .iter()
+        .map(|input| artifact_identity(&input.path))
+        .collect()
+}
+
+fn artifact_identity(path: &Path) -> Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
     let metadata = evidence::open(path, libc::O_RDONLY, 0)?.metadata()?;
     Ok((
