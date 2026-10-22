@@ -28,40 +28,88 @@ class ApplicationTransitionTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         inspect_ancestors = startup_inhibition.owned_ancestors
+
         def fixture_ancestors(path):
             # Model root inside the private fixture, as in the startup-inhibition
             # tests. Nix's writable /build is outside that model. Keep the real
             # ownership/mode checks on all fixture ancestors; VMs cover the host.
-            inspect_ancestors(SimpleNamespace(parents=[parent for parent in path.parents
-                if parent == self.root or parent.is_relative_to(self.root)]))
-        self.enterContext(mock.patch.object(startup_inhibition, "owned_ancestors", side_effect=fixture_ancestors))
-        self.state, self.old, self.new, self.barrier = [self.root / name for name in ("authority", "old", "new", "barrier")]
+            inspect_ancestors(
+                SimpleNamespace(
+                    parents=[
+                        parent
+                        for parent in path.parents
+                        if parent == self.root or parent.is_relative_to(self.root)
+                    ]
+                )
+            )
+
+        self.enterContext(
+            mock.patch.object(
+                startup_inhibition, "owned_ancestors", side_effect=fixture_ancestors
+            )
+        )
+        self.state, self.old, self.new, self.barrier = [
+            self.root / name for name in ("authority", "old", "new", "barrier")
+        ]
         for path in (self.state, self.old, self.new, self.barrier):
             path.mkdir(mode=0o700)
-        self.source = {"resource": "demo", "state_dir": str(self.state), "directories": [str(self.old)], "binding": {"backend": "filesystem"}, "required_mounts": []}
-        self.target = self.source | {"directories": [str(self.new)], "binding": {"backend": "test-target"}}
+        self.source = {
+            "resource": "demo",
+            "state_dir": str(self.state),
+            "directories": [str(self.old)],
+            "binding": {"backend": "filesystem"},
+            "required_mounts": [],
+        }
+        self.target = self.source | {
+            "directories": [str(self.new)],
+            "binding": {"backend": "test-target"},
+        }
         resource.adopt(self.source, "retained-resource")
-        self.source_manifest, self.target_manifest = self.root / "source.json", self.root / "target.json"
+        self.source_manifest, self.target_manifest = (
+            self.root / "source.json",
+            self.root / "target.json",
+        )
         write_json(self.source_manifest, self.source)
         write_json(self.target_manifest, self.target)
         self.adapter = self.root / "adapter.py"
-        self.adapter.write_text('''import json, sys
+        self.adapter.write_text("""import json, sys
 print(json.dumps({"version":1,"status":"verified","semantic_sha256":"a"*64}))
-''')
-        self.config = {"version": 1, "resource": "demo", "source_manifest": str(self.source_manifest),
-                       "target_manifest": str(self.target_manifest), "barrier_dir": str(self.barrier),
-                       "drop_in_root": str(self.root / "systemd"), "systemctl": sys.executable, "busctl": sys.executable,
-                       "units": ["demo.service"], "retired_units": [], "timeout_seconds": 10,
-                       "commands": {stage: {"user": "root", "argv": [sys.executable, str(self.adapter)]}
-                                    for stage in ("import", "verify-target", "verify-source", "health")},
-                       "executable_files": [str(self.adapter)], "postgres_manifest": None,
-                       "postgres_socket": "/run/postgresql", "postgres_port": 5432,
-                       "custody_manifest": None,
-                       "backup_manifest": str(self.root / "backup-config.json"),
-                       "independent_receipt": str(self.root / "independent.json"),
-                       "storage_package": "/bin", "runuser": sys.executable}
+""")
+        self.config = {
+            "version": 1,
+            "resource": "demo",
+            "source_manifest": str(self.source_manifest),
+            "target_manifest": str(self.target_manifest),
+            "barrier_dir": str(self.barrier),
+            "drop_in_root": str(self.root / "systemd"),
+            "systemctl": sys.executable,
+            "busctl": sys.executable,
+            "units": ["demo.service"],
+            "retired_units": [],
+            "timeout_seconds": 10,
+            "commands": {
+                stage: {"user": "root", "argv": [sys.executable, str(self.adapter)]}
+                for stage in ("import", "verify-target", "verify-source", "health")
+            },
+            "executable_files": [str(self.adapter)],
+            "postgres_manifest": None,
+            "postgres_socket": "/run/postgresql",
+            "postgres_port": 5432,
+            "custody_manifest": None,
+            "backup_manifest": str(self.root / "backup-config.json"),
+            "independent_receipt": str(self.root / "independent.json"),
+            "storage_package": "/bin",
+            "runuser": sys.executable,
+        }
         self.candidate = "/nix/store/00000000000000000000000000000000-candidate"
-        for name in ("require_root", "candidate_path", "install_barriers", "stop_units", "inspect_barriers", "generation"):
+        for name in (
+            "require_root",
+            "candidate_path",
+            "install_barriers",
+            "stop_units",
+            "inspect_barriers",
+            "generation",
+        ):
             patched = mock.patch.object(application_transition, name)
             value = patched.start()
             self.addCleanup(patched.stop)
@@ -70,34 +118,75 @@ print(json.dumps({"version":1,"status":"verified","semantic_sha256":"a"*64}))
             if name == "candidate_path":
                 value.return_value = "generation"
             if name == "install_barriers":
-                value.side_effect = lambda config, record: write_json(self.barrier / "inhibited.json", {"candidate": record["barrier_candidate"], "intent": record["intent"]})
+                value.side_effect = lambda config, record: write_json(
+                    self.barrier / "inhibited.json",
+                    {
+                        "candidate": record["barrier_candidate"],
+                        "intent": record["intent"],
+                    },
+                )
         storage = self.root / "bin"
         storage.mkdir()
         (storage / "harbor-db-application-backup").symlink_to(sys.executable)
         self.config["storage_package"] = str(storage)
-        write_json(self.root / "backup-config.json", {"maximum_age_seconds": 3600, "root": str(self.root / "backup")})
+        write_json(
+            self.root / "backup-config.json",
+            {"maximum_age_seconds": 3600, "root": str(self.root / "backup")},
+        )
         self.backup = self.root / "backup"
         self.backup.mkdir()
         (self.backup / "lock").touch(mode=0o600)
-        self.snapshot = {"status": "verified", "consistency": "quiesced", "semantic_sha256": "a" * 64,
-                         "executor_machine_sha256": "b" * 64, "executor": "source-fixture", "resource": "demo",
-                         "manifest_sha256": identity({"fixture": True}), "executables": {}}
+        self.snapshot = {
+            "status": "verified",
+            "consistency": "quiesced",
+            "semantic_sha256": "a" * 64,
+            "executor_machine_sha256": "b" * 64,
+            "executor": "source-fixture",
+            "resource": "demo",
+            "manifest_sha256": identity({"fixture": True}),
+            "executables": {},
+        }
         write_json(self.backup / "acceptance.json", self.snapshot)
-        self.capture_patch = mock.patch.object(application_transition, "capture_source", return_value=(self.backup, self.snapshot))
+        self.capture_patch = mock.patch.object(
+            application_transition,
+            "capture_source",
+            return_value=(self.backup, self.snapshot),
+        )
         self.capture_patch.start()
         self.addCleanup(self.capture_patch.stop)
-        self.evidence_patch = mock.patch.object(application_transition, "source_bytes", return_value=self.snapshot)
+        self.evidence_patch = mock.patch.object(
+            application_transition, "source_bytes", return_value=self.snapshot
+        )
         self.evidence_patch.start()
         self.addCleanup(self.evidence_patch.stop)
-        self.runner = mock.patch.object(application_transition, "run_action", return_value={"version": 1, "status": "verified", "semantic_sha256": "a" * 64})
+        self.runner = mock.patch.object(
+            application_transition,
+            "run_action",
+            return_value={
+                "version": 1,
+                "status": "verified",
+                "semantic_sha256": "a" * 64,
+            },
+        )
         self.actions = self.runner.start()
         self.addCleanup(self.runner.stop)
 
     def certify(self):
-        write_json(self.root / "independent.json", {"version": 1, "status": "verified", "resource": "demo",
-            "source_acceptance_sha256": digest(self.backup / "acceptance.json"), "semantic_sha256": "a" * 64,
-            "executor_machine_sha256": "c" * 64, "manifest_sha256": identity({"fixture": True}),
-            "executor": "independent-fixture", "certified_at": int(time.time()), "executables": {}})
+        write_json(
+            self.root / "independent.json",
+            {
+                "version": 1,
+                "status": "verified",
+                "resource": "demo",
+                "source_acceptance_sha256": digest(self.backup / "acceptance.json"),
+                "semantic_sha256": "a" * 64,
+                "executor_machine_sha256": "c" * 64,
+                "manifest_sha256": identity({"fixture": True}),
+                "executor": "independent-fixture",
+                "certified_at": int(time.time()),
+                "executables": {},
+            },
+        )
 
     def prepare(self):
         application_transition.plan(self.config, self.candidate, None)
@@ -107,14 +196,32 @@ print(json.dumps({"version":1,"status":"verified","semantic_sha256":"a"*64}))
     def custody(self):
         (self.old / "records").write_text("source revision seven")
         (self.new / "records").write_text("source revision seven")
-        source_entry = {"kind": "filesystem", "authority": self.source, "custody_file": str(self.state / "custody.json"),
-                        "max_age_seconds": 3600, "runtime_units": ["demo.service"], "database_resource": None}
-        original = {"version": 1, "resource": "demo", "identity": "retained-resource", "binding": self.source["binding"],
-                    "directories": self.source["directories"], "root_identities": cutover.root_identities(source_entry),
-                    "completed_at": int(time.time()), "metadata": cutover.inventory(source_entry, contents=False),
-                    "inventory": cutover.inventory(source_entry, contents=True), "database_requirements": [], "database_snapshot_sha256": None}
+        source_entry = {
+            "kind": "filesystem",
+            "authority": self.source,
+            "custody_file": str(self.state / "custody.json"),
+            "max_age_seconds": 3600,
+            "runtime_units": ["demo.service"],
+            "database_resource": None,
+        }
+        original = {
+            "version": 1,
+            "resource": "demo",
+            "identity": "retained-resource",
+            "binding": self.source["binding"],
+            "directories": self.source["directories"],
+            "root_identities": cutover.root_identities(source_entry),
+            "completed_at": int(time.time()),
+            "metadata": cutover.inventory(source_entry, contents=False),
+            "inventory": cutover.inventory(source_entry, contents=True),
+            "database_requirements": [],
+            "database_snapshot_sha256": None,
+        }
         write_json(self.state / "custody.json", original)
-        target_entry = source_entry | {"authority": self.target, "database_inventory_checks": []}
+        target_entry = source_entry | {
+            "authority": self.target,
+            "database_inventory_checks": [],
+        }
         path = self.root / "custody-manifest.json"
         write_json(path, target_entry)
         self.config["custody_manifest"] = str(path)
@@ -160,7 +267,9 @@ print(json.dumps({"version":1,"status":"verified","semantic_sha256":"a"*64}))
             application_transition.prepare(changed)
         self.actions.side_effect = None
         application_transition.prepare(self.config)
-        self.assertEqual(application_transition.status(self.config)["phase"], "prepared")
+        self.assertEqual(
+            application_transition.status(self.config)["phase"], "prepared"
+        )
 
     def test_abort_is_forbidden_after_write_enable(self):
         self.prepare()
@@ -172,15 +281,21 @@ print(json.dumps({"version":1,"status":"verified","semantic_sha256":"a"*64}))
     def test_changed_independent_proof_and_wrong_generation_are_rejected(self):
         self.prepare()
         proof = read_json(self.root / "independent.json")
-        write_json(self.root / "independent.json", proof | {"semantic_sha256": "d" * 64})
+        write_json(
+            self.root / "independent.json", proof | {"semantic_sha256": "d" * 64}
+        )
         with self.assertRaisesRegex(ValueError, "evidence"):
             application_transition.commit(self.config)
         write_json(self.root / "independent.json", proof)
-        with mock.patch.object(application_transition, "generation", return_value="wrong-generation"):
+        with mock.patch.object(
+            application_transition, "generation", return_value="wrong-generation"
+        ):
             with self.assertRaisesRegex(ValueError, "generation"):
                 application_transition.commit(self.config)
 
-    def test_committed_authority_can_abort_before_writes_and_source_stays_retained(self):
+    def test_committed_authority_can_abort_before_writes_and_source_stays_retained(
+        self,
+    ):
         self.prepare()
         application_transition.commit(self.config)
         application_transition.abort(self.config)
@@ -189,23 +304,39 @@ print(json.dumps({"version":1,"status":"verified","semantic_sha256":"a"*64}))
             resource.check(self.target)
         self.assertTrue(self.new.is_dir())
 
-    def test_interrupted_authority_publication_resumes_against_the_intended_target(self):
+    def test_interrupted_authority_publication_resumes_against_the_intended_target(
+        self,
+    ):
         self.prepare()
         original = application_transition.publish
+
         def interrupted(*args):
             original(*args)
             raise OSError("interrupted after identity publication")
-        with mock.patch.object(application_transition, "publish", side_effect=interrupted):
+
+        with mock.patch.object(
+            application_transition, "publish", side_effect=interrupted
+        ):
             with self.assertRaises(OSError):
                 application_transition.commit(self.config)
-        self.assertEqual(application_transition.status(self.config)["phase"], "committing")
+        self.assertEqual(
+            application_transition.status(self.config)["phase"], "committing"
+        )
         resource.verify(self.target, resource.contract(self.target))
         application_transition.commit(self.config)
-        self.assertEqual(application_transition.status(self.config)["phase"], "committed")
+        self.assertEqual(
+            application_transition.status(self.config)["phase"], "committed"
+        )
 
     def test_contract_first_preparation_requires_binding_before_activation(self):
-        with mock.patch.object(application_transition, "candidate_path", return_value="contract"):
-            application_transition.plan(self.config, "/nix/store/00000000000000000000000000000000-contract.json", None)
+        with mock.patch.object(
+            application_transition, "candidate_path", return_value="contract"
+        ):
+            application_transition.plan(
+                self.config,
+                "/nix/store/00000000000000000000000000000000-contract.json",
+                None,
+            )
         self.certify()
         application_transition.prepare(self.config)
         application_transition.admission(self.config, "preflight", self.target)
@@ -213,13 +344,18 @@ print(json.dumps({"version":1,"status":"verified","semantic_sha256":"a"*64}))
             application_transition.admission(self.config, "activate", self.target)
         application_transition.bind_candidate(self.config, self.candidate)
         with self.assertRaisesRegex(ValueError, "activation generation differs"):
-            application_transition.admission(self.config, "activate", self.target, "other-generation")
-        application_transition.admission(self.config, "activate", self.target, self.candidate)
+            application_transition.admission(
+                self.config, "activate", self.target, "other-generation"
+            )
+        application_transition.admission(
+            self.config, "activate", self.target, self.candidate
+        )
         with self.assertRaisesRegex(ValueError, "ordinary startup"):
             application_transition.admission(self.config, "startup", self.target)
 
     def test_write_enable_and_completion_work_with_a_live_shared_writer_lease(self):
         from harbor_db.durable import lock
+
         self.prepare()
         application_transition.commit(self.config)
         application_transition.enable_writes(self.config)
@@ -235,9 +371,19 @@ print(json.dumps({"version":1,"status":"verified","semantic_sha256":"a"*64}))
         self.actions.return_value = {"version": 1, "status": "healthy"}
         application_transition.complete(self.config)
         application_transition.retire(self.config)
-        with mock.patch.object(transition_manifest, "require_root"), mock.patch.object(transition_manifest, "generation", return_value=self.candidate):
+        with (
+            mock.patch.object(transition_manifest, "require_root"),
+            mock.patch.object(
+                transition_manifest, "generation", return_value=self.candidate
+            ),
+        ):
             transition_manifest.startup_unit(self.barrier, "demo.service")
-        with mock.patch.object(transition_manifest, "require_root"), mock.patch.object(transition_manifest, "generation", return_value="legacy-generation"):
+        with (
+            mock.patch.object(transition_manifest, "require_root"),
+            mock.patch.object(
+                transition_manifest, "generation", return_value="legacy-generation"
+            ),
+        ):
             with self.assertRaisesRegex(ValueError, "released generation"):
                 transition_manifest.startup_unit(self.barrier, "demo.service")
 
@@ -250,7 +396,9 @@ print(json.dumps({"version":1,"status":"verified","semantic_sha256":"a"*64}))
         self.assertEqual(read_json(result["history"])["phase"], "aborted")
         self.assertFalse((self.state / "transition.json").exists())
 
-    def test_target_corpus_drift_cannot_hide_behind_a_successful_semantic_callback(self):
+    def test_target_corpus_drift_cannot_hide_behind_a_successful_semantic_callback(
+        self,
+    ):
         self.custody()
         self.prepare()
         (self.new / "records").write_text("source revision six!!")
@@ -258,11 +406,15 @@ print(json.dumps({"version":1,"status":"verified","semantic_sha256":"a"*64}))
             application_transition.commit(self.config)
         resource.verify(self.source, resource.contract(self.source))
 
-    def test_custody_is_published_with_target_and_original_custody_restored_on_abort(self):
+    def test_custody_is_published_with_target_and_original_custody_restored_on_abort(
+        self,
+    ):
         source, target, original = self.custody()
         self.prepare()
         application_transition.commit(self.config)
-        self.assertEqual(read_json(self.state / "custody.json")["binding"], self.target["binding"])
+        self.assertEqual(
+            read_json(self.state / "custody.json")["binding"], self.target["binding"]
+        )
         application_transition.abort(self.config)
         self.assertEqual(read_json(self.state / "custody.json"), original)
         cutover.check_resource(source, phase="startup")
@@ -281,34 +433,53 @@ class GenerationContractTest(unittest.TestCase):
             write_json(manifest, {"resource": "demo", "version": 1})
             link = etc / "harbor-db/demo-transition.json"
             link.symlink_to(manifest)
-            self.assertEqual(transition_manifest.generation_contract(candidate, "demo", store_root=store),
-                             {"resource": "demo", "version": 1})
+            self.assertEqual(
+                transition_manifest.generation_contract(
+                    candidate, "demo", store_root=store
+                ),
+                {"resource": "demo", "version": 1},
+            )
             outside = root / "mutable-runtime.json"
             write_json(outside, {"resource": "demo", "version": 1})
             link.unlink()
             link.symlink_to(outside)
             with self.assertRaisesRegex(ValueError, "escapes the immutable store"):
-                transition_manifest.generation_contract(candidate, "demo", store_root=store)
+                transition_manifest.generation_contract(
+                    candidate, "demo", store_root=store
+                )
 
 
 class TransitionWorkerLeaseTest(unittest.TestCase):
     def test_surviving_worker_keeps_the_authority_lease_after_coordinator_death(self):
         from harbor_db.durable import lock
+
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             anchor, pidfile = root / "lock", root / "child.pid"
             anchor.touch(mode=0o600)
             child = root / "child.py"
-            child.write_text("import os,time,pathlib,sys; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)")
+            child.write_text(
+                "import os,time,pathlib,sys; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"
+            )
             parent = root / "parent.py"
-            parent.write_text('''import sys,pwd,os
+            parent.write_text("""import sys,pwd,os
 from harbor_db.durable import lock
 from harbor_db.transition_manifest import worker
 with lock(sys.argv[1]) as lease:
     worker({"timeout_seconds":60},{"user":pwd.getpwuid(os.getuid()).pw_name,"argv":[sys.executable,sys.argv[2],sys.argv[3]]},{},[lease])
-''')
-            process = subprocess.Popen([sys.executable, "-B", str(parent), str(anchor), str(child), str(pidfile)],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+""")
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-B",
+                    str(parent),
+                    str(anchor),
+                    str(child),
+                    str(pidfile),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             kid = None
             try:
                 deadline = time.monotonic() + 5
@@ -320,7 +491,9 @@ with lock(sys.argv[1]) as lease:
                 process.wait(timeout=5)
                 with self.assertRaises(BlockingIOError):
                     with lock(anchor):
-                        self.fail("a surviving worker lost its inherited authority lease")
+                        self.fail(
+                            "a surviving worker lost its inherited authority lease"
+                        )
             finally:
                 if process.poll() is None:
                     process.kill()

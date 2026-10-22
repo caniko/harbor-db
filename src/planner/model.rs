@@ -41,12 +41,12 @@ pub enum Lifecycle {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
-    /// PostgreSQL, including SQLx and SeaORM-backed schemas.
+    /// PostgreSQL, including `SQLx` and SeaORM-backed schemas.
     Postgres,
-    /// ClickHouse, including schema reconciliation and operational changes.
+    /// `ClickHouse`, including schema reconciliation and operational changes.
     #[serde(rename = "clickhouse")]
     ClickHouse,
-    /// TypeDB (strongly-typed graph database). Readiness, compatibility, and
+    /// `TypeDB` (strongly-typed graph database). Readiness, compatibility, and
     /// schema semantics are owned by the application binaries, which report
     /// through the exit-code contract (0 ready/current, 2 pending); harbor-db
     /// provides ordering, credential delivery, and lifecycle modes only.
@@ -274,10 +274,6 @@ impl MigrationPlan {
         &self,
         selected: &BTreeSet<String>,
     ) -> Result<Vec<&MigrationOperation>, MigrationError> {
-        let operations = self.operation_map();
-        let include_all = selected.is_empty();
-        let mut included = BTreeSet::new();
-
         fn include_dependencies(
             id: &str,
             operations: &BTreeMap<&str, &MigrationOperation>,
@@ -294,23 +290,6 @@ impl MigrationPlan {
             }
             Ok(())
         }
-
-        if include_all {
-            for operation in &self.operations {
-                include_dependencies(&operation.id, &operations, &mut included)?;
-            }
-        } else {
-            for id in selected {
-                if !operations.contains_key(id.as_str()) {
-                    return Err(MigrationError::MissingOperation(id.clone()));
-                }
-                include_dependencies(id, &operations, &mut included)?;
-            }
-        }
-
-        let mut result = Vec::with_capacity(included.len());
-        let mut visiting = BTreeSet::new();
-        let mut visited = BTreeSet::new();
 
         fn visit<'a>(
             id: &str,
@@ -339,6 +318,27 @@ impl MigrationPlan {
             result.push(*operation);
             Ok(())
         }
+
+        let operations = self.operation_map();
+        let include_all = selected.is_empty();
+        let mut included = BTreeSet::new();
+
+        if include_all {
+            for operation in &self.operations {
+                include_dependencies(&operation.id, &operations, &mut included)?;
+            }
+        } else {
+            for id in selected {
+                if !operations.contains_key(id.as_str()) {
+                    return Err(MigrationError::MissingOperation(id.clone()));
+                }
+                include_dependencies(id, &operations, &mut included)?;
+            }
+        }
+
+        let mut result = Vec::with_capacity(included.len());
+        let mut visiting = BTreeSet::new();
+        let mut visited = BTreeSet::new();
 
         for operation in &self.operations {
             if included.contains(&operation.id) {
@@ -369,6 +369,7 @@ pub enum RunMode {
 
 impl RunMode {
     /// Whether this mode runs apply commands.
+    #[must_use]
     pub fn applies(self) -> bool {
         matches!(self, Self::Apply | Self::Restore)
     }
@@ -411,6 +412,7 @@ pub struct RunReport {
 
 impl RunReport {
     /// Whether any check reported pending work.
+    #[must_use]
     pub fn is_pending(&self) -> bool {
         self.operations
             .iter()

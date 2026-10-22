@@ -10,7 +10,14 @@ import subprocess
 from pathlib import Path
 
 from . import application_backup, process, resource, startup_inhibition
-from .durable import atomic_write, immutable_store_reference, lock, read_json, sync_directory, write_json
+from .durable import (
+    atomic_write,
+    immutable_store_reference,
+    lock,
+    read_json,
+    sync_directory,
+    write_json,
+)
 
 
 def require_root():
@@ -18,7 +25,13 @@ def require_root():
 
 
 def validate_operator_policy(config):
-    for key in ("source_manifest", "target_manifest", "backup_manifest", "postgres_manifest", "custody_manifest"):
+    for key in (
+        "source_manifest",
+        "target_manifest",
+        "backup_manifest",
+        "postgres_manifest",
+        "custody_manifest",
+    ):
         if key in ("postgres_manifest", "custody_manifest") and config.get(key) is None:
             continue
         selected = immutable_store_reference(config[key])
@@ -35,7 +48,9 @@ def validate_operator_policy(config):
 
 def candidate_path(candidate, config):
     if not re.fullmatch(r"/nix/store/[0-9a-z]{32}-[^/\s]+", candidate):
-        raise ValueError("transition candidate must be an immutable store contract or generation")
+        raise ValueError(
+            "transition candidate must be an immutable store contract or generation"
+        )
     if Path(candidate).is_file():
         if read_json(candidate) != config:
             raise ValueError("immutable preparation contract differs")
@@ -43,13 +58,17 @@ def candidate_path(candidate, config):
     if not Path(candidate).is_dir():
         raise ValueError("transition candidate is not realized")
     if generation_contract(candidate, config["resource"]) != config:
-        raise ValueError("candidate generation does not declare the exact transition contract")
+        raise ValueError(
+            "candidate generation does not declare the exact transition contract"
+        )
     return "generation"
 
 
 def generation_contract(candidate, resource_name, *, store_root="/nix/store"):
     """Resolve NixOS's immutable etc links without admitting a runtime contract."""
-    path = (Path(candidate) / "etc/harbor-db" / (resource_name + "-transition.json")).resolve(strict=True)
+    path = (
+        Path(candidate) / "etc/harbor-db" / (resource_name + "-transition.json")
+    ).resolve(strict=True)
     if not path.is_relative_to(store_root):
         raise ValueError("candidate transition contract escapes the immutable store")
     return read_json(path)
@@ -60,49 +79,116 @@ def generation():
 
 
 def validate(config):
-    required = {"version", "resource", "source_manifest", "target_manifest", "barrier_dir", "drop_in_root",
-                "systemctl", "busctl", "units", "retired_units", "timeout_seconds", "commands", "executable_files",
-                "postgres_manifest", "postgres_socket", "postgres_port", "custody_manifest", "backup_manifest", "independent_receipt", "storage_package", "runuser"}
+    required = {
+        "version",
+        "resource",
+        "source_manifest",
+        "target_manifest",
+        "barrier_dir",
+        "drop_in_root",
+        "systemctl",
+        "busctl",
+        "units",
+        "retired_units",
+        "timeout_seconds",
+        "commands",
+        "executable_files",
+        "postgres_manifest",
+        "postgres_socket",
+        "postgres_port",
+        "custody_manifest",
+        "backup_manifest",
+        "independent_receipt",
+        "storage_package",
+        "runuser",
+    }
     if set(config) != required or config["version"] != 1:
         raise ValueError("unsupported application transition manifest")
-    source, target = map(read_json, (config["source_manifest"], config["target_manifest"]))
-    if (source["resource"] != config["resource"] or target["resource"] != config["resource"]
-            or source["state_dir"] != target["state_dir"] or source["binding"] == target["binding"]):
-        raise ValueError("backend transitions require one authority and different source/target bindings")
-    if ("postgresql" in (source["binding"].get("backend"), target["binding"].get("backend"))
-            or "postgres" in (source["binding"].get("backend"), target["binding"].get("backend"))) and config["postgres_manifest"] is None:
-        raise ValueError("PostgreSQL backend transitions require the existing writer fence")
-    for key in ("source_manifest", "target_manifest", "barrier_dir", "drop_in_root", "systemctl", "busctl",
-                "backup_manifest", "independent_receipt", "storage_package", "runuser"):
+    source, target = map(
+        read_json, (config["source_manifest"], config["target_manifest"])
+    )
+    if (
+        source["resource"] != config["resource"]
+        or target["resource"] != config["resource"]
+        or source["state_dir"] != target["state_dir"]
+        or source["binding"] == target["binding"]
+    ):
+        raise ValueError(
+            "backend transitions require one authority and different source/target bindings"
+        )
+    if (
+        "postgresql"
+        in (source["binding"].get("backend"), target["binding"].get("backend"))
+        or "postgres"
+        in (source["binding"].get("backend"), target["binding"].get("backend"))
+    ) and config["postgres_manifest"] is None:
+        raise ValueError(
+            "PostgreSQL backend transitions require the existing writer fence"
+        )
+    for key in (
+        "source_manifest",
+        "target_manifest",
+        "barrier_dir",
+        "drop_in_root",
+        "systemctl",
+        "busctl",
+        "backup_manifest",
+        "independent_receipt",
+        "storage_package",
+        "runuser",
+    ):
         path = Path(config[key])
         if not path.is_absolute() or any(c.isspace() or c in "\\%" for c in str(path)):
-            raise ValueError("transition paths must be explicit, absolute and systemd-safe")
+            raise ValueError(
+                "transition paths must be explicit, absolute and systemd-safe"
+            )
     barrier, authority = Path(config["barrier_dir"]), Path(source["state_dir"])
     from . import cutover, recovery
+
     cutover.validate_path(config["independent_receipt"])
     receipt = recovery.absolute(config["independent_receipt"])
     controls = [barrier, Path(config["drop_in_root"]), authority]
     entry = custody_entry(config, target)
     if entry is not None:
         controls.append(Path(entry["custody_file"]))
-    if any(receipt.is_relative_to(control) or control.is_relative_to(receipt) for control in controls):
-        raise ValueError("independent receipt and transition control storage must be disjoint")
-    if barrier.resolve() != barrier or Path(config["drop_in_root"]).resolve() != Path(config["drop_in_root"]):
+    if any(
+        receipt.is_relative_to(control) or control.is_relative_to(receipt)
+        for control in controls
+    ):
+        raise ValueError(
+            "independent receipt and transition control storage must be disjoint"
+        )
+    if barrier.resolve() != barrier or Path(config["drop_in_root"]).resolve() != Path(
+        config["drop_in_root"]
+    ):
         raise ValueError("transition barrier storage is redirected")
     startup_inhibition.owned_ancestors(barrier)
     if barrier.exists():
         startup_inhibition.owned(barrier, directory=True)
-    if barrier == authority or barrier.is_relative_to(authority) or authority.is_relative_to(barrier):
-        raise ValueError("root startup barriers must be outside application-owned authority")
-    if any(barrier.is_relative_to(path) or Path(path).is_relative_to(barrier) for path in source["directories"] + target["directories"]):
+    if (
+        barrier == authority
+        or barrier.is_relative_to(authority)
+        or authority.is_relative_to(barrier)
+    ):
+        raise ValueError(
+            "root startup barriers must be outside application-owned authority"
+        )
+    if any(
+        barrier.is_relative_to(path) or Path(path).is_relative_to(barrier)
+        for path in source["directories"] + target["directories"]
+    ):
         raise ValueError("startup barriers must be outside the guarded storage")
     from . import cutover
+
     for path in source["directories"] + target["directories"]:
         cutover.validate_path(path)
         if Path(path).resolve() != Path(path):
             raise ValueError("recovery path must be absolute and not redirected")
-    if any(Path(s).is_relative_to(t) or Path(t).is_relative_to(s)
-           for s in source["directories"] for t in target["directories"]):
+    if any(
+        Path(s).is_relative_to(t) or Path(t).is_relative_to(s)
+        for s in source["directories"]
+        for t in target["directories"]
+    ):
         raise ValueError("source and target corpus roots must be disjoint")
     backup_root = Path(read_json(config["backup_manifest"])["root"])
     cutover.validate_path(str(backup_root))
@@ -112,29 +198,63 @@ def validate(config):
         raise ValueError("backup and transition barrier roots must be disjoint")
     if backup_root.is_relative_to(authority) or authority.is_relative_to(backup_root):
         raise ValueError("backup and authority roots must be disjoint")
-    if any(backup_root.is_relative_to(path) or Path(path).is_relative_to(backup_root)
-           for path in source["directories"] + target["directories"]):
+    if any(
+        backup_root.is_relative_to(path) or Path(path).is_relative_to(backup_root)
+        for path in source["directories"] + target["directories"]
+    ):
         raise ValueError("backup and corpus roots must be disjoint")
     if receipt.is_relative_to(backup_root) or backup_root.is_relative_to(receipt):
-        raise ValueError("independent receipt and backup publication storage must be disjoint")
-    if any(receipt.is_relative_to(path) or Path(path).is_relative_to(receipt)
-           for path in source["directories"] + target["directories"]):
+        raise ValueError(
+            "independent receipt and backup publication storage must be disjoint"
+        )
+    if any(
+        receipt.is_relative_to(path) or Path(path).is_relative_to(receipt)
+        for path in source["directories"] + target["directories"]
+    ):
         raise ValueError("independent receipt and corpus roots must be disjoint")
     units = config["units"] + config["retired_units"]
-    if (not units or len(set(units)) != len(units)
-            or any(not re.fullmatch(r"[A-Za-z0-9_@.:-]+\.service", unit) for unit in units)
-            or any(unit in ("postgresql.service", "postgresql-setup.service") for unit in units)):
-        raise ValueError("application transition units must be unique clients, not PostgreSQL control services")
-    if type(config["timeout_seconds"]) is not int or not 0 < config["timeout_seconds"] <= 86400:
+    if (
+        not units
+        or len(set(units)) != len(units)
+        or any(not re.fullmatch(r"[A-Za-z0-9_@.:-]+\.service", unit) for unit in units)
+        or any(
+            unit in ("postgresql.service", "postgresql-setup.service") for unit in units
+        )
+    ):
+        raise ValueError(
+            "application transition units must be unique clients, not PostgreSQL control services"
+        )
+    if (
+        type(config["timeout_seconds"]) is not int
+        or not 0 < config["timeout_seconds"] <= 86400
+    ):
         raise ValueError("transition execution limit must be bounded")
-    if not Path(config["postgres_socket"]).is_absolute() or type(config["postgres_port"]) is not int or not 1 <= config["postgres_port"] <= 65535:
+    if (
+        not Path(config["postgres_socket"]).is_absolute()
+        or type(config["postgres_port"]) is not int
+        or not 1 <= config["postgres_port"] <= 65535
+    ):
         raise ValueError("transition requires an explicit local PostgreSQL endpoint")
-    if set(config["commands"]) != {"import", "verify-target", "verify-source", "health"}:
-        raise ValueError("transition requires import, complete parity, source validation and health commands")
+    if set(config["commands"]) != {
+        "import",
+        "verify-target",
+        "verify-source",
+        "health",
+    }:
+        raise ValueError(
+            "transition requires import, complete parity, source validation and health commands"
+        )
     for command in config["commands"].values():
-        if (set(command) != {"user", "argv"} or not isinstance(command["argv"], list) or not command["argv"]
-                or not all(isinstance(arg, str) for arg in command["argv"]) or not Path(command["argv"][0]).is_absolute()):
-            raise ValueError("transition workers require a declared user and absolute argv")
+        if (
+            set(command) != {"user", "argv"}
+            or not isinstance(command["argv"], list)
+            or not command["argv"]
+            or not all(isinstance(arg, str) for arg in command["argv"])
+            or not Path(command["argv"][0]).is_absolute()
+        ):
+            raise ValueError(
+                "transition workers require a declared user and absolute argv"
+            )
         pwd.getpwnam(command["user"])
     custody_entry(config, target)
     startup_inhibition.owned_ancestors(receipt)
@@ -148,18 +268,30 @@ def custody_entry(config, target):
         return None
     entry = read_json(config["custody_manifest"])
     if entry["kind"] != "filesystem" or entry["authority"] != target:
-        raise ValueError("target custody manifest does not declare the exact target authority")
+        raise ValueError(
+            "target custody manifest does not declare the exact target authority"
+        )
     writers = entry.get("runtime_units", [])
     barriers = config["units"] + config["retired_units"]
-    if not isinstance(writers, list) or any(not isinstance(unit, str) or unit not in barriers for unit in writers):
-        raise ValueError("custody writers must all be covered by transition units or retired_units")
+    if not isinstance(writers, list) or any(
+        not isinstance(unit, str) or unit not in barriers for unit in writers
+    ):
+        raise ValueError(
+            "custody writers must all be covered by transition units or retired_units"
+        )
     return entry
 
 
 def tools(config):
-    files = config["executable_files"] + [c["argv"][0] for c in config["commands"].values()]
-    files += [config["systemctl"], config["busctl"], config["runuser"],
-              str(Path(config["storage_package"]) / "harbor-db-application-backup")]
+    files = config["executable_files"] + [
+        c["argv"][0] for c in config["commands"].values()
+    ]
+    files += [
+        config["systemctl"],
+        config["busctl"],
+        config["runuser"],
+        str(Path(config["storage_package"]) / "harbor-db-application-backup"),
+    ]
     if any(not Path(path).is_absolute() or not Path(path).is_file() for path in files):
         raise ValueError("transition executable is absent")
     return {path: application_backup.digest(path) for path in sorted(set(files))}
@@ -170,13 +302,23 @@ def independent_receipt(config):
     import hashlib
     import stat
     from .recovery import absolute
+
     path = absolute(config["independent_receipt"])
     startup_inhibition.owned_ancestors(path)
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    descriptor = os.open(
+        path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    )
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022 or info.st_nlink != 1:
-            raise ValueError("independent receipt requires protected coordinator-owned storage")
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o022
+            or info.st_nlink != 1
+        ):
+            raise ValueError(
+                "independent receipt requires protected coordinator-owned storage"
+            )
         data = stream.read(16 * 1024 * 1024 + 1)
         if len(data) > 16 * 1024 * 1024:
             raise ValueError("independent receipt exceeds the evidence byte limit")
@@ -185,13 +327,19 @@ def independent_receipt(config):
 
 def intent(config):
     source, target = validate(config)
-    return {"manifest_sha256": application_backup.identity(config),
-            "source_sha256": application_backup.digest(config["source_manifest"]),
-            "target_sha256": application_backup.digest(config["target_manifest"]),
-            "backup_sha256": application_backup.digest(config["backup_manifest"]),
-            "custody_sha256": None if config["custody_manifest"] is None else application_backup.digest(config["custody_manifest"]),
-            "postgres_sha256": None if config["postgres_manifest"] is None else application_backup.digest(config["postgres_manifest"]),
-            "executables": tools(config)}
+    return {
+        "manifest_sha256": application_backup.identity(config),
+        "source_sha256": application_backup.digest(config["source_manifest"]),
+        "target_sha256": application_backup.digest(config["target_manifest"]),
+        "backup_sha256": application_backup.digest(config["backup_manifest"]),
+        "custody_sha256": None
+        if config["custody_manifest"] is None
+        else application_backup.digest(config["custody_manifest"]),
+        "postgres_sha256": None
+        if config["postgres_manifest"] is None
+        else application_backup.digest(config["postgres_manifest"]),
+        "executables": tools(config),
+    }
 
 
 def write_owned(path, value):
@@ -216,20 +364,37 @@ def install_barriers(config, record):
     retired = state / "retired"
     if config["retired_units"]:
         startup_inhibition.provision_directory(retired, 0o700)
-    write_json(state / "start-policy.json", {"version": 1, "generation": record["source_generation"],
-               "authority_manifest": config["source_manifest"], "units": config["units"] + config["retired_units"]})
+    write_json(
+        state / "start-policy.json",
+        {
+            "version": 1,
+            "generation": record["source_generation"],
+            "authority_manifest": config["source_manifest"],
+            "units": config["units"] + config["retired_units"],
+        },
+    )
     for unit in config["units"] + config["retired_units"]:
         selected = retired if unit in config["retired_units"] else state
-        path = Path(config["drop_in_root"]) / (unit + ".d") / "zzzz-harbor-db-backend-transition.conf"
+        path = (
+            Path(config["drop_in_root"])
+            / (unit + ".d")
+            / "zzzz-harbor-db-backend-transition.conf"
+        )
         startup_inhibition.owned_ancestors(path)
         startup_inhibition.provision_directory(path.parent, 0o755)
         if path.exists() or path.is_symlink():
             check_transition_drop_in(config, path, selected, unit)
         else:
             atomic_write(path, transition_content(config, selected, unit))
-    write_json(state / "inhibited.json", {"intent": record["intent"], "candidate": record["barrier_candidate"]})
+    write_json(
+        state / "inhibited.json",
+        {"intent": record["intent"], "candidate": record["barrier_candidate"]},
+    )
     if config["retired_units"]:
-        write_json(retired / "inhibited.json", {"resource": config["resource"], "units": config["retired_units"]})
+        write_json(
+            retired / "inhibited.json",
+            {"resource": config["resource"], "units": config["retired_units"]},
+        )
     subprocess.run([config["systemctl"], "daemon-reload"], check=True, timeout=30)
     inspect_barriers(config)
 
@@ -241,20 +406,31 @@ def inspect_barriers(config):
         raise ValueError("transition startup barrier is absent")
     for unit in config["units"] + config["retired_units"]:
         selected = state / "retired" if unit in config["retired_units"] else state
-        path = Path(config["drop_in_root"]) / (unit + ".d") / "zzzz-harbor-db-backend-transition.conf"
+        path = (
+            Path(config["drop_in_root"])
+            / (unit + ".d")
+            / "zzzz-harbor-db-backend-transition.conf"
+        )
         check_transition_drop_in(config, path, selected, unit)
         startup_inhibition.loaded(config, path, selected, unit)
 
 
 def transition_content(config, selected, unit):
     checker = Path(config["storage_package"]) / "harbor-db-transition-start"
-    return startup_inhibition.content(selected) + (f"\n[Service]\nExecCondition=+{checker} --state {config['barrier_dir']} --unit {unit}\n").encode()
+    return (
+        startup_inhibition.content(selected)
+        + (
+            f"\n[Service]\nExecCondition=+{checker} --state {config['barrier_dir']} --unit {unit}\n"
+        ).encode()
+    )
 
 
 def check_transition_drop_in(config, path, selected, unit):
     startup_inhibition.owned(path)
     if path.read_bytes() != transition_content(config, selected, unit):
-        raise ValueError("persistent transition startup policy changed; preserve foreign policy")
+        raise ValueError(
+            "persistent transition startup policy changed; preserve foreign policy"
+        )
 
 
 def startup_unit(state, unit):
@@ -265,8 +441,14 @@ def startup_unit(state, unit):
     startup_inhibition.owned(state, directory=True)
     startup_inhibition.owned(state / "start-policy.json")
     policy = read_json(state / "start-policy.json")
-    if policy["version"] != 1 or unit not in policy["units"] or generation() != policy["generation"]:
-        raise ValueError("ordinary writer startup requires the explicitly released generation")
+    if (
+        policy["version"] != 1
+        or unit not in policy["units"]
+        or generation() != policy["generation"]
+    ):
+        raise ValueError(
+            "ordinary writer startup requires the explicitly released generation"
+        )
     if (state / "inhibited.json").exists():
         raise ValueError("ordinary writer startup is inhibited by a pending transition")
     resource.check(read_json(policy["authority_manifest"]))
@@ -285,8 +467,14 @@ def validate_barrier_markers(config, record):
         if os.path.lexists(path):
             startup_inhibition.owned(path)
             marker = read_json(path)
-            expected = ({"resource": config["resource"], "units": config["retired_units"]}
-                        if path.parent.name == "retired" else {"intent": record["intent"], "candidate": record["barrier_candidate"]})
+            expected = (
+                {"resource": config["resource"], "units": config["retired_units"]}
+                if path.parent.name == "retired"
+                else {
+                    "intent": record["intent"],
+                    "candidate": record["barrier_candidate"],
+                }
+            )
             if marker != expected:
                 raise ValueError("another transition owns the startup barrier")
     return paths
@@ -295,10 +483,19 @@ def validate_barrier_markers(config, record):
 def release_barriers(config, record, *, aborted=False):
     state = Path(config["barrier_dir"])
     paths = validate_barrier_markers(config, record)
-    write_json(state / "start-policy.json", {"version": 1,
-               "generation": record["source_generation"] if aborted else record["candidate"],
-               "authority_manifest": config["source_manifest"] if aborted else config["target_manifest"],
-               "units": config["units"] + (config["retired_units"] if aborted else [])})
+    write_json(
+        state / "start-policy.json",
+        {
+            "version": 1,
+            "generation": record["source_generation"]
+            if aborted
+            else record["candidate"],
+            "authority_manifest": config["source_manifest"]
+            if aborted
+            else config["target_manifest"],
+            "units": config["units"] + (config["retired_units"] if aborted else []),
+        },
+    )
     for path in paths:
         if not aborted and path != state / "inhibited.json":
             continue
@@ -310,6 +507,7 @@ def release_barriers(config, record, *, aborted=False):
 def startup_main():
     import argparse
     import sys
+
     parser = argparse.ArgumentParser(description=startup_unit.__doc__)
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--unit", required=True)
@@ -324,15 +522,25 @@ def startup_main():
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(startup_main())
 
 
 def stop_units(config):
     units = config["units"] + config["retired_units"]
-    subprocess.run([config["systemctl"], "stop", *units], check=True, timeout=config["timeout_seconds"])
+    subprocess.run(
+        [config["systemctl"], "stop", *units],
+        check=True,
+        timeout=config["timeout_seconds"],
+    )
     for unit in units:
-        result = subprocess.run([config["systemctl"], "show", unit, "--property=ActiveState", "--value"],
-                                capture_output=True, text=True, check=True, timeout=30)
+        result = subprocess.run(
+            [config["systemctl"], "show", unit, "--property=ActiveState", "--value"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
         if result.stdout.strip() not in ("inactive", "failed"):
             raise ValueError("an application writer has not stopped")
 
@@ -340,13 +548,30 @@ def stop_units(config):
 def worker(config, command, substitutions, leases):
     account = pwd.getpwnam(command["user"])
     argv = [substitutions.get(arg, arg) for arg in command["argv"]]
-    kwargs = {"user": account.pw_uid, "group": account.pw_gid,
-              "extra_groups": os.getgrouplist(account.pw_name, account.pw_gid)} if os.geteuid() == 0 else {}
+    kwargs = (
+        {
+            "user": account.pw_uid,
+            "group": account.pw_gid,
+            "extra_groups": os.getgrouplist(account.pw_name, account.pw_gid),
+        }
+        if os.geteuid() == 0
+        else {}
+    )
     if os.geteuid() != 0 and os.getuid() != account.pw_uid:
         raise ValueError("transition worker identity differs")
-    environment = {key: value for key, value in os.environ.items() if key in {"PATH", "HOME", "LANG", "TMPDIR"}}
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key in {"PATH", "HOME", "LANG", "TMPDIR"}
+    }
     environment["HARBOR_DB_LEASE_FDS"] = ",".join(map(str, leases))
-    data = process.execute(argv, timeout=config["timeout_seconds"], environment=environment, leases=leases, **kwargs)
+    data = process.execute(
+        argv,
+        timeout=config["timeout_seconds"],
+        environment=environment,
+        leases=leases,
+        **kwargs,
+    )
     return json.loads(data) if data.strip() else None
 
 
@@ -359,18 +584,51 @@ def fence(config, record, leases):
     anchor = Path(database["state_dir"]) / "writer-fence.lock"
     with lock(anchor, shared=True) as lease:
         info = os.fstat(lease)
-        if info.st_uid != pwd.getpwnam("postgres").pw_uid or info.st_mode & 0o022 or not stat.S_ISREG(info.st_mode):
+        if (
+            info.st_uid != pwd.getpwnam("postgres").pw_uid
+            or info.st_mode & 0o022
+            or not stat.S_ISREG(info.st_mode)
+        ):
             raise ValueError("PostgreSQL writer fence anchor is not service-owned")
-        observed = worker(config, {"user": "postgres", "argv": [str(Path(config["storage_package"]) / "harbor-db-postgres"),
-                          "--config", config["postgres_manifest"], "inspect-fence", "--token", record["writer_fence_token"],
-                          "--socket-dir", config["postgres_socket"], "--port", str(config["postgres_port"])]}, {}, [*leases, lease])
-        if observed["status"] != "ready" or observed["token"] != record["writer_fence_token"]:
+        observed = worker(
+            config,
+            {
+                "user": "postgres",
+                "argv": [
+                    str(Path(config["storage_package"]) / "harbor-db-postgres"),
+                    "--config",
+                    config["postgres_manifest"],
+                    "inspect-fence",
+                    "--token",
+                    record["writer_fence_token"],
+                    "--socket-dir",
+                    config["postgres_socket"],
+                    "--port",
+                    str(config["postgres_port"]),
+                ],
+            },
+            {},
+            [*leases, lease],
+        )
+        if (
+            observed["status"] != "ready"
+            or observed["token"] != record["writer_fence_token"]
+        ):
             raise ValueError("PostgreSQL live fence token differs")
         if record.get("fence") is not None and record["fence"] != observed:
             raise ValueError("PostgreSQL fence primary or HBA identity changed")
         record["fence"] = observed
         recovery = database.get("recovery")
         if recovery is None or not recovery.get("require_writer_fence", False):
-            raise ValueError("PostgreSQL transitions require token-bound whole-primary recovery acceptance")
-        with lock(Path(recovery["backup_root"]) / "locks/mutate", shared=True) as backup_lease, lock(Path(recovery["snapshot_file"]).parent / "recovery.lock", shared=True) as evidence_lease:
+            raise ValueError(
+                "PostgreSQL transitions require token-bound whole-primary recovery acceptance"
+            )
+        with (
+            lock(
+                Path(recovery["backup_root"]) / "locks/mutate", shared=True
+            ) as backup_lease,
+            lock(
+                Path(recovery["snapshot_file"]).parent / "recovery.lock", shared=True
+            ) as evidence_lease,
+        ):
             yield [*leases, lease, backup_lease, evidence_lease]

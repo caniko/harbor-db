@@ -19,9 +19,15 @@ class RecoveryChainRetentionTest(unittest.TestCase):
     def backup(self, name, age, start):
         path = self.root / "base" / name
         path.mkdir()
-        (path / "backup_manifest").write_text(json.dumps({
-            "WAL-Ranges": [{"Timeline": 1, "Start-LSN": start, "End-LSN": "0/9000000"}],
-        }))
+        (path / "backup_manifest").write_text(
+            json.dumps(
+                {
+                    "WAL-Ranges": [
+                        {"Timeline": 1, "Start-LSN": start, "End-LSN": "0/9000000"}
+                    ],
+                }
+            )
+        )
         os.utime(path, (self.now - age * 86400,) * 2)
         return path
 
@@ -64,7 +70,9 @@ class RecoveryChainRetentionTest(unittest.TestCase):
 
     def test_unclassified_expired_backup_prevents_all_pruning(self):
         expired = self.backup("oldest", 90, "0/1000000")
-        (expired / "backup_manifest").write_text('{"WAL-Ranges":[{"Timeline":1,"Start-LSN":"0/1000000","End-LSN":"0/0"}]}')
+        (expired / "backup_manifest").write_text(
+            '{"WAL-Ranges":[{"Timeline":1,"Start-LSN":"0/1000000","End-LSN":"0/0"}]}'
+        )
         self.backup("last-good", 80, "0/3000000")
         self.backup("latest", 70, "0/5000000")
         old = self.wal(2)
@@ -76,7 +84,9 @@ class RecoveryChainRetentionTest(unittest.TestCase):
         expired = self.backup("oldest", 90, "0/1000000")
         self.backup("last-good", 80, "0/3000000")
         self.backup("latest", 70, "0/5000000")
-        (self.root / "base" / "redirected").symlink_to(expired, target_is_directory=True)
+        (self.root / "base" / "redirected").symlink_to(
+            expired, target_is_directory=True
+        )
         old = self.wal(2)
         prune(self.root, 30, 31, 16 * 1024**2, now=self.now)
         self.assertTrue(expired.exists())

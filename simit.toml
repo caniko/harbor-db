@@ -78,8 +78,9 @@ max_jobs = 1
 cores = 2
 kvm = true
 capture_results = true
-artifact_retention_days = 14
-extra_setup = ['''
+artifact_retention_days = 32
+extra_setup = [
+  '''
 test "${RUNNER_ENVIRONMENT:-}" = github-hosted
 # Ubuntu's AppArmor restriction denies UID mapping by Nix-store unshare.
 # Enable the namespace substrate on this disposable hosted runner; the
@@ -92,7 +93,8 @@ test "$(stat -c '%u:%a' /var/cache/sccache)" = 0:1777
 printf '%s\n' 'extra-sandbox-paths = /var/cache/sccache' 'log-lines = 250' | sudo tee -a /etc/nix/nix.conf
 sudo systemctl restart nix-daemon.service
 nix config show sandbox-paths | grep -F /var/cache/sccache
-''']
+''',
+]
 
 [ci.nix_build.system_runners]
 "aarch64-linux" = "ubuntu-24.04-arm"

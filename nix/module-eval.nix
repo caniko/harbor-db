@@ -88,6 +88,7 @@ in
   (import ./eval-checks.nix {inherit pkgs;}).mkEvalCheck {
     name = "harbor-db-module-eval";
     resultMessage = "harbor-db generic lifecycle module keeps credentials out of plans";
+    # Inspect realized artifacts in the builder rather than during evaluation.
     nativeBuildInputs = [pkgs.python3];
     runtimeScript = ''
       python3 - ${lib.escapeShellArgs [service.serviceConfig.ExecStart restoreService.serviceConfig.ExecStart secretValue (toString secretFile)]} "$out/assertions.json" <<'PY'

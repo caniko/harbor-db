@@ -27,24 +27,45 @@ class CutoverProcessTests(unittest.TestCase):
         for path in (self.source, self.restore):
             (path / "historical-object").write_bytes(b"a preserved historical object")
         self.manifest = {
-            "version": 1, "enforced": True, "host": "fixture", "timeout_seconds": 5,
-            "resources": {"archive": {
-                "kind": "filesystem", "user": pwd.getpwuid(os.geteuid()).pw_name,
-                "runtime_units": [], "max_age_seconds": 60,
-                "custody_file": str(self.authority / "custody.json"),
-                "authority": {
-                    "resource": "archive", "state_dir": str(self.authority),
-                    "directories": [str(self.source)], "binding": {"backend": "files"},
-                },
-            }},
+            "version": 1,
+            "enforced": True,
+            "host": "fixture",
+            "timeout_seconds": 5,
+            "resources": {
+                "archive": {
+                    "kind": "filesystem",
+                    "user": pwd.getpwuid(os.geteuid()).pw_name,
+                    "runtime_units": [],
+                    "max_age_seconds": 60,
+                    "custody_file": str(self.authority / "custody.json"),
+                    "authority": {
+                        "resource": "archive",
+                        "state_dir": str(self.authority),
+                        "directories": [str(self.source)],
+                        "binding": {"backend": "files"},
+                    },
+                }
+            },
         }
 
     def run_command(self, *args):
         self.contract.write_text(json.dumps(self.manifest))
         return subprocess.run(
-            [sys.executable, "-B", "-m", "harbor_db.cutover", *args,
-             "--contract", str(self.contract), "--host", "fixture"],
-            capture_output=True, text=True, timeout=10, check=False,
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "harbor_db.cutover",
+                *args,
+                "--contract",
+                str(self.contract),
+                "--host",
+                "fixture",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
 
     def test_missing_adoption_is_structured_failure_and_cannot_initialize(self):
@@ -56,8 +77,15 @@ class CutoverProcessTests(unittest.TestCase):
         self.assertFalse((self.authority / "identity.json").exists())
 
     def test_explicit_certification_and_all_read_only_phases_use_real_workers(self):
-        result = self.run_command("certify", "--resource", "archive", "--identity", "historical-corpus",
-                                  "--restore-root", str(self.restore))
+        result = self.run_command(
+            "certify",
+            "--resource",
+            "archive",
+            "--identity",
+            "historical-corpus",
+            "--restore-root",
+            str(self.restore),
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         before = {path: path.read_bytes() for path in self.authority.iterdir()}
         for phase in ("preflight", "activate", "startup"):
@@ -72,8 +100,15 @@ class CutoverProcessTests(unittest.TestCase):
         self.contract = self.root / "bundle" / "manifest.json"
         self.contract.parent.mkdir()
         self.contract.symlink_to(regular_contract)
-        result = self.run_command("certify", "--resource", "archive", "--identity", "historical-corpus",
-                                  "--restore-root", str(self.restore))
+        result = self.run_command(
+            "certify",
+            "--resource",
+            "archive",
+            "--identity",
+            "historical-corpus",
+            "--restore-root",
+            str(self.restore),
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         before = {path: path.read_bytes() for path in self.authority.iterdir()}
         for phase in ("preflight", "activate", "startup"):
@@ -92,42 +127,98 @@ class CutoverProcessTests(unittest.TestCase):
         self.assertFalse(self.source.exists())
 
     def test_real_writer_holds_original_lease_after_exec(self):
-        result = self.run_command("certify", "--resource", "archive", "--identity", "historical-corpus",
-                                  "--restore-root", str(self.restore))
+        result = self.run_command(
+            "certify",
+            "--resource",
+            "archive",
+            "--identity",
+            "historical-corpus",
+            "--restore-root",
+            str(self.restore),
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         ready = self.root / "writer-ready"
-        command = [sys.executable, "-B", "-m", "harbor_db.cutover", "serve",
-                   "--contract", str(self.contract), "--host", "fixture", "--resource", "archive", "--",
-                   sys.executable, "-c", "import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); time.sleep(10)", str(ready)]
-        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+        command = [
+            sys.executable,
+            "-B",
+            "-m",
+            "harbor_db.cutover",
+            "serve",
+            "--contract",
+            str(self.contract),
+            "--host",
+            "fixture",
+            "--resource",
+            "archive",
+            "--",
+            sys.executable,
+            "-c",
+            "import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); time.sleep(10)",
+            str(ready),
+        ]
+        with subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        ) as process:
             try:
                 deadline = time.monotonic() + 5
-                while not ready.exists() and time.monotonic() < deadline and process.poll() is None:
+                while (
+                    not ready.exists()
+                    and time.monotonic() < deadline
+                    and process.poll() is None
+                ):
                     time.sleep(0.01)
                 self.assertTrue(ready.exists())
                 with self.assertRaises(BlockingIOError), lock(self.authority / "lock"):
                     self.fail("certification acquired the running writer's lease")
-                result = self.run_command("certify", "--resource", "archive", "--identity", "historical-corpus",
-                                          "--restore-root", str(self.restore))
+                result = self.run_command(
+                    "certify",
+                    "--resource",
+                    "archive",
+                    "--identity",
+                    "historical-corpus",
+                    "--restore-root",
+                    str(self.restore),
+                )
                 self.assertNotEqual(result.returncode, 0)
             finally:
                 process.terminate()
                 process.communicate(timeout=5)
 
     def test_ssh_login_writer_retains_resource_lease(self):
-        result = self.run_command("certify", "--resource", "archive", "--identity", "historical-corpus",
-                                  "--restore-root", str(self.restore))
+        result = self.run_command(
+            "certify",
+            "--resource",
+            "archive",
+            "--identity",
+            "historical-corpus",
+            "--restore-root",
+            str(self.restore),
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.manifest["resources"]["archive"]["login_shell"] = sys.executable
         self.contract.write_text(json.dumps(self.manifest))
         ready = self.root / "ssh-writer-ready"
         launch = "from pathlib import Path; import sys; from harbor_db.login_shell import serve_login_shell; serve_login_shell(Path(sys.argv[1]), sys.argv[2:], host='fixture')"
-        command = [sys.executable, "-B", "-c", launch, str(self.contract), "-c",
-                   "import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); time.sleep(10)", str(ready)]
-        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+        command = [
+            sys.executable,
+            "-B",
+            "-c",
+            launch,
+            str(self.contract),
+            "-c",
+            "import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); time.sleep(10)",
+            str(ready),
+        ]
+        with subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        ) as process:
             try:
                 deadline = time.monotonic() + 5
-                while not ready.exists() and time.monotonic() < deadline and process.poll() is None:
+                while (
+                    not ready.exists()
+                    and time.monotonic() < deadline
+                    and process.poll() is None
+                ):
                     time.sleep(0.01)
                 self.assertTrue(ready.exists(), "guarded login command did not execute")
                 with self.assertRaises(BlockingIOError), lock(self.authority / "lock"):
@@ -141,9 +232,22 @@ class CutoverProcessTests(unittest.TestCase):
         self.contract.write_text(json.dumps(self.manifest))
         marker = self.root / "unadmitted-command"
         launch = "from pathlib import Path; import sys; from harbor_db.login_shell import serve_login_shell; serve_login_shell(Path(sys.argv[1]), sys.argv[2:], host='fixture')"
-        result = subprocess.run([sys.executable, "-B", "-c", launch, str(self.contract), "-c",
-                                 "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()", str(marker)],
-                                capture_output=True, text=True, timeout=5, check=False)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                launch,
+                str(self.contract),
+                "-c",
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).touch()",
+                str(marker),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertRegex(result.stderr, "identity|authority/lock")
         self.assertFalse(marker.exists())

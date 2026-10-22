@@ -211,11 +211,12 @@ fn consumer_binding_floors_and_files_are_retained() {
 #[test]
 fn consumer_failure_preserves_diagnostics_and_does_not_publish() {
     let (t, mut c) = fixture();
-    c["consumer_command"] = json!([
-        fs::canonicalize("/bin/sh").unwrap(),
-        "-c",
-        "printf 'contract rejected\r\n' >&2; exit 1"
-    ]);
+    // Hosted Linux's /bin/sh is mutable; the validator requires a store executable.
+    let shell = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("sh"))
+        .find(|path| path.starts_with("/nix/store") && path.is_file())
+        .expect("immutable shell from the Nix development environment");
+    c["consumer_command"] = json!([shell, "-c", "printf 'contract rejected\r\n' >&2; exit 1"]);
     assert_eq!(
         resource::adopt(&c, "archive").unwrap_err().to_string(),
         "consumer storage validation failed: contract rejected"

@@ -28,10 +28,10 @@ Measured with jscpd 5.4.1 against `c730ef9ac3cf09a95f307714ac2ed01649b0d950`,
 the receipt-decoder checkpoint, using identical flags for each scope. Inline
 Rust tests and Nix fixtures are included.
 
-| Scope | Exact clones before / after | Duplicated lines before / after | Health before / after |
-| --- | --- | --- | --- |
-| `src/storage` + `src/bin` | 15 / 10 | 1.43% / 0.89% | 55 / 56 |
-| `nix` + `flake.nix` | 17 / 7 | 3.67% / 1.27% | 83 / 90 |
+| Scope                     | Exact clones before / after | Duplicated lines before / after | Health before / after |
+| ------------------------- | --------------------------- | ------------------------------- | --------------------- |
+| `src/storage` + `src/bin` | 15 / 10                     | 1.43% / 0.89%                   | 55 / 56               |
+| `nix` + `flake.nix`       | 17 / 7                      | 3.67% / 1.27%                   | 83 / 90               |
 
 Rust aggregate estimated complexity moved from 3674 to 3658. The recovery and
 transition validation helpers improve orchestration readability, while their

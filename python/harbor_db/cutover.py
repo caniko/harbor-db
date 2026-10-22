@@ -17,26 +17,41 @@ from .durable import immutable_store_reference, read_json, write_json
 
 
 def validate_manifest(value, host):
-    if (not isinstance(value, dict) or value.get("version") != 1 or value.get("enforced") is not True or value.get("host") != host
-            or not isinstance(value.get("resources"), dict)
-            or not re.fullmatch(r"[A-Za-z0-9_-]+", host)):
+    if (
+        not isinstance(value, dict)
+        or value.get("version") != 1
+        or value.get("enforced") is not True
+        or value.get("host") != host
+        or not isinstance(value.get("resources"), dict)
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", host)
+    ):
         raise ValueError("unsupported cutover contract or target host mismatch")
-    for key, default, maximum in (("timeout_seconds", 30, 300), ("activation_timeout_seconds", 900, 3600)):
+    for key, default, maximum in (
+        ("timeout_seconds", 30, 300),
+        ("activation_timeout_seconds", 900, 3600),
+    ):
         timeout = value.get(key, default)
         if type(timeout) is not int or not 1 <= timeout <= maximum:
             raise ValueError(f"invalid bounded cutover inspection budget: {key}")
     for name, entry in value["resources"].items():
-        if (not re.fullmatch(r"[A-Za-z0-9_-]+", name) or not isinstance(entry, dict)
-                or entry.get("kind") not in ("postgres", "filesystem")
-                or not isinstance(entry.get("user"), str)
-                or not re.fullmatch(r"[A-Za-z0-9_-]+", entry["user"])):
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_-]+", name)
+            or not isinstance(entry, dict)
+            or entry.get("kind") not in ("postgres", "filesystem")
+            or not isinstance(entry.get("user"), str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", entry["user"])
+        ):
             raise ValueError(f"invalid cutover resource: {name}")
         if entry["kind"] == "postgres":
             validate_path(entry.get("config"))
             if entry["user"] != "postgres":
-                raise ValueError("PostgreSQL admission requires the postgres service identity")
+                raise ValueError(
+                    "PostgreSQL admission requires the postgres service identity"
+                )
             pending = entry.get("switch_adoption_identifier")
-            if pending is not None and not (isinstance(pending, str) and re.fullmatch(r"[1-9][0-9]*", pending)):
+            if pending is not None and not (
+                isinstance(pending, str) and re.fullmatch(r"[1-9][0-9]*", pending)
+            ):
                 raise ValueError("invalid PostgreSQL switch adoption identifier")
         else:
             if "git_executable" in entry:
@@ -45,10 +60,15 @@ def validate_manifest(value, host):
                 validate_path(entry["transition_manifest"])
             authority = entry.get("authority", {})
             directories = authority.get("directories")
-            if (not isinstance(directories, list) or not directories
-                    or len(set(directories)) != len(directories)
-                    or authority.get("resource") != name or not isinstance(authority.get("binding"), dict)
-                    or type(entry.get("max_age_seconds")) is not int or entry["max_age_seconds"] <= 0):
+            if (
+                not isinstance(directories, list)
+                or not directories
+                or len(set(directories)) != len(directories)
+                or authority.get("resource") != name
+                or not isinstance(authority.get("binding"), dict)
+                or type(entry.get("max_age_seconds")) is not int
+                or entry["max_age_seconds"] <= 0
+            ):
                 raise ValueError(f"invalid existing filesystem authority: {name}")
             custody_receipt_path(entry)
             for directory in directories:
@@ -57,15 +77,27 @@ def validate_manifest(value, host):
                 validate_path(entry["login_shell"])
             units = entry.get("runtime_units")
             if not isinstance(units, list) or any(
-                not isinstance(unit, str) or not re.fullmatch(r"[A-Za-z0-9_.@:-]+\.service", unit) for unit in units
+                not isinstance(unit, str)
+                or not re.fullmatch(r"[A-Za-z0-9_.@:-]+\.service", unit)
+                for unit in units
             ):
-                raise ValueError("filesystem custody requires explicit writer service units")
+                raise ValueError(
+                    "filesystem custody requires explicit writer service units"
+                )
             dependency = entry.get("database_resource")
-            if dependency is not None and value["resources"].get(dependency, {}).get("kind") != "postgres":
-                raise ValueError("filesystem custody requires an enrolled PostgreSQL recovery dependency")
+            if (
+                dependency is not None
+                and value["resources"].get(dependency, {}).get("kind") != "postgres"
+            ):
+                raise ValueError(
+                    "filesystem custody requires an enrolled PostgreSQL recovery dependency"
+                )
     namespaces = namespace_roots(value)
     for index, (root, _) in enumerate(namespaces):
-        if any(root.is_relative_to(other) or other.is_relative_to(root) for other, _ in namespaces[index + 1:]):
+        if any(
+            root.is_relative_to(other) or other.is_relative_to(root)
+            for other, _ in namespaces[index + 1 :]
+        ):
             raise ValueError("filesystem custody namespaces must be globally disjoint")
     return value
 
@@ -77,9 +109,12 @@ def namespace_contracts_until(manifest, deadline):
         if entry["kind"] != "filesystem":
             continue
         contract = resource.contract(entry["authority"], deadline=deadline)
-        encoded_bytes += (len(json.dumps(name).encode())
-                          + len(json.dumps(contract).encode())
-                          + 2 + 2 * bool(contracts))
+        encoded_bytes += (
+            len(json.dumps(name).encode())
+            + len(json.dumps(contract).encode())
+            + 2
+            + 2 * bool(contracts)
+        )
         if encoded_bytes > MAXIMUM_SNAPSHOT_BYTES:
             raise ValueError("namespace consumer snapshot exceeds aggregate size limit")
         contracts[name] = contract
@@ -96,30 +131,44 @@ def validate_namespace_contracts(manifest, contracts):
         expected = contracts.get(name)
         if not isinstance(expected, dict):
             raise ValueError("namespace inspection is missing a consumer contract")
-        directories = roots[name] = set(expected['directories'])
+        directories = roots[name] = set(expected["directories"])
         state = Path(authority["state_dir"])
-        if not (state / 'identity.json').exists():
+        if not (state / "identity.json").exists():
             continue
-        with resource.lock(state / 'lock', shared=True):
-            selected = read_json(entry['transition_manifest']) if entry.get('transition_manifest') else None
+        with resource.lock(state / "lock", shared=True):
+            selected = (
+                read_json(entry["transition_manifest"])
+                if entry.get("transition_manifest")
+                else None
+            )
             from . import application_transition, transition_manifest
-            journal = application_transition.journal_path(selected) if selected else None
-            if journal and journal.exists() and read_json(journal)['phase'] in ('prepared', 'committing', 'committed'):
+
+            journal = (
+                application_transition.journal_path(selected) if selected else None
+            )
+            if (
+                journal
+                and journal.exists()
+                and read_json(journal)["phase"]
+                in ("prepared", "committing", "committed")
+            ):
                 source, target = transition_manifest.validate(selected)
                 if target != authority:
-                    raise ValueError('namespace transition target differs from authority')
+                    raise ValueError(
+                        "namespace transition target differs from authority"
+                    )
                 record = application_transition.status(selected)
-                current = read_json(state / 'identity.json')
-                if current == record['target_authority']:
+                current = read_json(state / "identity.json")
+                if current == record["target_authority"]:
                     resource.verify(authority, expected)
-                elif current == record['source_authority']:
-                    resource.require_contract(expected, record['target_authority'])
-                    resource.verify(source, record['source_authority'])
+                elif current == record["source_authority"]:
+                    resource.require_contract(expected, record["target_authority"])
+                    resource.verify(source, record["source_authority"])
                 else:
-                    raise ValueError('namespace transition authority changed')
+                    raise ValueError("namespace transition authority changed")
                 # Capture the complete transition union while the lease is held.
-                directories.update(record['source_authority']['directories'])
-                directories.update(record['target_authority']['directories'])
+                directories.update(record["source_authority"]["directories"])
+                directories.update(record["target_authority"]["directories"])
             else:
                 resource.require_stable(authority)
                 resource.verify(authority, expected)
@@ -128,7 +177,11 @@ def validate_namespace_contracts(manifest, contracts):
 
 def namespace_roots(manifest, *, contracts=None):
     roots = []
-    validated = validate_namespace_contracts(manifest, contracts) if contracts is not None else None
+    validated = (
+        validate_namespace_contracts(manifest, contracts)
+        if contracts is not None
+        else None
+    )
     for name, entry in manifest["resources"].items():
         if entry["kind"] == "postgres":
             database = read_json(entry["config"])
@@ -143,8 +196,15 @@ def namespace_roots(manifest, *, contracts=None):
                 roots.append((Path(startup["state_dir"]), False))
         else:
             authority = entry["authority"]
-            directories = validated[name] if validated is not None else set(authority['directories'])
-            roots.extend((Path(path), False) for path in [authority["state_dir"], *sorted(directories)])
+            directories = (
+                validated[name]
+                if validated is not None
+                else set(authority["directories"])
+            )
+            roots.extend(
+                (Path(path), False)
+                for path in [authority["state_dir"], *sorted(directories)]
+            )
     return roots
 
 
@@ -170,8 +230,13 @@ def validate_restore_roots_against(restores, protected):
     for restore in restores:
         validate_path(str(restore))
         restore = Path(restore)
-        if any(restore.is_relative_to(root) or root.is_relative_to(restore) for root, _ in protected):
-            raise ValueError("restore roots must be independent of every enrolled storage namespace")
+        if any(
+            restore.is_relative_to(root) or root.is_relative_to(restore)
+            for root, _ in protected
+        ):
+            raise ValueError(
+                "restore roots must be independent of every enrolled storage namespace"
+            )
 
 
 def validate_restore_namespaces(manifest, restores, *, contracts=None, deadline=None):
@@ -183,7 +248,9 @@ def validate_restore_namespaces(manifest, restores, *, contracts=None, deadline=
         raise ValueError("invalid namespace consumer contracts")
     roots = namespace_roots(manifest, contracts=contracts)
     validate_restore_roots_against(restores, roots)
-    inspect_namespace_roots(roots + [(Path(root), False) for root in restores], deadline)
+    inspect_namespace_roots(
+        roots + [(Path(root), False) for root in restores], deadline
+    )
     return contracts
 
 
@@ -199,15 +266,25 @@ def inspect_namespace_roots(roots, deadline):
         if root.resolve() != root:
             raise ValueError("custody namespaces contain redirected storage")
         identities = set()
-        recovery.storage_identities(root, identities, primary=primary, deadline=deadline)
+        recovery.storage_identities(
+            root, identities, primary=primary, deadline=deadline
+        )
         if not protected.isdisjoint(identities):
-            raise ValueError("custody namespaces alias shared storage across resource leases")
+            raise ValueError(
+                "custody namespaces alias shared storage across resource leases"
+            )
         protected.update(identities)
 
 
 def validate_path(path):
-    if not isinstance(path, str) or not Path(path).is_absolute() or os.path.normpath(path) != path:
-        raise ValueError("cutover storage and policy paths must be canonical absolute paths")
+    if (
+        not isinstance(path, str)
+        or not Path(path).is_absolute()
+        or os.path.normpath(path) != path
+    ):
+        raise ValueError(
+            "cutover storage and policy paths must be canonical absolute paths"
+        )
 
 
 def custody_receipt_path(config):
@@ -216,8 +293,14 @@ def custody_receipt_path(config):
     validate_path(state)
     validate_path(receipt)
     receipt = Path(receipt)
-    if receipt.parent != Path(state) or receipt.name in ("identity.json", "transition.json", "lock"):
-        raise ValueError("custody receipt must be a dedicated direct authority child outside authority control paths")
+    if receipt.parent != Path(state) or receipt.name in (
+        "identity.json",
+        "transition.json",
+        "lock",
+    ):
+        raise ValueError(
+            "custody receipt must be a dedicated direct authority child outside authority control paths"
+        )
     return receipt
 
 
@@ -230,16 +313,27 @@ def failed_walk(error):
 
 
 def root_identities(config):
-    return [{"device": Path(path).stat().st_dev, "inode": Path(path).stat().st_ino,
-             "mode": stat.S_IMODE(Path(path).stat().st_mode)}
-            for path in config["authority"]["directories"]]
+    return [
+        {
+            "device": Path(path).stat().st_dev,
+            "inode": Path(path).stat().st_ino,
+            "mode": stat.S_IMODE(Path(path).stat().st_mode),
+        }
+        for path in config["authority"]["directories"]
+    ]
 
 
 def expanded_config(config, contract):
     if not config["authority"].get("consumer_command"):
         return config
-    return {**config, "authority": {**config["authority"], "directories": contract["directories"],
-                                    "binding": contract["binding"]}}
+    return {
+        **config,
+        "authority": {
+            **config["authority"],
+            "directories": contract["directories"],
+            "binding": contract["binding"],
+        },
+    }
 
 
 def inventory(config, *, contents):
@@ -252,7 +346,9 @@ def inventory(config, *, contents):
             raise ValueError(f"authoritative source is missing or redirected: {root}")
         files = {}
         marker = resource.anchor(authority, directory)
-        for parent, directories, names in os.walk(root, followlinks=False, onerror=failed_walk):
+        for parent, directories, names in os.walk(
+            root, followlinks=False, onerror=failed_walk
+        ):
             for name in directories + names:
                 path = Path(parent) / name
                 if path == marker:
@@ -268,16 +364,33 @@ def inventory(config, *, contents):
                 }
                 if stat.S_ISREG(info.st_mode):
                     if info.st_nlink != 1:
-                        raise ValueError("custody corpus files must not have hard links or shared-inode aliases")
+                        raise ValueError(
+                            "custody corpus files must not have hard links or shared-inode aliases"
+                        )
                     if contents:
                         files[key]["sha256"] = digest(path)
                         after = path.lstat()
-                        if any(getattr(after, key) != getattr(info, key) for key in
-                               ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")):
-                            raise ValueError(f"corpus entry changed during inspection: {path}")
+                        if any(
+                            getattr(after, key) != getattr(info, key)
+                            for key in (
+                                "st_dev",
+                                "st_ino",
+                                "st_mode",
+                                "st_size",
+                                "st_mtime_ns",
+                                "st_ctime_ns",
+                            )
+                        ):
+                            raise ValueError(
+                                f"corpus entry changed during inspection: {path}"
+                            )
                     else:
-                        files[key].update(mtime_ns=info.st_mtime_ns, ctime_ns=info.st_ctime_ns,
-                                          inode=info.st_ino, device=info.st_dev)
+                        files[key].update(
+                            mtime_ns=info.st_mtime_ns,
+                            ctime_ns=info.st_ctime_ns,
+                            inode=info.st_ino,
+                            device=info.st_dev,
+                        )
         if not any(not item["directory"] for item in files.values()):
             raise ValueError(f"authoritative corpus is empty: {root}")
         result.append(files)
@@ -287,7 +400,10 @@ def inventory(config, *, contents):
 def writer_active(unit):
     result = subprocess.run(
         ["systemctl", "show", unit, "--property=ActiveState", "--value"],
-        check=True, capture_output=True, text=True, timeout=5,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     return result.stdout.strip() not in ("inactive", "failed")
 
@@ -303,26 +419,57 @@ def require_database_paths(inventories, requirements, *, roots=(), git_executabl
     for requirement in requirements:
         path = requirement["path"]
         root = requirement["root"]
-        if (not isinstance(path, str) or not path or Path(path).is_absolute()
-                or ".." in Path(path).parts or os.path.normpath(path) != path
-                or type(root) is not int or not 0 <= root < len(inventories)
-                or type(requirement.get("directory")) is not bool):
+        if (
+            not isinstance(path, str)
+            or not path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            or os.path.normpath(path) != path
+            or type(root) is not int
+            or not 0 <= root < len(inventories)
+            or type(requirement.get("directory")) is not bool
+        ):
             raise ValueError("invalid database-bound relative corpus path")
         entry = inventories[root].get(path)
-        if entry is None or entry["directory"] != requirement["directory"] or (not entry["directory"] and entry["size"] == 0 and requirement.get("size") != 0):
-            raise ValueError(f"database references missing, empty or incompatible corpus entry: {path}")
+        if (
+            entry is None
+            or entry["directory"] != requirement["directory"]
+            or (
+                not entry["directory"]
+                and entry["size"] == 0
+                and requirement.get("size") != 0
+            )
+        ):
+            raise ValueError(
+                f"database references missing, empty or incompatible corpus entry: {path}"
+            )
         if "size" in requirement:
             size = requirement["size"]
-            if type(size) is not int or size < 0 or entry["directory"] or entry["size"] != size:
+            if (
+                type(size) is not int
+                or size < 0
+                or entry["directory"]
+                or entry["size"] != size
+            ):
                 raise ValueError(f"database corpus size differs: {path}")
         if "sha256" in requirement:
             expected = requirement["sha256"]
-            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected) or entry.get("sha256") != expected:
+            if (
+                not isinstance(expected, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected)
+                or entry.get("sha256") != expected
+            ):
                 raise ValueError(f"database corpus content hash differs: {path}")
         if "git_repository" in requirement:
-            if requirement["git_repository"] is not True or not entry["directory"] or len(roots) != len(inventories):
+            if (
+                requirement["git_repository"] is not True
+                or not entry["directory"]
+                or len(roots) != len(inventories)
+            ):
                 raise ValueError("invalid database Git repository requirement")
-            validate_git_repository(Path(roots[root]) / path, requirement, git_executable)
+            validate_git_repository(
+                Path(roots[root]) / path, requirement, git_executable
+            )
 
 
 def immutable_git_executable(executable):
@@ -336,33 +483,76 @@ def validate_git_repository(path, requirement, executable):
         raise ValueError("invalid database Git commit requirement")
     if any((path / "objects/pack").glob("*.promisor")):
         raise ValueError(f"Git integrity rejects partial-clone promisor packs: {path}")
-    for relative in ("objects/info/alternates", "objects/info/http-alternates", "shallow"):
+    for relative in (
+        "objects/info/alternates",
+        "objects/info/http-alternates",
+        "shallow",
+    ):
         marker = path / relative
         if marker.exists() and marker.stat().st_size:
-            raise ValueError(f"Git integrity cannot depend on external or shallow history: {path}")
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+            raise ValueError(
+                f"Git integrity cannot depend on external or shallow history: {path}"
+            )
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
     environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
     command = [executable, "--no-replace-objects", f"--git-dir={path}"]
-    bare = subprocess.run([*command, "rev-parse", "--is-bare-repository"], env=environment,
-                          capture_output=True, text=True, check=False)
+    bare = subprocess.run(
+        [*command, "rev-parse", "--is-bare-repository"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if bare.returncode or bare.stdout.strip() != "true":
         raise ValueError(f"Git integrity requires a valid bare repository: {path}")
-    partial = subprocess.run([*command, "config", "--local", "--get-regexp",
-                              r"^(extensions\.partialclone|remote\..*\.(promisor|partialclonefilter))$"],
-                             env=environment, capture_output=True, text=True, check=False)
+    partial = subprocess.run(
+        [
+            *command,
+            "config",
+            "--local",
+            "--get-regexp",
+            r"^(extensions\.partialclone|remote\..*\.(promisor|partialclonefilter))$",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if partial.returncode != 1:
-        raise ValueError(f"Git integrity rejects partial-clone history or unreadable configuration: {path}")
+        raise ValueError(
+            f"Git integrity rejects partial-clone history or unreadable configuration: {path}"
+        )
     checks = [["fsck", "--full", "--strict", "--no-dangling"]]
     if requirement.get("git_has_commits", False):
         checks.append(["rev-parse", "--verify", "HEAD^{commit}"])
     for arguments in checks:
-        result = subprocess.run([*command, *arguments], env=environment, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE, text=True, check=False)
+        result = subprocess.run(
+            [*command, *arguments],
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
         if result.returncode:
-            raise ValueError(f"Git history integrity failed: {path}: {result.stderr[-4096:].strip()}")
+            raise ValueError(
+                f"Git history integrity failed: {path}: {result.stderr[-4096:].strip()}"
+            )
 
 
-def certify_filesystem(config, restored_roots, identifier, *, now=None, database_snapshot=None, database_requirements=(), pinned=None, deadline=None):
+def certify_filesystem(
+    config,
+    restored_roots,
+    identifier,
+    *,
+    now=None,
+    database_snapshot=None,
+    database_requirements=(),
+    pinned=None,
+    deadline=None,
+):
     """Writers must already be stopped; this command never stops or restores them."""
     receipt = custody_receipt_path(config)
     now = int(time.time()) if now is None else now
@@ -373,28 +563,62 @@ def certify_filesystem(config, restored_roots, identifier, *, now=None, database
     roots = list(map(Path, config["authority"]["directories"]))
     restores = list(map(Path, restored_roots))
     state = resource.state_directory(authority)
-    if len(restores) != len(roots) or any(
-        root.is_relative_to(other) or other.is_relative_to(root)
-        for index, root in enumerate(restores) for other in restores[:index]
-    ) or any(
-        not root.is_absolute() or root.resolve() != root
-        or any(root == source or root.is_relative_to(source) or source.is_relative_to(root)
-               for source in roots + [state]) for root in restores
+    if (
+        len(restores) != len(roots)
+        or any(
+            root.is_relative_to(other) or other.is_relative_to(root)
+            for index, root in enumerate(restores)
+            for other in restores[:index]
+        )
+        or any(
+            not root.is_absolute()
+            or root.resolve() != root
+            or any(
+                root == source
+                or root.is_relative_to(source)
+                or source.is_relative_to(root)
+                for source in roots + [state]
+            )
+            for root in restores
+        )
     ):
-        raise ValueError("restore roots must be independent absolute corpus directories")
+        raise ValueError(
+            "restore roots must be independent absolute corpus directories"
+        )
     if config.get("database_resource") and not database_snapshot:
-        raise ValueError("filesystem certification needs matching database recovery evidence")
-    with resource.adoption(authority, identifier, expected=expected, deadline=deadline) as publish:
+        raise ValueError(
+            "filesystem certification needs matching database recovery evidence"
+        )
+    with resource.adoption(
+        authority, identifier, expected=expected, deadline=deadline
+    ) as publish:
         if any(writer_active(unit) for unit in config["runtime_units"]):
-            raise ValueError("source writer is active; establish the declared consistency window")
+            raise ValueError(
+                "source writer is active; establish the declared consistency window"
+            )
         identities = root_identities(config)
         source = inventory(config, contents=True)
-        require_database_paths(source, database_requirements, roots=roots, git_executable=config.get("git_executable"))
-        restored = inventory({"authority": {**config["authority"], "directories": restored_roots}}, contents=True)
-        if any(stat.S_IMODE(source.stat().st_mode) != stat.S_IMODE(restore.stat().st_mode)
-               for source, restore in zip(roots, restores, strict=True)):
+        require_database_paths(
+            source,
+            database_requirements,
+            roots=roots,
+            git_executable=config.get("git_executable"),
+        )
+        restored = inventory(
+            {"authority": {**config["authority"], "directories": restored_roots}},
+            contents=True,
+        )
+        if any(
+            stat.S_IMODE(source.stat().st_mode) != stat.S_IMODE(restore.stat().st_mode)
+            for source, restore in zip(roots, restores, strict=True)
+        ):
             raise ValueError("source and restored corpus root modes differ")
-        require_database_paths(restored, database_requirements, roots=restores, git_executable=config.get("git_executable"))
+        require_database_paths(
+            restored,
+            database_requirements,
+            roots=restores,
+            git_executable=config.get("git_executable"),
+        )
         if source != restored:
             raise ValueError("source and restored historical corpus differ")
         source_inodes = set()
@@ -403,30 +627,55 @@ def certify_filesystem(config, restored_roots, identifier, *, now=None, database
                 info = path.lstat()
                 source_inodes.add((info.st_dev, info.st_ino))
         for restored_root, files in zip(restores, restored, strict=True):
-            restored_stats = [path.lstat() for path in [restored_root, *(restored_root / name for name in files)]]
-            if any((info.st_dev, info.st_ino) in source_inodes for info in restored_stats):
-                raise ValueError("restore corpus aliases a source file; require an independent restore")
+            restored_stats = [
+                path.lstat()
+                for path in [restored_root, *(restored_root / name for name in files)]
+            ]
+            if any(
+                (info.st_dev, info.st_ino) in source_inodes for info in restored_stats
+            ):
+                raise ValueError(
+                    "restore corpus aliases a source file; require an independent restore"
+                )
         metadata = inventory(config, contents=False)
         if inventory(config, contents=True) != source:
             raise ValueError("source changed during custody certification")
-        if any(writer_active(unit) for unit in config["runtime_units"]) or root_identities(config) != identities:
-            raise ValueError("source writer or storage identity changed during custody certification")
-        resource.require_contract(resource.contract(authority, deadline=deadline), expected)
+        if (
+            any(writer_active(unit) for unit in config["runtime_units"])
+            or root_identities(config) != identities
+        ):
+            raise ValueError(
+                "source writer or storage identity changed during custody certification"
+            )
+        resource.require_contract(
+            resource.contract(authority, deadline=deadline), expected
+        )
         if deadline is not None and time.monotonic() >= deadline:
             raise ValueError("cutover inspection budget exhausted")
         publish()
         if deadline is not None and time.monotonic() >= deadline:
             raise ValueError("cutover inspection budget exhausted")
-        write_json(recovery.absolute(receipt), {
-            "version": 1, "resource": authority["resource"], "identity": identifier,
-            "binding": config["authority"]["binding"], "directories": config["authority"]["directories"],
-            "completed_at": now, "database_snapshot_sha256": database_snapshot,
-            "database_requirements": database_requirements,
-            "inventory": source, "metadata": metadata, "root_identities": identities,
-        })
+        write_json(
+            recovery.absolute(receipt),
+            {
+                "version": 1,
+                "resource": authority["resource"],
+                "identity": identifier,
+                "binding": config["authority"]["binding"],
+                "directories": config["authority"]["directories"],
+                "completed_at": now,
+                "database_snapshot_sha256": database_snapshot,
+                "database_requirements": database_requirements,
+                "inventory": source,
+                "metadata": metadata,
+                "root_identities": identities,
+            },
+        )
 
 
-def check_resource(config, *, phase, now=None, candidate=None, pinned=None, deadline=None):
+def check_resource(
+    config, *, phase, now=None, candidate=None, pinned=None, deadline=None
+):
     if phase not in ("preflight", "activate", "startup", "certify"):
         raise ValueError("unsupported cutover phase")
     now = int(time.time()) if now is None else now
@@ -434,34 +683,61 @@ def check_resource(config, *, phase, now=None, candidate=None, pinned=None, dead
         transition = config.get("transition_manifest")
         if transition is not None and phase in ("preflight", "activate"):
             from . import application_transition
+
             selected = read_json(transition)
             journal = application_transition.journal_path(selected)
-            if journal.exists() and read_json(journal)["phase"] in ("prepared", "committing", "committed"):
+            if journal.exists() and read_json(journal)["phase"] in (
+                "prepared",
+                "committing",
+                "committed",
+            ):
                 if pinned is not None:
                     prepared = read_json(journal).get("target_authority")
                     if not isinstance(prepared, dict):
                         raise ValueError("missing prepared target authority")
-                    resource.require_contract({key: value for key, value in prepared.items() if key != "identity"}, pinned)
+                    resource.require_contract(
+                        {
+                            key: value
+                            for key, value in prepared.items()
+                            if key != "identity"
+                        },
+                        pinned,
+                    )
                 if selected["custody_manifest"] is None:
-                    raise ValueError("cutover transition admission requires target corpus custody publication")
-                return application_transition.admission(selected, phase, config["authority"], candidate)
+                    raise ValueError(
+                        "cutover transition admission requires target corpus custody publication"
+                    )
+                return application_transition.admission(
+                    selected, phase, config["authority"], candidate
+                )
         # Startup validates adopted roots/identity under the writer lease. A
         # corpus walk would race ordinary file turnover and block SSH commands.
         # Deployment still rejects missing/empty or changed contents up front.
         authority = config["authority"]
-        metadata = inventory(config, contents=False) if phase != "startup" and not authority.get("consumer_command") else None
-        with resource.inspection(authority, pinned=pinned, deadline=deadline) as adopted:
+        metadata = (
+            inventory(config, contents=False)
+            if phase != "startup" and not authority.get("consumer_command")
+            else None
+        )
+        with resource.inspection(
+            authority, pinned=pinned, deadline=deadline
+        ) as adopted:
             config = expanded_config(config, adopted)
             authority = config["authority"]
             if metadata is None and phase != "startup":
                 metadata = inventory(config, contents=False)
             receipt = read_json(recovery.absolute(config["custody_file"]))
-            if (receipt.get("version") != 1 or receipt.get("resource") != authority["resource"]
-                    or receipt.get("identity") != adopted["identity"]
-                    or receipt.get("binding") != authority["binding"]
-                    or receipt.get("directories") != authority["directories"]
-                    or receipt.get("root_identities") != root_identities(config)):
-                raise ValueError("filesystem custody binding differs from the adopted authority")
+            if (
+                receipt.get("version") != 1
+                or receipt.get("resource") != authority["resource"]
+                or receipt.get("identity") != adopted["identity"]
+                or receipt.get("binding") != authority["binding"]
+                or receipt.get("directories") != authority["directories"]
+                or receipt.get("root_identities") != root_identities(config)
+            ):
+                raise ValueError(
+                    "filesystem custody binding differs from the adopted authority"
+                )
             if phase == "startup":
                 return {}
             recovery.fresh(receipt.get("completed_at"), now, config["max_age_seconds"])
@@ -470,17 +746,28 @@ def check_resource(config, *, phase, now=None, candidate=None, pinned=None, dead
             if phase != "preflight":
                 source = inventory(config, contents=True)
                 if source != receipt.get("inventory"):
-                    raise ValueError("source corpus contents differ from the certified restore")
-                require_database_paths(source, receipt.get("database_requirements", []),
-                                       roots=authority["directories"], git_executable=config.get("git_executable"))
-            return {"database_snapshot_sha256": receipt.get("database_snapshot_sha256"),
-                    "database_requirements": receipt.get("database_requirements", [])}
+                    raise ValueError(
+                        "source corpus contents differ from the certified restore"
+                    )
+                require_database_paths(
+                    source,
+                    receipt.get("database_requirements", []),
+                    roots=authority["directories"],
+                    git_executable=config.get("git_executable"),
+                )
+            return {
+                "database_snapshot_sha256": receipt.get("database_snapshot_sha256"),
+                "database_requirements": receipt.get("database_requirements", []),
+            }
     else:
         database = read_json(config["config"])
         # Declared first-rollout switch adoption runs after this gate; only the
         # adopted-identity record is deferred to that hook.
-        pending = (phase in ("preflight", "activate") and config.get("switch_adoption_identifier") is not None
-                   and not (Path(database["state_dir"]) / "identity.json").exists())
+        pending = (
+            phase in ("preflight", "activate")
+            and config.get("switch_adoption_identifier") is not None
+            and not (Path(database["state_dir"]) / "identity.json").exists()
+        )
         if pending:
             from . import writer_fence
             postgres.validate_config(database)
@@ -490,33 +777,78 @@ def check_resource(config, *, phase, now=None, candidate=None, pinned=None, dead
         if phase == "startup":
             return {}
         settings = recovery.policy(database)
-        if pending and config["switch_adoption_identifier"] != settings["system_identifier"]:
-            raise ValueError("switch adoption and recovery must name the same authoritative cluster")
+        if (
+            pending
+            and config["switch_adoption_identifier"] != settings["system_identifier"]
+        ):
+            raise ValueError(
+                "switch adoption and recovery must name the same authoritative cluster"
+            )
         postgres.reject_upgrade(database)
         if phase != "startup":
-            postgres.inspect_live(database, settings["system_identifier"],
-                                  config.get("socket_dir", "/run/postgresql"), config.get("port", 5432))
+            postgres.inspect_live(
+                database,
+                settings["system_identifier"],
+                config.get("socket_dir", "/run/postgresql"),
+                config.get("port", 5432),
+            )
             for check in config.get("compatibility_checks", []):
-                observed = recovery.query(database, config.get("socket_dir", "/run/postgresql"),
-                                          config.get("port", 5432), check["database"], check["sql"])
+                observed = recovery.query(
+                    database,
+                    config.get("socket_dir", "/run/postgresql"),
+                    config.get("port", 5432),
+                    check["database"],
+                    check["sql"],
+                )
                 if observed.strip() != "t":
-                    raise ValueError(f"candidate schema/recovery compatibility check failed: {check['database']}")
-        with recovery.admission(database, now=now, verify_contents=phase in ("activate", "certify"),
-                                socket_dir=config.get("socket_dir", "/run/postgresql"), port=config.get("port", 5432)):
+                    raise ValueError(
+                        f"candidate schema/recovery compatibility check failed: {check['database']}"
+                    )
+        with recovery.admission(
+            database,
+            now=now,
+            verify_contents=phase in ("activate", "certify"),
+            socket_dir=config.get("socket_dir", "/run/postgresql"),
+            port=config.get("port", 5432),
+        ):
             snapshot_path = recovery.source_snapshot_path(database, settings)
-            if phase == "certify" and recovery.records(database, settings, config.get("socket_dir", "/run/postgresql"),
-                                                       config.get("port", 5432)) != read_json(snapshot_path)["records"]:
-                raise ValueError("live database records differ from the recovery snapshot")
+            if (
+                phase == "certify"
+                and recovery.records(
+                    database,
+                    settings,
+                    config.get("socket_dir", "/run/postgresql"),
+                    config.get("port", 5432),
+                )
+                != read_json(snapshot_path)["records"]
+            ):
+                raise ValueError(
+                    "live database records differ from the recovery snapshot"
+                )
             requirements = {}
             for name, checks in config.get("corpus_checks", {}).items():
                 requirements[name] = []
                 for check in checks:
-                    paths = json.loads(recovery.query(database, config.get("socket_dir", "/run/postgresql"),
-                                                     config.get("port", 5432), check["database"], check["sql"]))
+                    paths = json.loads(
+                        recovery.query(
+                            database,
+                            config.get("socket_dir", "/run/postgresql"),
+                            config.get("port", 5432),
+                            check["database"],
+                            check["sql"],
+                        )
+                    )
                     if not isinstance(paths, list):
-                        raise TypeError("database corpus query must return a JSON array of paths")
-                    requirements[name].extend(database_entry(check["root"], item) for item in paths)
-            return {"database_snapshot_sha256": digest(snapshot_path), "corpus_requirements": requirements}
+                        raise TypeError(
+                            "database corpus query must return a JSON array of paths"
+                        )
+                    requirements[name].extend(
+                        database_entry(check["root"], item) for item in paths
+                    )
+            return {
+                "database_snapshot_sha256": digest(snapshot_path),
+                "corpus_requirements": requirements,
+            }
 
 
 MAXIMUM_SNAPSHOT_BYTES = 64 * 1024 * 1024
@@ -524,6 +856,7 @@ MAXIMUM_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
 def read_snapshot(deadline):
     import select
+
     data = bytearray()
     while True:
         remaining = deadline - time.monotonic()
@@ -540,24 +873,64 @@ def read_snapshot(deadline):
     return json.loads(data)
 
 
-def execute_worker(path, name, config, phase, timeout, extra=(), *, command_name="check", as_root=False, snapshot=None):
+def execute_worker(
+    path,
+    name,
+    config,
+    phase,
+    timeout,
+    extra=(),
+    *,
+    command_name="check",
+    as_root=False,
+    snapshot=None,
+):
     account = pwd.getpwnam(config["user"])
     kwargs = {}
     if os.geteuid() == 0:
-        kwargs = ({"user": 0, "group": 0, "extra_groups": []} if as_root else
-                  {"user": account.pw_uid, "group": account.pw_gid,
-                   "extra_groups": os.getgrouplist(account.pw_name, account.pw_gid)})
+        kwargs = (
+            {"user": 0, "group": 0, "extra_groups": []}
+            if as_root
+            else {
+                "user": account.pw_uid,
+                "group": account.pw_gid,
+                "extra_groups": os.getgrouplist(account.pw_name, account.pw_gid),
+            }
+        )
     elif as_root:
         raise ValueError("prepared transition inspection requires root")
     elif os.geteuid() != account.pw_uid:
-        raise ValueError(f"inspection requires the resource's service user: {account.pw_name}")
-    command = [sys.executable, "-B", "-m", "harbor_db.cutover", command_name, "--contract", str(path),
-               "--host", read_json(path)["host"], "--phase", phase, "--worker", name, *extra]
+        raise ValueError(
+            f"inspection requires the resource's service user: {account.pw_name}"
+        )
+    command = [
+        sys.executable,
+        "-B",
+        "-m",
+        "harbor_db.cutover",
+        command_name,
+        "--contract",
+        str(path),
+        "--host",
+        read_json(path)["host"],
+        "--phase",
+        phase,
+        "--worker",
+        name,
+        *extra,
+    ]
     data = None if snapshot is None else json.dumps(snapshot)
     if data is not None and len(data.encode()) > MAXIMUM_SNAPSHOT_BYTES:
         raise ValueError("namespace snapshot exceeds its size limit")
-    process = subprocess.Popen(command, stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, start_new_session=True, **kwargs)
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        **kwargs,
+    )
     try:
         output, error = process.communicate(input=data, timeout=timeout)
     except BaseException:
@@ -572,28 +945,50 @@ def execute_worker(path, name, config, phase, timeout, extra=(), *, command_name
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    checking = commands.add_parser("check", help="read-only mandatory rebuild admission")
-    checking.add_argument("--candidate", help="exact generation provided by NixOS pre-switch checks")
-    certifying = commands.add_parser("certify", help="explicit custody proof from an independent restore")
+    checking = commands.add_parser(
+        "check", help="read-only mandatory rebuild admission"
+    )
+    checking.add_argument(
+        "--candidate", help="exact generation provided by NixOS pre-switch checks"
+    )
+    certifying = commands.add_parser(
+        "certify", help="explicit custody proof from an independent restore"
+    )
     certification_worker = commands.add_parser("certify-worker", help=argparse.SUPPRESS)
-    serving = commands.add_parser("serve", help="exec a declared writer retaining its resource authority lease")
+    serving = commands.add_parser(
+        "serve", help="exec a declared writer retaining its resource authority lease"
+    )
     serving.add_argument("--resource", required=True)
     serving.add_argument("argv", nargs=argparse.REMAINDER)
     for command in (checking, certifying, certification_worker, serving):
         command.add_argument("--contract", type=Path, required=True)
         command.add_argument("--host", required=True)
-    checking.add_argument("--phase", choices=("preflight", "activate", "startup", "certify"), default="preflight")
+    checking.add_argument(
+        "--phase",
+        choices=("preflight", "activate", "startup", "certify"),
+        default="preflight",
+    )
     checking.add_argument("--worker", help=argparse.SUPPRESS)
-    checking.add_argument("--authority-contract", type=json.loads, help=argparse.SUPPRESS)
-    checking.add_argument("--authority-contract-stdin", action='store_true', help=argparse.SUPPRESS)
+    checking.add_argument(
+        "--authority-contract", type=json.loads, help=argparse.SUPPRESS
+    )
+    checking.add_argument(
+        "--authority-contract-stdin", action="store_true", help=argparse.SUPPRESS
+    )
     certification_worker.add_argument("--phase", choices=("certify",), required=True)
     certification_worker.add_argument("--worker", required=True)
     certification_worker.add_argument("--certify-roots", nargs="+", required=True)
     certification_worker.add_argument("--certify-identity", required=True)
     certification_worker.add_argument("--database-snapshot")
-    certification_worker.add_argument("--database-requirements", type=json.loads, default=[])
-    certification_worker.add_argument("--namespace-contracts", type=json.loads, help=argparse.SUPPRESS)
-    certification_worker.add_argument("--namespace-contracts-stdin", action='store_true', help=argparse.SUPPRESS)
+    certification_worker.add_argument(
+        "--database-requirements", type=json.loads, default=[]
+    )
+    certification_worker.add_argument(
+        "--namespace-contracts", type=json.loads, help=argparse.SUPPRESS
+    )
+    certification_worker.add_argument(
+        "--namespace-contracts-stdin", action="store_true", help=argparse.SUPPRESS
+    )
     certifying.add_argument("--resource", required=True)
     certifying.add_argument("--restore-root", action="append", required=True)
     certifying.add_argument("--identity", required=True)
@@ -605,53 +1000,130 @@ def main():
         if args.command == "serve":
             config = manifest["resources"][args.resource]
             argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
-            resource.serve(config["authority"], argv, inspect=lambda: check_resource(config, phase="startup"))
+            resource.serve(
+                config["authority"],
+                argv,
+                inspect=lambda: check_resource(config, phase="startup"),
+            )
         elif args.command == "certify":
-            deadline = time.monotonic() + manifest.get("activation_timeout_seconds", 900)
-            contracts = validate_restore_namespaces(manifest, args.restore_root, deadline=deadline)
+            deadline = time.monotonic() + manifest.get(
+                "activation_timeout_seconds", 900
+            )
+            contracts = validate_restore_namespaces(
+                manifest, args.restore_root, deadline=deadline
+            )
+
             def remaining():
                 seconds = deadline - time.monotonic()
                 if seconds <= 0:
                     raise ValueError("cutover inspection budget exhausted")
                 return seconds
+
             config = manifest["resources"][args.resource]
             dependency = config.get("database_resource")
             database = None
             requirements = []
             if dependency:
-                result = execute_worker(args.contract, dependency, manifest["resources"][dependency],
-                                        "certify", remaining())
+                result = execute_worker(
+                    args.contract,
+                    dependency,
+                    manifest["resources"][dependency],
+                    "certify",
+                    remaining(),
+                )
                 database = result["database_snapshot_sha256"]
-                requirements = result.get("corpus_requirements", {}).get(args.resource, [])
-            extra = ["--namespace-contracts-stdin", "--certify-identity", args.identity, "--certify-roots", *args.restore_root]
+                requirements = result.get("corpus_requirements", {}).get(
+                    args.resource, []
+                )
+            extra = [
+                "--namespace-contracts-stdin",
+                "--certify-identity",
+                args.identity,
+                "--certify-roots",
+                *args.restore_root,
+            ]
             if database:
-                extra = ["--database-snapshot", database, "--database-requirements", json.dumps(requirements), *extra]
-            execute_worker(args.contract, args.resource, config, "certify",
-                           remaining(), extra, command_name="certify-worker", as_root=os.geteuid() == 0, snapshot=contracts)
+                extra = [
+                    "--database-snapshot",
+                    database,
+                    "--database-requirements",
+                    json.dumps(requirements),
+                    *extra,
+                ]
+            execute_worker(
+                args.contract,
+                args.resource,
+                config,
+                "certify",
+                remaining(),
+                extra,
+                command_name="certify-worker",
+                as_root=os.geteuid() == 0,
+                snapshot=contracts,
+            )
         elif args.command == "certify-worker":
-            deadline = time.monotonic() + manifest.get("activation_timeout_seconds", 900)
-            pinned = read_snapshot(deadline) if args.namespace_contracts_stdin else args.namespace_contracts
-            contracts = validate_restore_namespaces(manifest, args.certify_roots, contracts=pinned, deadline=deadline)
+            deadline = time.monotonic() + manifest.get(
+                "activation_timeout_seconds", 900
+            )
+            pinned = (
+                read_snapshot(deadline)
+                if args.namespace_contracts_stdin
+                else args.namespace_contracts
+            )
+            contracts = validate_restore_namespaces(
+                manifest, args.certify_roots, contracts=pinned, deadline=deadline
+            )
             account = pwd.getpwnam(manifest["resources"][args.worker]["user"])
             if os.geteuid() != account.pw_uid:
                 if os.geteuid() != 0:
-                    raise ValueError("certification requires the declared resource service user")
+                    raise ValueError(
+                        "certification requires the declared resource service user"
+                    )
                 os.setgroups(os.getgrouplist(account.pw_name, account.pw_gid))
                 os.setgid(account.pw_gid)
                 os.setuid(account.pw_uid)
-            certify_filesystem(manifest["resources"][args.worker], args.certify_roots,
-                                args.certify_identity, database_snapshot=args.database_snapshot,
-                                 database_requirements=args.database_requirements, pinned=contracts.get(args.worker), deadline=deadline)
+            certify_filesystem(
+                manifest["resources"][args.worker],
+                args.certify_roots,
+                args.certify_identity,
+                database_snapshot=args.database_snapshot,
+                database_requirements=args.database_requirements,
+                pinned=contracts.get(args.worker),
+                deadline=deadline,
+            )
             print("{}")
         elif args.worker:
-            deadline = time.monotonic() + manifest.get("timeout_seconds" if args.phase == "preflight" else "activation_timeout_seconds", 30 if args.phase == "preflight" else 900)
-            pinned = read_snapshot(deadline) if args.authority_contract_stdin else args.authority_contract
-            print(json.dumps(check_resource(manifest["resources"][args.worker], phase=args.phase, candidate=args.candidate, pinned=pinned, deadline=deadline)))
+            deadline = time.monotonic() + manifest.get(
+                "timeout_seconds"
+                if args.phase == "preflight"
+                else "activation_timeout_seconds",
+                30 if args.phase == "preflight" else 900,
+            )
+            pinned = (
+                read_snapshot(deadline)
+                if args.authority_contract_stdin
+                else args.authority_contract
+            )
+            print(
+                json.dumps(
+                    check_resource(
+                        manifest["resources"][args.worker],
+                        phase=args.phase,
+                        candidate=args.candidate,
+                        pinned=pinned,
+                        deadline=deadline,
+                    )
+                )
+            )
         else:
             failures = []
             results = {}
             deadline = time.monotonic() + manifest.get(
-                "timeout_seconds" if args.phase == "preflight" else "activation_timeout_seconds", 30 if args.phase == "preflight" else 900)
+                "timeout_seconds"
+                if args.phase == "preflight"
+                else "activation_timeout_seconds",
+                30 if args.phase == "preflight" else 900,
+            )
             contracts = validate_storage_namespaces(manifest, deadline=deadline)
             for name, config in manifest["resources"].items():
                 try:
@@ -659,29 +1131,93 @@ def main():
                     if remaining <= 0:
                         raise ValueError("cutover inspection budget exhausted")
                     as_root = False
-                    if config.get("transition_manifest") is not None and args.phase in ("preflight", "activate"):
+                    if config.get("transition_manifest") is not None and args.phase in (
+                        "preflight",
+                        "activate",
+                    ):
                         from . import application_transition
-                        journal = application_transition.journal_path(read_json(config["transition_manifest"]))
-                        as_root = journal.exists() and read_json(journal)["phase"] in ("prepared", "committing", "committed")
-                    extra = [] if args.candidate is None else ["--candidate", args.candidate]
+
+                        journal = application_transition.journal_path(
+                            read_json(config["transition_manifest"])
+                        )
+                        as_root = journal.exists() and read_json(journal)["phase"] in (
+                            "prepared",
+                            "committing",
+                            "committed",
+                        )
+                    extra = (
+                        []
+                        if args.candidate is None
+                        else ["--candidate", args.candidate]
+                    )
                     if name in contracts:
                         extra.append("--authority-contract-stdin")
-                    results[name] = execute_worker(args.contract, name, config, args.phase, remaining, extra, as_root=as_root, snapshot=contracts.get(name))
+                    results[name] = execute_worker(
+                        args.contract,
+                        name,
+                        config,
+                        args.phase,
+                        remaining,
+                        extra,
+                        as_root=as_root,
+                        snapshot=contracts.get(name),
+                    )
                 except (ValueError, OSError, subprocess.TimeoutExpired) as error:
                     failures.append({"resource": name, "reason": str(error)})
             for name, config in manifest["resources"].items():
                 dependency = config.get("database_resource")
-                if args.phase != "startup" and dependency and (dependency not in results or name not in results
-                                    or results[name].get("database_snapshot_sha256") != results[dependency].get("database_snapshot_sha256")
-                                    or results[name].get("database_requirements", []) != results[dependency].get("corpus_requirements", {}).get(name, [])):
-                    failures.append({"resource": name, "reason": "database recovery snapshot differs from filesystem custody"})
-            print(json.dumps({"version": 1, "host": args.host, "phase": args.phase,
-                              "status": "blocked" if failures else "ready", "failures": failures}))
+                if (
+                    args.phase != "startup"
+                    and dependency
+                    and (
+                        dependency not in results
+                        or name not in results
+                        or results[name].get("database_snapshot_sha256")
+                        != results[dependency].get("database_snapshot_sha256")
+                        or results[name].get("database_requirements", [])
+                        != results[dependency]
+                        .get("corpus_requirements", {})
+                        .get(name, [])
+                    )
+                ):
+                    failures.append(
+                        {
+                            "resource": name,
+                            "reason": "database recovery snapshot differs from filesystem custody",
+                        }
+                    )
+            print(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "host": args.host,
+                        "phase": args.phase,
+                        "status": "blocked" if failures else "ready",
+                        "failures": failures,
+                    }
+                )
+            )
             return int(bool(failures))
-    except (RuntimeError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+    except (
+        RuntimeError,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        subprocess.SubprocessError,
+    ) as error:
         if args.command == "check" and not args.worker:
-            print(json.dumps({"version": 1, "host": args.host, "phase": args.phase,
-                              "status": "blocked", "failures": [{"resource": "namespaces", "reason": str(error)}]}))
+            print(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "host": args.host,
+                        "phase": args.phase,
+                        "status": "blocked",
+                        "failures": [{"resource": "namespaces", "reason": str(error)}],
+                    }
+                )
+            )
         print(f"harbor-db-cutover: {error}", file=sys.stderr)
         return 1
     return 0

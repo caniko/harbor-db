@@ -461,6 +461,43 @@ fn run(args: Args) -> Result<()> {
     )?;
     let source_hba = field(&source_fence, "hba_file")?.to_owned();
     g.shell("primary", &client, false, "fence-denies-client")?;
+    let wrong_token = if token == "a".repeat(32) {
+        "b".repeat(32)
+    } else {
+        "a".repeat(32)
+    };
+    g.shell(
+        "primary",
+        format!(
+            "{transition} plan --candidate {} --writer-fence-token {}",
+            quoted(&contract),
+            quoted(&wrong_token)
+        ),
+        false,
+        "wrong-fence-plan-rejected",
+    )?;
+    let source = g.json(
+        "primary",
+        format!("cat {}", quoted(&c.source_manifest)),
+        "source-contract-read",
+    )?;
+    let journal = format!("{}/transition.json", field(&source, "state_dir")?);
+    g.shell(
+        "primary",
+        format!("test ! -e {}", quoted(&journal)),
+        true,
+        "wrong-fence-no-journal",
+    )?;
+    g.shell(
+        "primary",
+        format!(
+            "test ! -e {}/inhibited.json",
+            quoted(field(&selected, "barrier_dir")?)
+        ),
+        true,
+        "wrong-fence-no-barrier",
+    )?;
+    g.unit("primary", "demo.service", "wrong-fence-source-still-active")?;
     let planned = g.phase(
         &format!(
             "{transition} plan --candidate {} --writer-fence-token {}",

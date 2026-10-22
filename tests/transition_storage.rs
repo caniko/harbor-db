@@ -2,6 +2,36 @@ use harbor_db::storage::{application_transition, durable, process, transition_ma
 use serde_json::json;
 use std::{fs, os::unix::fs::symlink};
 
+#[cfg(feature = "testing")]
+#[path = "fixtures/private_supervisor_root.rs"]
+mod private_root;
+
+#[cfg(feature = "testing")]
+#[test]
+fn unadmitted_postgres_fence_cannot_quiesce_or_change_the_plan() {
+    if !private_root::enter() {
+        return;
+    }
+    let mut f = Fixture::new();
+    let primary = f.temp.path().join("primary");
+    fs::create_dir(&primary).unwrap();
+    let postgres = f.temp.path().join("postgres.json");
+    durable::write_json(&postgres, &json!({"state_dir": primary})).unwrap();
+    f.config["postgres_manifest"] = json!(postgres);
+    let mut record = f.journal("planned");
+    record["writer_fence_token"] = json!("a".repeat(32));
+    application_transition::save(&f.config, &mut record, None).unwrap();
+    let journal = application_transition::journal_path(&f.config).unwrap();
+    let before = fs::read(&journal).unwrap();
+    // A missing active-fence anchor must be rejected before any durable phase
+    // change or startup barrier, even when the journal's token has valid syntax.
+    durable::lock(&f.temp.path().join("barrier/lock"), false, true).unwrap();
+    assert!(application_transition::prepare(&f.config).is_err());
+    assert_eq!(fs::read(&journal).unwrap(), before);
+    assert!(!f.temp.path().join("barrier/inhibited.json").exists());
+    assert!(!f.temp.path().join("systemd").exists());
+}
+
 struct Fixture {
     temp: tempfile::TempDir,
     source: serde_json::Value,
@@ -2033,7 +2063,8 @@ fn rejected_barrier_installation_preserves_policy_markers_and_drop_ins_in_both_e
 from pathlib import Path
 sys.stderr=sys.stdout
 root=Path(sys.argv[1]);source=Path(sys.argv[2]);binary=sys.argv[3]
-paths=[Path('/nix'),Path('/proc'),Path('/dev'),source]
+# Namespace continuation must also retain executables from an external target.
+paths=[Path('/nix'),Path('/proc'),Path('/dev'),source,Path(binary).parent]
 # Registrations without F resolve the interpreter again inside this chroot.
 if Path('/run/binfmt').is_dir(): paths.append(Path('/run/binfmt'))
 for path in paths:

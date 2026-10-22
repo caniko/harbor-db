@@ -49,7 +49,11 @@ def manifest_digest(path):
 
 
 def child(value):
-    return isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value)) and not value.endswith(".partial")
+    return (
+        isinstance(value, str)
+        and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value))
+        and not value.endswith(".partial")
+    )
 
 
 @contextlib.contextmanager
@@ -75,18 +79,27 @@ def protection(root, segment_bytes):
         backups = set()
         for path in (recovery / "pins").iterdir():
             capture_id = path.name[:-5] if path.name.endswith(".json") else ""
-            if not child(capture_id) or capture_id.startswith(".") or ".partial" in capture_id:
+            if (
+                not child(capture_id)
+                or capture_id.startswith(".")
+                or ".partial" in capture_id
+            ):
                 raise ValueError("uncertain source-local pin entry")
             pin = read_json(path)
             if not isinstance(pin, dict):
                 raise ValueError("invalid source-local pin object")
             backup_id = pin.get("backup_id")
             digest = pin.get("manifest_sha256")
-            if (type(pin.get("version")) is not int or pin["version"] != 1
-                    or pin.get("capture_id") != capture_id or not child(backup_id)
-                    or type(pin.get("wal_segment_bytes")) is not int
-                    or pin["wal_segment_bytes"] != segment_bytes
-                    or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            if (
+                type(pin.get("version")) is not int
+                or pin["version"] != 1
+                or pin.get("capture_id") != capture_id
+                or not child(backup_id)
+                or type(pin.get("wal_segment_bytes")) is not int
+                or pin["wal_segment_bytes"] != segment_bytes
+                or not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            ):
                 raise ValueError("invalid source-local pin metadata")
             base = root / "base" / backup_id
             directory(base)
