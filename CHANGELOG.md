@@ -21,6 +21,11 @@
 
 ### Fixed
 
+- Let first PostgreSQL rollouts with cutover enabled reach their switch adoption
+  hook. A pending `switchAdoption` defers only the adopted-identity record during
+  candidate `preflight`/`activate` admission; the live/physical identity and
+  recovery checks still run. Cutover workers now report their own bounded error
+  line instead of a suppressed-diagnostics placeholder.
 - Keep the recovery-preparation pre-switch hook ShellCheck-clean (SC2329 on its
   EXIT-trap cleanup) so consumer system builds succeed; the lifecycle eval check
   now builds the assembled NixOS pre-switch script.

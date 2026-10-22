@@ -28,6 +28,11 @@
           if config.services.harbor-db.postgresql.switchAdoption != null
           then config.services.harbor-db.postgresql.switchAdoption.port
           else config.services.postgresql.settings.port;
+        # Defers only the adopted-identity record to the later adoption hook.
+        switch_adoption_identifier =
+          if config.services.harbor-db.postgresql.switchAdoption != null
+          then config.services.harbor-db.postgresql.switchAdoption.systemIdentifier
+          else null;
       };
     };
   immutableFiles = import ./immutable-files.nix {inherit lib;};
@@ -273,6 +278,10 @@ in {
         {
           assertion = !(cfg.resources ? postgresql);
           message = "Harbor-DB reserves the postgresql cutover resource for automatic lifecycle enrollment.";
+        }
+        {
+          assertion = !postgresEnabled || config.services.harbor-db.postgresql.recovery != null;
+          message = "Harbor-DB cutover admission requires PostgreSQL recovery acceptance (services.harbor-db.postgresql.recovery); without it activation, including first-rollout switch adoption, is always blocked.";
         }
         {
           assertion = !config.services.postgresql.enable || postgresEnabled;

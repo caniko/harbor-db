@@ -67,6 +67,16 @@
     ];
   };
   inherit (eval) config;
+  recoveryPolicy = {
+    systemIdentifier = "12345";
+    backupRoot = "/srv/backup";
+    snapshotFile = "/srv/evidence/snapshot.json";
+    receiptFile = "/srv/evidence/receipt.json";
+    recordChecks.rows = {
+      database = "app";
+      sql = "SELECT 1";
+    };
+  };
   unsafe =
     (eval.extendModules {
       modules = [{services.harbor-db.dataDirectories = lib.mkForce [{path = "/srv/history";}];}];
@@ -105,7 +115,7 @@ in
     assertions = [
       {
         name = "postgres-cutover-port-survives-switch-adoption-retirement";
-        message = "The generated automatic PostgreSQL resource follows effective service ports once adoption is retired and retains an explicit first-rollout endpoint while active.";
+        message = "The generated automatic PostgreSQL resource follows effective service ports once adoption is retired and retains an explicit first-rollout endpoint and pending identifier while active.";
         assertion = let
           resource = port: adoption: let
             selected =
@@ -134,10 +144,51 @@ in
           active.port
           == 55433
           && active.socket_dir == "/run/first-rollout"
+          && active.switch_adoption_identifier == "12345"
           && lib.all (port: let
             retired = resource port null;
           in
-            retired.port == port && retired.socket_dir == "/run/postgresql") [5432 55432 6543];
+            retired.port == port && retired.socket_dir == "/run/postgresql" && retired.switch_adoption_identifier == null) [5432 55432 6543];
+      }
+      {
+        name = "cutover-gate-precedes-recovery-evidence-and-switch-adoption";
+        message = "The cutover gate runs before recovery evidence admission and the first-rollout adoption hook, which remains the only adopting step.";
+        assertion = let
+          checks =
+            lib.attrNames
+            (eval.extendModules {
+              modules = [
+                {
+                  services.postgresql.enable = true;
+                  services.harbor-db.postgresql = {
+                    enable = true;
+                    switchAdoption.systemIdentifier = "12345";
+                    recovery = recoveryPolicy;
+                  };
+                }
+              ];
+            }).config.system.preSwitchChecks;
+          position = name: lib.lists.findFirstIndex (check: check == name) null checks;
+        in
+          position "00---harbor-db-cutover"
+          < position "00-harbor-db-postgresql-recovery"
+          && position "00-harbor-db-postgresql-recovery" < position "harbor-db-postgresql-adoption";
+      }
+      {
+        name = "postgres-cutover-requires-recovery-acceptance";
+        message = "Enrolled PostgreSQL without recovery acceptance is rejected at evaluation instead of blocking every activation.";
+        assertion = let
+          enrolled = recovery:
+            custodyAccepted {
+              services.postgresql.enable = true;
+              services.harbor-db.postgresql = {
+                enable = true;
+                switchAdoption.systemIdentifier = "12345";
+                inherit recovery;
+              };
+            };
+        in
+          !(enrolled null) && enrolled recoveryPolicy;
       }
       {
         name = "custody-receipts-reserve-authority-controls";
@@ -205,6 +256,7 @@ in
                 enable = true;
                 stateDir = "/srv/postgres-state";
                 writerFence.startupStateDir = "/srv/postgres-startup";
+                recovery = recoveryPolicy;
               };
               services.harbor-db.cutover.resources.history.authority.${kind} = lib.mkForce (
                 if kind == "directories"

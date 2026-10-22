@@ -157,8 +157,30 @@ in
       align_receiver(primary, remote)
       primary.succeed("runuser -u postgres -- env CREDENTIALS_DIRECTORY=/srv/incoming harbor-db-postgres --config /srv/config.json prepare-recovery --preparation-config /srv/preparation.json --socket-dir /run/postgresql --port 5432")
       primary.succeed(f"{command} inspect-recovery")
+      # First rollout: the mandatory cutover gate runs before the switch
+      # adoption hook. A pending request defers only the identity record; the
+      # gate never adopts, and startup/certify admission stays strict.
+      rollout_resource: dict[str, str] = {"kind": "postgres", "user": "postgres", "config": "/srv/config.json"}
+      first_rollout = {"version": 1, "enforced": True, "host": "primary", "resources": {"postgresql": rollout_resource}}
+      def first_rollout_gate(pending, phase):
+          rollout_resource.pop("switch_adoption_identifier", None)
+          if pending is not None:
+              rollout_resource["switch_adoption_identifier"] = pending
+          primary.succeed("printf '%s\\n' " + shlex.quote(json.dumps(first_rollout)) + " > /srv/first-rollout.json; chmod 0644 /srv/first-rollout.json")
+          return primary.execute(f"harbor-db-cutover check --contract /srv/first-rollout.json --host primary --phase {phase}")
+      for pending, phase, reason in ((None, "activate", "not adopted"), ("12345", "activate", "same authoritative cluster"), (identifier, "startup", "not adopted"), (identifier, "certify", "not adopted")):
+          status, output = first_rollout_gate(pending, phase)
+          assert status != 0 and reason in output, (pending, phase, output)
+      for phase in ("preflight", "activate"):
+          status, output = first_rollout_gate(identifier, phase)
+          assert status == 0, (phase, output)
+      primary.succeed("test ! -e /srv/authority/identity.json; test ! -e /srv/authority/lock")
       primary.succeed(f"{command} adopt-live --system-identifier {identifier}")
       primary.succeed("test -s /srv/authority/identity.json")
+      # After adoption, a retained request takes the strict adopted path.
+      for phase in ("activate", "startup"):
+          status, output = first_rollout_gate(identifier, phase)
+          assert status == 0, (phase, output)
       primary.succeed(f"{command} inspect-recovery --socket-dir /run/postgresql --port 5432")
       primary.succeed("runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c 'UPDATE saves SET revision=43'")
       primary.fail(f"{command} inspect-recovery --socket-dir /run/postgresql --port 5432")

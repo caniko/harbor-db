@@ -63,6 +63,17 @@ pub fn validate_manifest(value: &Value, host: &str) -> Result<Value> {
                     "PostgreSQL admission requires the postgres service identity",
                 ));
             }
+            if !entry["switch_adoption_identifier"].is_null()
+                && !entry["switch_adoption_identifier"]
+                    .as_str()
+                    .is_some_and(|id| {
+                        !id.starts_with('0')
+                            && !id.is_empty()
+                            && id.bytes().all(|b| b.is_ascii_digit())
+                    })
+            {
+                return Err(invalid("invalid PostgreSQL switch adoption identifier"));
+            }
         } else {
             if entry.get("git_executable").is_some() {
                 custody::git_executable(string(entry, "git_executable")?)?;
@@ -539,11 +550,30 @@ pub fn check_resource_until(
         )
     } else {
         let database = durable::read_config_json(Path::new(string(config, "config")?))?;
-        postgres::check(&database)?;
+        // A declared first-rollout switch adoption runs after this gate, so
+        // read-only candidate admission defers only the adopted-identity record
+        // to that hook. Live/physical identity, writer-fence startup state and
+        // full recovery admission still apply; startup and certify stay strict.
+        let pending = matches!(phase, "preflight" | "activate")
+            && !config["switch_adoption_identifier"].is_null()
+            && !pg_core::path(&database, "state_dir")?
+                .join("identity.json")
+                .exists();
+        if pending {
+            pg_core::validate_config(&database)?;
+            super::writer_fence::startup(&database)?;
+        } else {
+            postgres::check(&database)?;
+        }
         if phase == "startup" {
             return Ok(json!({}));
         }
         let settings = recovery::policy(&database)?;
+        if pending && config["switch_adoption_identifier"] != settings["system_identifier"] {
+            return Err(invalid(
+                "switch adoption and recovery must name the same authoritative cluster",
+            ));
+        }
         pg_core::reject_upgrade(&database)?;
         let socket = Path::new(config["socket_dir"].as_str().unwrap_or("/run/postgresql"));
         let port = config
@@ -747,7 +777,24 @@ pub fn execute_worker(
             account
         });
     }
-    super::codec::decode(&process::execute(&spec)?)
+    // Workers print only their own bounded error line; nested commands keep
+    // their diagnostics suppressed inside the worker.
+    spec.capture_stderr = true;
+    let output = process::run(&spec)?;
+    if !output.status.success() {
+        let reason = String::from_utf8_lossy(&output.stderr);
+        let reason: String = reason
+            .lines()
+            .rev()
+            .find_map(|line| line.strip_prefix("harbor-db-cutover: "))
+            .unwrap_or("resource inspection failed")
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(1024)
+            .collect();
+        return Err(invalid(reason));
+    }
+    super::codec::decode(&output.stdout)
 }
 pub fn check_manifest(
     path: &Path,

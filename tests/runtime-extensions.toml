@@ -44,7 +44,7 @@ sha256 = "79f16bb3d570fef25f32d677a7312c6c79afc917a3d8f7e0654e6e73affe3906"
 
 [[extensions]]
 path = "python/harbor_db/cutover.py"
-sha256 = "f0771a2899a5fafbaf76cd6fb568151e8670011dd035a5e4502b8e2a19490c9a"
+sha256 = "c9ef67abd59a8b9389da67a8478bc015324ee9024da84f089d7dbb61e817c707"
 
 [[extensions]]
 path = "python/harbor_db/provision.py"

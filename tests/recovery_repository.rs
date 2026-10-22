@@ -864,6 +864,76 @@ fn source_local_cutover_hashes_selected_snapshot_with_absent_or_unrelated_legacy
 }
 
 #[test]
+fn pending_switch_adoption_defers_only_the_identity_record_in_both_engines() {
+    let mut f = Fixture::new();
+    f.copied_source();
+    let mut config = f.cutover_resource();
+    fs::remove_file(f.p("state/identity.json")).unwrap();
+    fs::remove_file(f.p("state/lock")).unwrap();
+    let expected = codec::file_digest(&f.snapshot_path()).unwrap();
+    let script = "import json,sys; from harbor_db import cutover\ntry: print(json.dumps(cutover.check_resource(json.loads(sys.argv[1]),phase=sys.argv[2],now=int(sys.argv[3]))))\nexcept Exception as e: print(json.dumps({'error':str(e)}))";
+    let check = |config: &Value, phase: &str| {
+        let native = cutover::check_resource(config, phase, Some(f.now), None)
+            .unwrap_or_else(|error| json!({"error": error.to_string()}));
+        let python = f.python_check(
+            script,
+            vec![config.to_string(), phase.into(), f.now.to_string()],
+        );
+        assert_eq!(python, native, "{phase}: {python}");
+        native
+    };
+    let rejected = |config: &Value, phases: &[&str], reason: &str| {
+        for phase in phases {
+            let error = check(config, phase)["error"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
+            assert!(error.contains(reason), "{phase}: {error}");
+        }
+    };
+    let before = unchanged_files(f.root.path());
+    let all = ["preflight", "activate", "startup", "certify"];
+    rejected(&config, &all, "not adopted");
+    config["switch_adoption_identifier"] = json!("12345");
+    for phase in ["preflight", "activate"] {
+        assert_eq!(check(&config, phase)["database_snapshot_sha256"], expected);
+    }
+    rejected(&config, &["startup", "certify"], "not adopted");
+    config["switch_adoption_identifier"] = json!("67890");
+    rejected(
+        &config,
+        &["preflight", "activate"],
+        "same authoritative cluster",
+    );
+    assert_eq!(unchanged_files(f.root.path()), before);
+    assert!(!f.p("state/identity.json").exists() && !f.p("state/lock").exists());
+    // Once adopted, a stale request never bypasses registered identity checks.
+    config["switch_adoption_identifier"] = json!("12345");
+    let mut stale = f.config.clone();
+    stale["resource"] = json!("replacement");
+    durable::write_json(
+        &f.p("state/identity.json"),
+        &pg_core::identity(&stale, "12345").unwrap(),
+    )
+    .unwrap();
+    fs::write(f.p("state/lock"), "").unwrap();
+    rejected(&config, &["preflight", "activate"], "identity mismatch");
+    for (identifier, valid) in [
+        ("12345", true),
+        ("0123", false),
+        ("", false),
+        ("12a", false),
+    ] {
+        let manifest = json!({"version":1,"enforced":true,"host":"fixture","resources":{"postgresql":{"user":"postgres", "kind":"postgres", "config":config["config"], "switch_adoption_identifier":identifier}}});
+        assert_eq!(
+            cutover::validate_manifest(&manifest, "fixture").is_ok(),
+            valid,
+            "{identifier}"
+        );
+    }
+}
+
+#[test]
 fn source_local_transition_binds_selected_snapshot_and_rejects_changed_resume() {
     let mut f = Fixture::new();
     f.copied_source();
