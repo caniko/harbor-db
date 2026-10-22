@@ -2,7 +2,11 @@
   description = "harbor-db - secure generic lifecycle plans and NixOS systemd wiring";
 
   inputs = {
-    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=feat/portable-release-files&rev=195f8a7e81d67102868631015b6794280b492c88";
+    harbor-rs = {
+      url = "github:caniko/harbor-rs";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.harbor-meta.follows = "harbor-meta";
+    };
     rs-harbor.follows = "harbor-rs";
     harbor-meta = {
       url = "github:caniko/harbor-meta";
