@@ -67,6 +67,16 @@
     ];
   };
   inherit (eval) config;
+  recoveryPolicy = {
+    systemIdentifier = "12345";
+    backupRoot = "/srv/backup";
+    snapshotFile = "/srv/evidence/snapshot.json";
+    receiptFile = "/srv/evidence/receipt.json";
+    recordChecks.rows = {
+      database = "app";
+      sql = "SELECT 1";
+    };
+  };
   unsafe =
     (eval.extendModules {
       modules = [{services.harbor-db.dataDirectories = lib.mkForce [{path = "/srv/history";}];}];
@@ -153,16 +163,7 @@ in
                   services.harbor-db.postgresql = {
                     enable = true;
                     switchAdoption.systemIdentifier = "12345";
-                    recovery = {
-                      systemIdentifier = "12345";
-                      backupRoot = "/srv/backup";
-                      snapshotFile = "/srv/evidence/snapshot.json";
-                      receiptFile = "/srv/evidence/receipt.json";
-                      recordChecks.rows = {
-                        database = "app";
-                        sql = "SELECT 1";
-                      };
-                    };
+                    recovery = recoveryPolicy;
                   };
                 }
               ];
@@ -172,6 +173,22 @@ in
           position "00---harbor-db-cutover"
           < position "00-harbor-db-postgresql-recovery"
           && position "00-harbor-db-postgresql-recovery" < position "harbor-db-postgresql-adoption";
+      }
+      {
+        name = "postgres-cutover-requires-recovery-acceptance";
+        message = "Enrolled PostgreSQL without recovery acceptance is rejected at evaluation instead of blocking every activation.";
+        assertion = let
+          enrolled = recovery:
+            custodyAccepted {
+              services.postgresql.enable = true;
+              services.harbor-db.postgresql = {
+                enable = true;
+                switchAdoption.systemIdentifier = "12345";
+                inherit recovery;
+              };
+            };
+        in
+          !(enrolled null) && enrolled recoveryPolicy;
       }
       {
         name = "custody-receipts-reserve-authority-controls";
@@ -239,6 +256,7 @@ in
                 enable = true;
                 stateDir = "/srv/postgres-state";
                 writerFence.startupStateDir = "/srv/postgres-startup";
+                recovery = recoveryPolicy;
               };
               services.harbor-db.cutover.resources.history.authority.${kind} = lib.mkForce (
                 if kind == "directories"

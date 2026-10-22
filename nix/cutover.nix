@@ -280,6 +280,10 @@ in {
           message = "Harbor-DB reserves the postgresql cutover resource for automatic lifecycle enrollment.";
         }
         {
+          assertion = !postgresEnabled || config.services.harbor-db.postgresql.recovery != null;
+          message = "Harbor-DB cutover admission requires PostgreSQL recovery acceptance (services.harbor-db.postgresql.recovery); without it activation, including first-rollout switch adoption, is always blocked.";
+        }
+        {
           assertion = !config.services.postgresql.enable || postgresEnabled;
           message = "Harbor-DB cutover admission requires adopted PostgreSQL lifecycle enrollment for every enabled primary.";
         }

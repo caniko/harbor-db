@@ -12,7 +12,9 @@ dispatch. Every service-user worker receives that same canonical target;
 regular-file reads retain their no-follow protection.
 
 PostgreSQL automatically enrolls when its Harbor-DB lifecycle guard is enabled.
-An enabled unguarded primary is a configuration error. Existing PostgreSQL
+An enabled unguarded primary is a configuration error, as is an enrolled primary
+without `services.harbor-db.postgresql.recovery`, because every non-startup phase
+requires recovery admission. Existing PostgreSQL
 identity, staged-upgrade, recovery snapshot and independent restore acceptance
 engines remain authoritative. Early admission validates their current bindings
 and evidence freshness. It deliberately defers backup byte verification to the
