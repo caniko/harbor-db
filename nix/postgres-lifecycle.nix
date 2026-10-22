@@ -444,6 +444,7 @@ in {
               credential_dir=""
               worker_started=false
               unit="harbor-db-recovery-prepare-$$"
+              # shellcheck disable=SC2329 # Invoked only through the EXIT trap below.
               cleanup_preparation() {
                 if "$worker_started"; then
                   if ! ${pkgs.systemd}/bin/systemctl stop "$unit.service"; then

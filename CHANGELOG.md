@@ -21,6 +21,9 @@
 
 ### Fixed
 
+- Keep the recovery-preparation pre-switch hook ShellCheck-clean (SC2329 on its
+  EXIT-trap cleanup) so consumer system builds succeed; the lifecycle eval check
+  now builds the assembled NixOS pre-switch script.
 - Preserve graceful shutdown and post-stop hooks while transitions inhibit startup.
 - Bind runtime credential sources into version-2 backup policies so forced transition
   captures receive private worker credentials without depending on a service environment.

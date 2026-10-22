@@ -107,6 +107,9 @@ in
     resultMessage = "PostgreSQL identity guard precedes initialization and upgrade is explicit";
     nativeBuildInputs = [pkgs.python3 pkgs.bash];
     runtimeScript = ''
+      # NixOS assembles every hook into one ShellCheck-checked script; building
+      # it here fails CI on the same lint consumers hit at system build time.
+      test -x ${withPreparation.config.system.preSwitchChecksScript}
       python3 ${../tests/check_recovery_preparation_hook.py} ${preparationHook} \
         ${pkgs.systemd}/bin/systemd-run ${pkgs.systemd}/bin/systemctl
     '';
