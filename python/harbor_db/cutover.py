@@ -35,6 +35,9 @@ def validate_manifest(value, host):
             validate_path(entry.get("config"))
             if entry["user"] != "postgres":
                 raise ValueError("PostgreSQL admission requires the postgres service identity")
+            pending = entry.get("switch_adoption_identifier")
+            if pending is not None and not (isinstance(pending, str) and re.fullmatch(r"[1-9][0-9]*", pending)):
+                raise ValueError("invalid PostgreSQL switch adoption identifier")
         else:
             if "git_executable" in entry:
                 immutable_git_executable(entry["git_executable"])
@@ -474,10 +477,21 @@ def check_resource(config, *, phase, now=None, candidate=None, pinned=None, dead
                     "database_requirements": receipt.get("database_requirements", [])}
     else:
         database = read_json(config["config"])
-        postgres.check(database)
+        # Declared first-rollout switch adoption runs after this gate; only the
+        # adopted-identity record is deferred to that hook.
+        pending = (phase in ("preflight", "activate") and config.get("switch_adoption_identifier") is not None
+                   and not (Path(database["state_dir"]) / "identity.json").exists())
+        if pending:
+            from . import writer_fence
+            postgres.validate_config(database)
+            writer_fence.startup(database)
+        else:
+            postgres.check(database)
         if phase == "startup":
             return {}
         settings = recovery.policy(database)
+        if pending and config["switch_adoption_identifier"] != settings["system_identifier"]:
+            raise ValueError("switch adoption and recovery must name the same authoritative cluster")
         postgres.reject_upgrade(database)
         if phase != "startup":
             postgres.inspect_live(database, settings["system_identifier"],

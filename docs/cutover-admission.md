@@ -23,7 +23,14 @@ the live primary before building. Each query must return exactly one true value;
 unsupported schemas or failed migrations block admission. The accepted recovery
 policy still defines its backup age and restore requirements.
 While first-rollout `switchAdoption` is configured, automatic PostgreSQL enrollment
-uses that request's explicit local endpoint. After the one-shot request is retired,
+uses that request's explicit local endpoint and records its identifier as
+`switch_adoption_identifier`. The cutover gate runs before recovery evidence
+admission and the adoption hook. For an unadopted cluster, only the `preflight` and
+`activate` phases defer the adopted-identity record to that hook. The pending
+identifier must equal the recovery policy's, and the live and physical identity,
+writer-fence startup state, compatibility, recovery and corpus checks still run.
+The gate never adopts. `startup`, `certify` and service startup stay strict, and
+once `identity.json` exists every phase verifies it. After the one-shot request is retired,
 cutover checks retain `/run/postgresql` and use the effective
 `services.postgresql.settings.port`, including non-default service ports.
 
