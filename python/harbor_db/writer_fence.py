@@ -1,13 +1,22 @@
-"""Explicit, restart-persistent PostgreSQL admission fencing.
+"""Explicit, durable application-writer exclusion for a PostgreSQL cutover.
 
-Opening and closing require a stopped primary. A prepared fence is not live
-acceptance: restart, then inspect it before taking any acknowledged snapshot.
-Only local peer-authenticated control SQL and physical replication are admitted.
+Root and the local PostgreSQL OS control identity remain trusted. An HBA fence
+excludes application SQL roles, including SQL superusers, and allows only
+declared authenticated *physical* replication connections. Acquisition requires
+a restart: hba_file can only be set at server start, not by configuration reload.
+
+https://www.postgresql.org/docs/18/runtime-config-file-locations.html#GUC-HBA-FILE
+https://www.postgresql.org/docs/18/auth-pg-hba-conf.html
+
+The retained enrollment helpers describe a policy; they do not publish a fence.
+Runtime opening and closing require a stopped primary and an independently
+supplied identifier. Restart and inspect before taking an acknowledged snapshot.
 No exception or cancellation path automatically restores application access.
 """
 
 import contextlib
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -19,6 +28,83 @@ from . import postgres
 from .durable import atomic_write, lock, sync_directory, write_json
 
 
+ENROLLMENT_FIELDS = {
+    "system_identifier",
+    "required_for_recovery",
+    "normal_hba_file",
+    "replication_peers",
+}
+
+
+def enrollment_policy(config):
+    settings = config.get("writer_fence")
+    if not isinstance(settings, dict):
+        raise TypeError("explicit writer fence policy is required")
+    if (
+        not re.fullmatch(r"[1-9][0-9]*", settings["system_identifier"])
+        or type(settings["required_for_recovery"]) is not bool
+        or not Path(settings["normal_hba_file"]).is_absolute()
+    ):
+        raise ValueError("invalid writer fence identity or normal HBA")
+    for library in settings["allowed_preload_libraries"]:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", library):
+            raise ValueError("invalid allowed preload library")
+    for peer in settings["replication_peers"]:
+        role = peer["role"]
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", role) or role in (
+            "all",
+            "postgres",
+            "replication",
+            "sameuser",
+            "samerole",
+        ):
+            raise ValueError("invalid physical replication role")
+        ipaddress.ip_network(peer["address"], strict=True)
+    return settings
+
+
+def hba(config):
+    settings = enrollment_policy(config)
+    lines = ["local all postgres peer", "local replication postgres peer"]
+    lines += [
+        f"host replication {peer['role']} {peer['address']} scram-sha-256"
+        for peer in settings["replication_peers"]
+    ]
+    lines += [
+        "local all all reject",
+        "local replication all reject",
+        "host all all 0.0.0.0/0 reject",
+        "host all all ::/0 reject",
+        "host replication all 0.0.0.0/0 reject",
+        "host replication all ::/0 reject",
+    ]
+    return ("\n".join(lines) + "\n").encode()
+
+
+def binding(config):
+    settings = enrollment_policy(config)
+    # A newer package, normal HBA or retired enrollment cannot silently discard
+    # an active exclusion epoch for the same authoritative cluster and policy.
+    value = {key: config[key] for key in ("resource", "major", "data_dir", "state_dir")}
+    value.update(
+        system_identifier=settings["system_identifier"],
+        allowed_preload_libraries=sorted(settings["allowed_preload_libraries"]),
+        hba_sha256=hashlib.sha256(hba(config)).hexdigest(),
+    )
+    return value
+
+
+def paths(config):
+    state = Path(config["state_dir"])
+    if not state.is_absolute() or state.resolve() != state:
+        raise ValueError("writer fence state must be canonical")
+    return {
+        "journal": state / "writer-fence.json",
+        "lock": state / "writer-fence.lock",
+        "hba": state / "writer-fence.hba",
+    }
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -27,8 +113,14 @@ def read_private(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
-            raise postgres.LifecycleError("writer fence artifacts must be private owned regular files")
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+        ):
+            raise postgres.LifecycleError(
+                "writer fence artifacts must be private owned regular files"
+            )
         return stream.read()
 
 
@@ -37,27 +129,57 @@ def read_auto(config):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
-            raise postgres.LifecycleError("automatic configuration is not owned regular non-writable storage")
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o022
+        ):
+            raise postgres.LifecycleError(
+                "automatic configuration is not owned regular non-writable storage"
+            )
         return stream.read()
 
 
-def policy(config):
+def runtime_policy(config):
     settings = config.get("writer_fence", {})
     if not isinstance(settings, dict):
         raise postgres.LifecycleError("invalid writer fence policy")
+    if ENROLLMENT_FIELDS & settings.keys():
+        raise postgres.LifecycleError(
+            "writer fence enrollment policy requires explicit runtime conversion"
+        )
     control = settings.get("control_role", "postgres")
     roles = settings.get("replication_roles", [])
     libraries = settings.get("allowed_preload_libraries", [])
-    if not isinstance(roles, list) or any(not isinstance(role, str) for role in roles) or len(roles) != len(set(roles)):
+    if (
+        not isinstance(roles, list)
+        or any(not isinstance(role, str) for role in roles)
+        or len(roles) != len(set(roles))
+    ):
         raise postgres.LifecycleError("invalid writer fence replication role list")
-    if any(not isinstance(role, str) or not re.fullmatch(r"[a-z_][a-z0-9_]*", role)
-           for role in [control, *roles]):
+    if any(
+        not isinstance(role, str) or not re.fullmatch(r"[a-z_][a-z0-9_]*", role)
+        for role in [control, *roles]
+    ):
         raise postgres.LifecycleError("invalid writer fence role")
-    if not isinstance(libraries, list) or any(not isinstance(library, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", library) for library in libraries):
+    if not isinstance(libraries, list) or any(
+        not isinstance(library, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", library)
+        for library in libraries
+    ):
         raise postgres.LifecycleError("invalid writer fence preload library policy")
-    return {"control_role": control, "replication_roles": sorted(roles),
-            "allowed_preload_libraries": sorted(set(libraries))}
+    return {
+        "control_role": control,
+        "replication_roles": sorted(roles),
+        "allowed_preload_libraries": sorted(set(libraries)),
+    }
+
+
+def policy(config):
+    """Preserve the enrollment API without inferring runtime admission from it."""
+    settings = config.get("writer_fence", {})
+    if isinstance(settings, dict) and ENROLLMENT_FIELDS & settings.keys():
+        return enrollment_policy(config)
+    return runtime_policy(config)
 
 
 def hba_contents(settings):
@@ -75,10 +197,15 @@ def hba_contents(settings):
     # exceptions cannot authenticate an ordinary SQL/database connection.
     if settings["replication_roles"]:
         roles = ",".join('"' + role + '"' for role in settings["replication_roles"])
-        lines += [f"host replication {roles} 127.0.0.1/32 scram-sha-256",
-                  f"host replication {roles} ::1/128 scram-sha-256"]
-    lines += ["local replication all reject", "host replication all 0.0.0.0/0 reject",
-              "host replication all ::/0 reject"]
+        lines += [
+            f"host replication {roles} 127.0.0.1/32 scram-sha-256",
+            f"host replication {roles} ::1/128 scram-sha-256",
+        ]
+    lines += [
+        "local replication all reject",
+        "host replication all 0.0.0.0/0 reject",
+        "host replication all ::/0 reject",
+    ]
     return ("\n".join(lines) + "\n").encode()
 
 
@@ -94,25 +221,38 @@ def journal(config, path=None):
     directory = Path(config["state_dir"]) / "writer-fences" / token
     for parent in [directory.parent, directory]:
         info = parent.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
-            raise postgres.LifecycleError("writer fence history must be private owned directory storage")
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+        ):
+            raise postgres.LifecycleError(
+                "writer fence history must be private owned directory storage"
+            )
     expected = {
-        "version": 1, "resource": config["resource"], "data_dir": config["data_dir"],
-        "major": str(config["major"]), "policy": policy(config),
+        "version": 1,
+        "resource": config["resource"],
+        "data_dir": config["data_dir"],
+        "major": str(config["major"]),
+        "policy": runtime_policy(config),
         "hba_file": str(directory / "pg_hba.conf"),
         "original_file": str(directory / "original-auto.conf"),
         "selected_file": str(directory / "fenced-auto.conf"),
     }
     if any(record.get(key) != value for key, value in expected.items()):
         raise postgres.LifecycleError("writer fence cluster or policy binding changed")
-    for file_key, hash_key in [("original_file", "original_sha256"),
-                               ("selected_file", "selected_sha256"),
-                               ("hba_file", "hba_sha256")]:
+    for file_key, hash_key in [
+        ("original_file", "original_sha256"),
+        ("selected_file", "selected_sha256"),
+        ("hba_file", "hba_sha256"),
+    ]:
         if digest(read_private(record[file_key])) != record.get(hash_key):
             raise postgres.LifecycleError("writer fence retained artifact changed")
     if read_private(record["hba_file"]) != hba_contents(record["policy"]):
         raise postgres.LifecycleError("writer fence HBA contract changed")
-    identifier = postgres.inspect_cluster(config["package"], config["data_dir"], config["major"])
+    identifier = postgres.inspect_cluster(
+        config["package"], config["data_dir"], config["major"]
+    )
     if identifier != record.get("system_identifier"):
         raise postgres.LifecycleError("writer fence cluster identifier changed")
     if record.get("phase") not in ("prepared", "closing"):
@@ -129,9 +269,13 @@ def startup(config):
         return None
     record = journal(config)
     if record["phase"] != "prepared":
-        raise postgres.LifecycleError("unfinished writer fence thaw; startup is forbidden")
+        raise postgres.LifecycleError(
+            "unfinished writer fence thaw; startup is forbidden"
+        )
     if digest(read_auto(config)) != record["selected_sha256"]:
-        raise postgres.LifecycleError("writer fence startup selector differs; resume offline preparation")
+        raise postgres.LifecycleError(
+            "writer fence startup selector differs; resume offline preparation"
+        )
     return record
 
 
@@ -142,8 +286,14 @@ def offline(config):
     # Consumer-provisioned storage is required, including before adoption. Never
     # publish identity or take over a postmaster as a side effect of fencing.
     info = state.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
-        raise postgres.LifecycleError("writer fence state must be owned non-writable directory storage")
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or info.st_mode & 0o022
+    ):
+        raise postgres.LifecycleError(
+            "writer fence state must be owned non-writable directory storage"
+        )
     with contextlib.ExitStack() as stack:
         stack.enter_context(lock(state / "writer-fence.lock", create=True))
         if os.path.lexists(state / "identity.json"):
@@ -156,31 +306,62 @@ def offline(config):
 
 def open_fence(config, expected_identifier):
     with offline(config):
-        observed = postgres.inspect_cluster(config["package"], config["data_dir"], config["major"])
-        if not re.fullmatch(r"[1-9][0-9]*", expected_identifier) or observed != expected_identifier:
-            raise postgres.LifecycleError("independently supplied fence identifier differs")
+        observed = postgres.inspect_cluster(
+            config["package"], config["data_dir"], config["major"]
+        )
+        if (
+            not re.fullmatch(r"[1-9][0-9]*", expected_identifier)
+            or observed != expected_identifier
+        ):
+            raise postgres.LifecycleError(
+                "independently supplied fence identifier differs"
+            )
         if os.path.lexists(marker(config)):
             record = journal(config)
             if record["phase"] != "prepared":
-                raise postgres.LifecycleError("resume explicit writer fence thaw before another preparation")
+                raise postgres.LifecycleError(
+                    "resume explicit writer fence thaw before another preparation"
+                )
             current = digest(read_auto(config))
             if current not in (record["original_sha256"], record["selected_sha256"]):
-                raise postgres.LifecycleError("automatic configuration changed; retain writer fence")
+                raise postgres.LifecycleError(
+                    "automatic configuration changed; retain writer fence"
+                )
         else:
             original = read_auto(config)
             if b"# harbor-db-writer-fence=" in original:
-                tokens = re.findall(rb"^# harbor-db-writer-fence=([0-9a-f]{32})$", original, re.MULTILINE)
+                tokens = re.findall(
+                    rb"^# harbor-db-writer-fence=([0-9a-f]{32})$",
+                    original,
+                    re.MULTILINE,
+                )
                 if len(tokens) != 1:
-                    raise postgres.LifecycleError("unbound writer fence selector; retain stopped primary")
-                path = Path(config["state_dir"]) / "writer-fences" / tokens[0].decode() / "prepared.json"
+                    raise postgres.LifecycleError(
+                        "unbound writer fence selector; retain stopped primary"
+                    )
+                path = (
+                    Path(config["state_dir"])
+                    / "writer-fences"
+                    / tokens[0].decode()
+                    / "prepared.json"
+                )
                 record = journal(config, path)
-                if record["phase"] != "prepared" or digest(original) != record["selected_sha256"]:
-                    raise postgres.LifecycleError("interrupted writer fence selector changed; retain stopped primary")
+                if (
+                    record["phase"] != "prepared"
+                    or digest(original) != record["selected_sha256"]
+                ):
+                    raise postgres.LifecycleError(
+                        "interrupted writer fence selector changed; retain stopped primary"
+                    )
                 write_json(marker(config), record)
                 startup(config)
-                return {"status": "prepared-offline", "token": record["token"],
-                        "system_identifier": observed, "restart_required": True}
-            settings = policy(config)
+                return {
+                    "status": "prepared-offline",
+                    "token": record["token"],
+                    "system_identifier": observed,
+                    "restart_required": True,
+                }
+            settings = runtime_policy(config)
             token = secrets.token_hex(16)
             history = Path(config["state_dir"]) / "writer-fences"
             history.mkdir(mode=0o700, exist_ok=True)
@@ -194,32 +375,52 @@ def open_fence(config, expected_identifier):
             sync_directory(history)
             hba = directory / "pg_hba.conf"
             if any(character in str(hba) for character in ["'", "\n", "\r", "\\"]):
-                raise postgres.LifecycleError("writer fence storage cannot be represented in PostgreSQL configuration")
-            selected = original + (f"\n# harbor-db-writer-fence={token}\nhba_file = '{hba}'\n").encode()
+                raise postgres.LifecycleError(
+                    "writer fence storage cannot be represented in PostgreSQL configuration"
+                )
+            selected = (
+                original
+                + (f"\n# harbor-db-writer-fence={token}\nhba_file = '{hba}'\n").encode()
+            )
             record = {
-                "version": 1, "phase": "prepared", "token": token,
-                "resource": config["resource"], "data_dir": config["data_dir"],
-                "major": str(config["major"]), "system_identifier": observed,
-                "policy": settings, "hba_file": str(hba),
+                "version": 1,
+                "phase": "prepared",
+                "token": token,
+                "resource": config["resource"],
+                "data_dir": config["data_dir"],
+                "major": str(config["major"]),
+                "system_identifier": observed,
+                "policy": settings,
+                "hba_file": str(hba),
                 "original_file": str(directory / "original-auto.conf"),
                 "selected_file": str(directory / "fenced-auto.conf"),
-                "original_sha256": digest(original), "selected_sha256": digest(selected),
+                "original_sha256": digest(original),
+                "selected_sha256": digest(selected),
                 "hba_sha256": digest(hba_contents(settings)),
             }
-            for path, content in [(hba, hba_contents(settings)),
-                                  (record["original_file"], original),
-                                  (record["selected_file"], selected)]:
+            for path, content in [
+                (hba, hba_contents(settings)),
+                (record["original_file"], original),
+                (record["selected_file"], selected),
+            ]:
                 atomic_write(path, content)
             write_json(directory / "prepared.json", record)
             # The startup selector is the durable freeze commit point. Publish
             # it before the active journal: even an older bare postmaster then
             # uses the restrictive HBA on restart. A guarded start with a
             # selector but no journal fails closed until offline resume.
-        atomic_write(Path(config["data_dir"]) / "postgresql.auto.conf", read_private(record["selected_file"]))
+        atomic_write(
+            Path(config["data_dir"]) / "postgresql.auto.conf",
+            read_private(record["selected_file"]),
+        )
         write_json(marker(config), record)
         startup(config)
-        return {"status": "prepared-offline", "token": record["token"],
-                "system_identifier": observed, "restart_required": True}
+        return {
+            "status": "prepared-offline",
+            "token": record["token"],
+            "system_identifier": observed,
+            "restart_required": True,
+        }
 
 
 def close_fence(config, token):
@@ -232,18 +433,33 @@ def close_fence(config, token):
         if record["phase"] == "closing":
             allowed.append(record["original_sha256"])
         if current not in allowed:
-            raise postgres.LifecycleError("automatic configuration changed; retain writer fence")
+            raise postgres.LifecycleError(
+                "automatic configuration changed; retain writer fence"
+            )
         record["phase"] = "closing"
         write_json(marker(config), record)
-        atomic_write(Path(config["data_dir"]) / "postgresql.auto.conf", read_private(record["original_file"]))
+        atomic_write(
+            Path(config["data_dir"]) / "postgresql.auto.conf",
+            read_private(record["original_file"]),
+        )
         receipt = Path(record["hba_file"]).parent / "closed.json"
-        write_json(receipt, {"status": "closed-offline", "token": token,
-                             "system_identifier": record["system_identifier"],
-                             "original_sha256": record["original_sha256"]})
+        write_json(
+            receipt,
+            {
+                "status": "closed-offline",
+                "token": token,
+                "system_identifier": record["system_identifier"],
+                "original_sha256": record["original_sha256"],
+            },
+        )
         marker(config).unlink()
         sync_directory(Path(config["state_dir"]))
-        return {"status": "closed-offline", "token": token, "receipt": str(receipt),
-                "restart_required": True}
+        return {
+            "status": "closed-offline",
+            "token": token,
+            "receipt": str(receipt),
+            "restart_required": True,
+        }
 
 
 def inspect_offline(config, token, phase):
@@ -257,25 +473,46 @@ def inspect_offline(config, token, phase):
             if record is None or record["token"] != token:
                 raise postgres.LifecycleError("offline writer fence token differs")
         elif phase == "closed":
-            if os.path.lexists(marker(config)) or not re.fullmatch(r"[0-9a-f]{32}", token):
+            if os.path.lexists(marker(config)) or not re.fullmatch(
+                r"[0-9a-f]{32}", token
+            ):
                 raise postgres.LifecycleError("unfinished writer fence thaw")
             directory = Path(config["state_dir"]) / "writer-fences" / token
             record = journal(config, directory / "prepared.json")
             receipt = json.loads(read_private(directory / "closed.json"))
-            if (receipt != {"status": "closed-offline", "token": token,
-                           "system_identifier": record["system_identifier"], "original_sha256": record["original_sha256"]}
-                    or digest(read_auto(config)) != record["original_sha256"]):
+            if (
+                receipt
+                != {
+                    "status": "closed-offline",
+                    "token": token,
+                    "system_identifier": record["system_identifier"],
+                    "original_sha256": record["original_sha256"],
+                }
+                or digest(read_auto(config)) != record["original_sha256"]
+            ):
                 raise postgres.LifecycleError("writer fence thaw boundary changed")
         else:
             raise postgres.LifecycleError("unknown offline writer fence phase")
-        return {"status": f"{phase}-offline", "token": token, "resource": config["resource"],
-                "data_dir": config["data_dir"], "major": str(config["major"]), "system_identifier": record["system_identifier"]}
+        return {
+            "status": f"{phase}-offline",
+            "token": token,
+            "resource": config["resource"],
+            "data_dir": config["data_dir"],
+            "major": str(config["major"]),
+            "system_identifier": record["system_identifier"],
+        }
 
 
 def inspect_live(config, token, socket_dir, port):
     postgres.validate_config(config)
-    if not Path(socket_dir).is_absolute() or "," in socket_dir or not 1 <= port <= 65535:
-        raise postgres.LifecycleError("writer fence inspection needs a local socket and port")
+    if (
+        not Path(socket_dir).is_absolute()
+        or "," in socket_dir
+        or not 1 <= port <= 65535
+    ):
+        raise postgres.LifecycleError(
+            "writer fence inspection needs a local socket and port"
+        )
     with lock(Path(config["state_dir"]) / "writer-fence.lock", shared=True):
         record = startup(config)
         if record is None or record["token"] != token:
@@ -301,27 +538,68 @@ def inspect_live(config, token, socket_dir, port):
                         'checkpointer', 'walwriter', 'walsender', 'archiver', 'logical replication launcher', 'io worker')))
             FROM pg_control_system();
         """
-        env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
-        env.update(PGCONNECT_TIMEOUT="5", PGOPTIONS="-c statement_timeout=10000 -c default_transaction_read_only=on")
-        output = postgres.run([
-            Path(config["package"]) / "bin/psql", "-X", "-w", "-A", "-t",
-            "-v", "ON_ERROR_STOP=1", "-h", socket_dir, "-p", str(port),
-            "-U", record["policy"]["control_role"], "-d", "postgres", "-c", sql,
-        ], env=env, text=True, capture_output=True, timeout=15).stdout
+        env = {
+            key: value for key, value in os.environ.items() if not key.startswith("PG")
+        }
+        env.update(
+            PGCONNECT_TIMEOUT="5",
+            PGOPTIONS="-c statement_timeout=10000 -c default_transaction_read_only=on",
+        )
+        output = postgres.run(
+            [
+                Path(config["package"]) / "bin/psql",
+                "-X",
+                "-w",
+                "-A",
+                "-t",
+                "-v",
+                "ON_ERROR_STOP=1",
+                "-h",
+                socket_dir,
+                "-p",
+                str(port),
+                "-U",
+                record["policy"]["control_role"],
+                "-d",
+                "postgres",
+                "-c",
+                sql,
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        ).stdout
         observed = json.loads(output)
         expected = {
-            "data_dir": config["data_dir"], "major": str(config["major"]),
-            "system_identifier": record["system_identifier"], "hba_file": record["hba_file"],
-            "control_role": record["policy"]["control_role"], "in_recovery": False,
-            "fsync": "on", "full_page_writes": "on", "synchronous_commit": "on",
+            "data_dir": config["data_dir"],
+            "major": str(config["major"]),
+            "system_identifier": record["system_identifier"],
+            "hba_file": record["hba_file"],
+            "control_role": record["policy"]["control_role"],
+            "in_recovery": False,
+            "fsync": "on",
+            "full_page_writes": "on",
+            "synchronous_commit": "on",
             "preload_libraries": record["policy"]["allowed_preload_libraries"],
             "logical_subscriptions": 0,
-            "prepared_transactions": 0, "other_writers": 0,
+            "prepared_transactions": 0,
+            "other_writers": 0,
         }
         if isinstance(observed.get("preload_libraries"), list):
-            observed["preload_libraries"] = sorted(library.strip() for library in observed["preload_libraries"])
+            observed["preload_libraries"] = sorted(
+                library.strip() for library in observed["preload_libraries"]
+            )
         if observed != expected:
-            differences = ", ".join(key for key in expected if observed.get(key) != expected[key])
-            raise postgres.LifecycleError(f"live writer fence is not exclusive at the bound primary: {differences}")
-        return {"status": "ready", "token": token,
-                "system_identifier": record["system_identifier"], "hba_sha256": record["hba_sha256"]}
+            differences = ", ".join(
+                key for key in expected if observed.get(key) != expected[key]
+            )
+            raise postgres.LifecycleError(
+                f"live writer fence is not exclusive at the bound primary: {differences}"
+            )
+        return {
+            "status": "ready",
+            "token": token,
+            "system_identifier": record["system_identifier"],
+            "hba_sha256": record["hba_sha256"],
+        }

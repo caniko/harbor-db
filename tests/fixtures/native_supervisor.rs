@@ -91,6 +91,22 @@ fn property(unit: &str, name: &str) -> Result<String> {
     )
 }
 
+fn wait_for_unit_exit(unit: &str) -> Result<()> {
+    wait(|| {
+        let (code, bytes) = command(
+            Path::new("systemctl"),
+            &["--user", "show", unit, "--property=LoadState,ActiveState"],
+            false,
+        )?;
+        let state = String::from_utf8(bytes)?;
+        Ok(state.lines().any(|line| line == "LoadState=not-found")
+            || (code == 0
+                && state
+                    .lines()
+                    .any(|line| matches!(line, "ActiveState=failed" | "ActiveState=inactive"))))
+    })
+}
+
 struct Owned(Child);
 impl Drop for Owned {
     fn drop(&mut self) {
@@ -519,25 +535,7 @@ fn qualify(root: &Path, cli: &Path) -> Result<()> {
         units.len() == 2,
         "early worker launch must acknowledge both units",
     )?;
-    wait(|| {
-        let (_, bytes) = command(
-            Path::new("systemctl"),
-            &[
-                "--user",
-                "show",
-                &units[1],
-                "--property=LoadState,ActiveState",
-            ],
-            false,
-        )?;
-        let state = String::from_utf8(bytes)?;
-        Ok(state.lines().any(|line| {
-            matches!(
-                line,
-                "LoadState=not-found" | "ActiveState=failed" | "ActiveState=inactive"
-            )
-        }))
-    })?;
+    wait_for_unit_exit(&units[1])?;
     drop(busy);
     wait(|| Ok(supervisor::status(&early)?.terminal))?;
     let failed = supervisor::status(&early)?;
@@ -548,6 +546,24 @@ fn qualify(root: &Path, cli: &Path) -> Result<()> {
         "pre-registration worker loss must be terminal without inventing execution",
     )?;
     let original = fs::read(early.join("launch-failed.json"))?;
+    // Terminal evidence is published before observer notifications finish.
+    // Reattach only after the detached observer releases its exclusive lease.
+    wait_for_unit_exit(&units[0])?;
+    let observation = durable::lock(&early.join("observation.lock"), false, false)?;
+    require(
+        command(
+            cli,
+            &["observe", early.to_str().ok_or("run")?, "--once"],
+            false,
+        )?
+        .0 == 1,
+        "concurrent observation must still reject a busy lease",
+    )?;
+    require(
+        fs::read(early.join("launch-failed.json"))? == original,
+        "busy observation changed early failure evidence",
+    )?;
+    drop(observation);
     command(
         cli,
         &["observe", early.to_str().ok_or("run")?, "--once"],
@@ -561,7 +577,7 @@ fn qualify(root: &Path, cli: &Path) -> Result<()> {
         command(cli, &["worker", early.to_str().ok_or("run")?], false)?.0 == 1,
         "early failed worker must never rerun",
     )?;
-    assertions.push("real detached worker lease failure before registration is terminal after unit collection, observer reattachment preserves failure and retry rejects");
+    assertions.push("real detached worker lease failure before registration is terminal after unit collection, busy observation rejects, observer reattachment preserves failure and retry rejects");
     runs.push(json!({"run":early,"terminal":failed}));
     durable::write_json(
         &root.join("qualification.json"),

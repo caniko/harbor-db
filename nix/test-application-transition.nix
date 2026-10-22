@@ -98,7 +98,7 @@
     };
   });
   adapter = pkgs.writeText "transition-adapter.py" ''
-    import hashlib, json, os, pathlib, subprocess, sys, time
+    import hashlib, json, os, pathlib, socket, subprocess, sys, time
     stage, *args = sys.argv[1:]
     postgres = ${
       if withPostgres
@@ -154,6 +154,12 @@
         print(json.dumps({"version":1,"status":"healthy"}))
     elif stage == "writer":
         if args[0] == "target": new.write_text("acknowledged target revision eight")
+        # systemd readiness must follow application initialization, not just exec.
+        address = os.environ["NOTIFY_SOCKET"]
+        if address.startswith("@"): address = "\0" + address[1:]
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as ready:
+            ready.connect(address)
+            ready.sendall(b"READY=1")
         while True: time.sleep(1)
     elif stage != "cleanup": raise ValueError(stage)
   '';
@@ -260,6 +266,7 @@ in
             ]
             ++ lib.optionals withPostgres recoveryDirectories;
           systemd.services.demo.serviceConfig = {
+            Type = "notify";
             User = "demo";
             ExecStart = "${pkgs.python3}/bin/python3 ${adapter} writer source";
           };

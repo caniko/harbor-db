@@ -26,7 +26,8 @@
     "Q /srv/history/quotas/nested 0750 archive archive - -"
   ];
   siblingRule = "d /srv/history-other/cache 0750 archive archive - -";
-  eval = import "${pkgs.path}/nixos/lib/eval-config.nix" {
+  # Preserve the input path during cold read-only flake qualification.
+  eval = import (pkgs.path + "/nixos/lib/eval-config.nix") {
     system = pkgs.stdenv.hostPlatform.system;
     modules = [
       module

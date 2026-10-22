@@ -30,17 +30,17 @@ and removing the extension declaration all fail admission.
 
 ## Required behavioral parity
 
-| Contract | Rust engines |
-| --- | --- |
-| Token-bound stopped-primary fencing, SQL exclusion including superusers, physical replication, explicit thaw | `writer_fence`, `pg_core` |
-| Persistent primary/setup barriers, effective systemd readback, legacy generations and reboot, separate startup release | `startup_inhibition` |
-| Capture, reusable preparation, adoption and bootstrap under one live fence; independent snapshot certification | `recovery`, `postgres` |
-| Persistent lock inodes, writer/child lease inheritance, synchronized publication and bounded workers | `durable`, `process` |
-| Exact role ownership and current/default/column/grant privileges; read-only drift | `provision` |
-| Executed semantic backup acceptance, immutable publication, independent identity, retry and cleanup retention | `application_backup`, `backup` |
-| Disposable logical restore through a private socket with deterministic cleanup | `postgres_drill` |
+| Contract                                                                                                                       | Rust engines                                    |
+| ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| Token-bound stopped-primary fencing, SQL exclusion including superusers, physical replication, explicit thaw                   | `writer_fence`, `pg_core`                       |
+| Persistent primary/setup barriers, effective systemd readback, legacy generations and reboot, separate startup release         | `startup_inhibition`                            |
+| Capture, reusable preparation, adoption and bootstrap under one live fence; independent snapshot certification                 | `recovery`, `postgres`                          |
+| Persistent lock inodes, writer/child lease inheritance, synchronized publication and bounded workers                           | `durable`, `process`                            |
+| Exact role ownership and current/default/column/grant privileges; read-only drift                                              | `provision`                                     |
+| Executed semantic backup acceptance, immutable publication, independent identity, retry and cleanup retention                  | `application_backup`, `backup`                  |
+| Disposable logical restore through a private socket with deterministic cleanup                                                 | `postgres_drill`                                |
 | Preparation/import/candidate/commit/writer-enable/complete/abort/retirement phases; generation binding and legacy-client gates | `application_transition`, `transition_manifest` |
-| Journaled authority and custody, borrowed primary fence and retained post-import recovery obligations | `cutover`, `custody`, `resource` |
+| Journaled authority and custody, borrowed primary fence and retained post-import recovery obligations                          | `cutover`, `custody`, `resource`                |
 
 Static mappings establish scope. Runtime acceptance additionally requires
 candidate-bound passing evidence for every applicable coverage cell, bidirectional

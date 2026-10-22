@@ -27,18 +27,18 @@ enum BackupError {
     ArchiveStale(PathBuf, PathBuf, std::io::Error),
     #[error("backing up Home Manager collision {0} as {1}: {2}")]
     MoveTarget(PathBuf, PathBuf, std::io::Error),
+    #[error("no unused archive name remains for Home Manager backup {0}")]
+    ArchiveNamesExhausted(PathBuf),
 }
 
 fn main() -> ExitCode {
     let mut args = env::args_os();
     let _program = args.next();
-    let target = match (args.next(), args.next()) {
-        (Some(target), None) => PathBuf::from(target),
-        _ => {
-            eprintln!("home-manager-backup: usage: home-manager-backup <target>");
-            return ExitCode::from(2);
-        }
+    let (Some(target), None) = (args.next(), args.next()) else {
+        eprintln!("home-manager-backup: usage: home-manager-backup <target>");
+        return ExitCode::from(2);
     };
+    let target = PathBuf::from(target);
     match run(&target) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -65,7 +65,7 @@ fn backup(target: &Path, extension: &str, stamp: &str) -> Result<(), BackupError
     fs::symlink_metadata(target).map_err(|_| BackupError::MissingTarget(target.to_owned()))?;
     let backup = append_suffix(target, &format!(".{extension}"));
     if fs::symlink_metadata(&backup).is_ok() {
-        let archive = unique_archive_path(&backup, stamp);
+        let archive = unique_archive_path(&backup, stamp)?;
         fs::rename(&backup, &archive)
             .map_err(|error| BackupError::ArchiveStale(backup.clone(), archive.clone(), error))?;
         eprintln!(
@@ -78,15 +78,15 @@ fn backup(target: &Path, extension: &str, stamp: &str) -> Result<(), BackupError
         .map_err(|error| BackupError::MoveTarget(target.to_owned(), backup, error))
 }
 
-fn unique_archive_path(backup: &Path, stamp: &str) -> PathBuf {
+fn unique_archive_path(backup: &Path, stamp: &str) -> Result<PathBuf, BackupError> {
     let base = append_suffix(backup, &format!(".canix-{stamp}"));
     if fs::symlink_metadata(&base).is_err() {
-        return base;
+        return Ok(base);
     }
-    (1..)
+    (1..=u64::MAX)
         .map(|index| append_suffix(&base, &format!("-{index}")))
         .find(|candidate| fs::symlink_metadata(candidate).is_err())
-        .expect("unbounded archive suffix search")
+        .ok_or_else(|| BackupError::ArchiveNamesExhausted(backup.to_path_buf()))
 }
 
 fn append_suffix(path: &Path, suffix: &str) -> PathBuf {

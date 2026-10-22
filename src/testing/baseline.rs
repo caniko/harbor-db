@@ -299,35 +299,13 @@ impl Baseline {
     /// Frozen source makes this narrow extractor deterministic. New prototypes
     /// may add IDs; each original method must remain registered independently.
     pub fn python_tests(&self, root: &Path) -> Result<BTreeSet<String>> {
-        let mut methods = BTreeSet::new();
-        for file in self.files.iter().filter(|f| f.role == FileRole::Test) {
-            let bytes = fs::read(root.join(&file.path))?;
-            if codec::digest(&bytes) != file.sha256 {
-                let approved = fs::read_to_string(root.join("tests/runtime-extensions.toml"))
-                    .ok()
-                    .and_then(|text| toml::from_str::<RuntimeExtensions>(&text).ok())
-                    .is_some_and(|extensions| {
-                        extensions.extensions.iter().any(|extension| {
-                            extension.path == file.path && extension.sha256 == codec::digest(&bytes)
-                        })
-                    });
-                let oracle = root.join("tests/oracles/pr14").join(&file.path);
-                if !approved
-                    || oracle.is_symlink()
-                    || fs::read(&oracle).map_or(true, |bytes| codec::digest(&bytes) != file.sha256)
-                {
-                    return Err(error(format!(
-                        "PR14 Python test baseline changed: {}",
-                        file.path.display()
-                    )));
-                }
-            }
-            let text = std::str::from_utf8(&bytes)?;
-            let module = file
-                .path
+        let extract = |path: &Path, bytes: &[u8]| -> Result<BTreeSet<String>> {
+            let text = std::str::from_utf8(bytes)?;
+            let module = path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .ok_or_else(|| error("invalid test module"))?;
+            let mut methods = BTreeSet::new();
             let mut class = None;
             for line in text.lines() {
                 if let Some(name) = line.strip_prefix("class ") {
@@ -345,6 +323,40 @@ impl Baseline {
                     methods.insert(format!("{module}.{class}.test_{name}"));
                 }
             }
+            Ok(methods)
+        };
+        let mut methods = BTreeSet::new();
+        for file in self.files.iter().filter(|f| f.role == FileRole::Test) {
+            let bytes = fs::read(root.join(&file.path))?;
+            let baseline_bytes = if codec::digest(&bytes) != file.sha256 {
+                let approved = fs::read_to_string(root.join("tests/runtime-extensions.toml"))
+                    .ok()
+                    .and_then(|text| toml::from_str::<RuntimeExtensions>(&text).ok())
+                    .is_some_and(|extensions| {
+                        extensions.extensions.iter().any(|extension| {
+                            extension.path == file.path && extension.sha256 == codec::digest(&bytes)
+                        })
+                    });
+                let oracle = root.join("tests/oracles/pr14").join(&file.path);
+                let oracle_bytes = fs::read(&oracle)?;
+                if !approved || oracle.is_symlink() || codec::digest(&oracle_bytes) != file.sha256 {
+                    return Err(error(format!(
+                        "PR14 Python test baseline changed: {}",
+                        file.path.display()
+                    )));
+                }
+                oracle_bytes
+            } else {
+                bytes.clone()
+            };
+            let original = extract(&file.path, &baseline_bytes)?;
+            if !original.is_subset(&extract(&file.path, &bytes)?) {
+                return Err(error(format!(
+                    "PR14 original Python method removed: {}",
+                    file.path.display()
+                )));
+            }
+            methods.extend(original);
         }
         let serialized = methods
             .iter()

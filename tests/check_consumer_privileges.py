@@ -1,4 +1,5 @@
 """Exercise real root CLI dispatch in both engines, including group/env custody."""
+
 import json
 import os
 from pathlib import Path
@@ -38,33 +39,64 @@ else: raise AssertionError('validator read root-only secret')
 pathlib.Path(sys.argv[1]).write_text(json.dumps({'uid':os.geteuid(),'groups':os.getgroups()}))
 print(json.dumps({'binding':{'validator':'unprivileged'},'directories':[],'required_files':[]}))
 """
-    config = {"resource": "consumer-boundary", "state_dir": str(authority),
-              "directories": [str(data)], "binding": {"backend": "fixture"},
-              "user": "demo", "consumer_command": [interpreter, "-B", "-c", code, str(marker), str(secret)]}
+    config = {
+        "resource": "consumer-boundary",
+        "state_dir": str(authority),
+        "directories": [str(data)],
+        "binding": {"backend": "fixture"},
+        "user": "demo",
+        "consumer_command": [interpreter, "-B", "-c", code, str(marker), str(secret)],
+    }
     policy = selected / "policy.json"
-    environment = {**os.environ, "HOME": "/root", "HARBOR_DB_CONSUMER_SECRET": "root-secret",
-                   "PYTHONSTARTUP": str(secret)}
+    environment = {
+        **os.environ,
+        "HOME": "/root",
+        "HARBOR_DB_CONSUMER_SECRET": "root-secret",
+        "PYTHONSTARTUP": str(secret),
+    }
     mutable = data / "validator"
     mutable.write_text(f"#!/bin/sh\nprintf dispatched > {marker}\n")
     os.chown(mutable, account.pw_uid, account.pw_gid)
     mutable.chmod(0o755)
-    unsafe = [("mutable-executable", dict(config, consumer_command=[str(mutable)])),
-              ("root-user", dict(config, user="root")),
-              ("missing-user", {key: value for key, value in config.items() if key != "user"})]
+    unsafe = [
+        ("mutable-executable", dict(config, consumer_command=[str(mutable)])),
+        ("root-user", dict(config, user="root")),
+        (
+            "missing-user",
+            {key: value for key, value in config.items() if key != "user"},
+        ),
+    ]
     for name, value in unsafe:
         policy.write_text(json.dumps(value))
-        result = subprocess.run([binary, "--config", str(policy), "adopt", "--identity", "verified"],
-                                env=environment, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            [binary, "--config", str(policy), "adopt", "--identity", "verified"],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
         assert result.returncode != 0, (engine, value, result.stdout, result.stderr)
         assert not marker.exists() and not (authority / "identity.json").exists()
-        assertions.append({"name": f"{engine}-{name}-rejected-before-dispatch", "passed": True})
+        assertions.append(
+            {"name": f"{engine}-{name}-rejected-before-dispatch", "passed": True}
+        )
     policy.write_text(json.dumps(config))
     for action in (("adopt", "--identity", "verified"), ("check",)):
-        result = subprocess.run([binary, "--config", str(policy), *action], env=environment,
-                                capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            [binary, "--config", str(policy), *action],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
         assert result.returncode == 0, (engine, action, result.stdout, result.stderr)
         assert json.loads(marker.read_text())["uid"] == account.pw_uid
         marker.unlink()
-        assertions.append({"name": f"{engine}-{action[0]}-unprivileged-groups-environment-secret-custody", "passed": True})
+        assertions.append(
+            {
+                "name": f"{engine}-{action[0]}-unprivileged-groups-environment-secret-custody",
+                "passed": True,
+            }
+        )
 assert len(assertions) == 10
 print(json.dumps({"schema": 1, "case_id": case_id, "assertions": assertions}))

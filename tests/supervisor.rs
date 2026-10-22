@@ -99,6 +99,71 @@ fn untrusted_supervisor_bases_and_ancestors_reject_before_publication() {
 }
 
 #[test]
+fn bound_inputs_restored_inside_a_case_still_reject_qualification() {
+    if !private_root::enter() {
+        return;
+    }
+    for external in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let bound = tmp
+            .path()
+            .join(if external { "input" } else { "snapshot/source" });
+        let script = format!(
+            "printf changed > '{}'; printf 'bound source' > '{}'",
+            bound.display(),
+            bound.display()
+        );
+        let mut selection = spec(tmp.path(), &script, 5);
+        if external {
+            fs::write(&bound, b"bound source").unwrap();
+            selection
+                .inputs
+                .push(supervisor::bind_file(&bound).unwrap());
+        }
+        let run = supervisor::create_run(Some(tmp.path()), "restored", selection).unwrap();
+        supervisor::worker(&run).unwrap();
+        assert_eq!(fs::read(&bound).unwrap(), b"bound source");
+        let state = supervisor::status(&run).unwrap();
+        assert!(
+            !state.results[0].evidence_errors.is_empty(),
+            "external={external}"
+        );
+        assert_eq!(supervisor::verify(&run).unwrap().verdict, Verdict::Failed);
+    }
+}
+
+#[test]
+fn bound_inputs_are_checked_before_the_next_case_can_restore_them() {
+    if !private_root::enter() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let mut selection = spec(tmp.path(), "printf changed > source", 5);
+    let mut restore = selection.cases[0].clone();
+    restore.id = "restore".into();
+    restore.artifacts.clear();
+    restore.execution = Execution::Argv {
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "printf 'bound source' > source; touch '{}'",
+                tmp.path().join("restored").display()
+            ),
+        ],
+        env: BTreeMap::from([("PATH".into(), std::env::var("PATH").unwrap())]),
+    };
+    selection.cases.push(restore);
+    let run = supervisor::create_run(Some(tmp.path()), "between-cases", selection).unwrap();
+    supervisor::worker(&run).unwrap();
+    assert!(!tmp.path().join("restored").exists());
+    let state = supervisor::status(&run).unwrap();
+    assert!(!state.results[0].evidence_errors.is_empty());
+    assert_eq!(state.results[1].code, None);
+    assert!(!state.results[1].evidence_errors.is_empty());
+}
+
+#[test]
 fn eof_is_not_exit_and_follower_has_no_authority() {
     if !private_root::enter() {
         return;

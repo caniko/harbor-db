@@ -19,6 +19,9 @@
 
 ### Fixed
 
+- Keep the generated recovery-preparation pre-switch check accepted by
+  ShellCheck 0.11, which flagged its trap-only cleanup function (SC2329) and
+  failed consumers' `pre-switch-checks` builds.
 - Preserve graceful shutdown and post-stop hooks while transitions inhibit startup.
 - Bind runtime credential sources into version-2 backup policies so forced transition
   captures receive private worker credentials without depending on a service environment.

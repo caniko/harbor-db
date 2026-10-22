@@ -126,13 +126,13 @@ pub fn plan(config: &Value, candidate: &str, writer_fence_token: Option<&str>) -
         ));
     }
     let path = journal_path(config)?;
-    let _lease = durable::lock(
+    let transition_lease = durable::lock(
         &Path::new(string(config, "barrier_dir")?).join("lock"),
         false,
         !path.exists(),
     )?;
     if path.exists() {
-        let record = status(config)?;
+        let mut record = status(config)?;
         if record["candidate"] != candidate && record["preparation_contract"] != candidate
             || record["writer_fence_token"] != json!(writer_fence_token)
         {
@@ -140,10 +140,19 @@ pub fn plan(config: &Value, candidate: &str, writer_fence_token: Option<&str>) -
                 "transition resume candidate or fence identity differs",
             ));
         }
+        if !terminal(config, &record)? {
+            let _fence = manifest::fence(config, &mut record, &[transition_lease.fd()])?;
+        }
         return Ok(record);
     }
-    let (_lease, authority) = resource::inspection(&source)?;
+    let (authority_lease, authority) = resource::inspection(&source)?;
     let mut record = json!({"version":1,"phase":"planned","run_id":super::writer_fence::token()?,"intent":manifest::intent(config)?,"candidate":if kind=="generation"{Some(candidate)}else{None},"preparation_contract":if kind=="contract"{Some(candidate)}else{None},"barrier_candidate":if kind=="generation"{Some(candidate)}else{None},"writer_fence_token":writer_fence_token,"source_authority":authority,"source_generation":manifest::generation()?,"created_at":custody::now(),"fence":null});
+    // Admit and pin the live borrowed fence before publishing immutable intent.
+    let _fence = manifest::fence(
+        config,
+        &mut record,
+        &[transition_lease.fd(), authority_lease.fd()],
+    )?;
     if !config["custody_manifest"].is_null() {
         let entry = durable::read_config_json(Path::new(string(config, "custody_manifest")?))?;
         let custody = Path::new(string(&entry, "custody_file")?);
@@ -479,6 +488,9 @@ pub fn prepare(config: &Value) -> Result<Value> {
             "transition preparation is not permitted at this phase",
         ));
     }
+    // Reject a stale/unavailable fence before changing phase, installing barriers,
+    // or stopping writers. Keep its leases until preparation has returned.
+    let _fence = manifest::fence(config, &mut record, &[lease.fd()])?;
     let phase = if record["phase"] == "planned" {
         Some("quiescing")
     } else {

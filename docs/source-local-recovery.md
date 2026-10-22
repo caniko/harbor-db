@@ -195,10 +195,10 @@ age/top-two retention. Malformed or uncertain pin state preserves the repository
    Certification inventories device/inode identities for the restored cluster and
    available authoritative/selected-backup trees. Shared files or directories reject
    even when hard links or bind mounts preserve different canonical path spelling;
-    redirected or special backup/restored entries reject too. Generated primary
-    configuration links may target regular files; those target inodes join the
-    protected set. Root inode aliases reject before scanning a bind-mounted primary
-    as a disposable copy. The authoritative tree may be
+   redirected or special backup/restored entries reject too. Generated primary
+   configuration links may target regular files; those target inodes join the
+   protected set. Root inode aliases reject before scanning a bind-mounted primary
+   as a disposable copy. The authoritative tree may be
    absent on the independent host; the transported selected backup remains protected.
 8. Keep the retained fence until explicit stopped-primary thaw. Capture and
    certification do not start, stop or thaw the primary.

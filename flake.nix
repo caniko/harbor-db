@@ -2,12 +2,8 @@
   description = "harbor-db - secure generic lifecycle plans and NixOS systemd wiring";
 
   inputs = {
-    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=feat/portable-release-files&rev=195f8a7e81d67102868631015b6794280b492c88";
+    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
     rs-harbor.follows = "harbor-rs";
-    harbor-meta = {
-      url = "git+https://github.com/caniko/harbor-meta.git?ref=feat/shared-timezone-env&rev=1f272a44dea9dc531b30efb384720ddb46f083e3";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
   };
@@ -17,6 +13,8 @@
     harbor-rs,
     harbor-meta,
     nixpkgs,
+    harborFormatting,
+    harborRoot,
     ...
   }: let
     systems = [
@@ -48,7 +46,7 @@
       '';
     cargoSource = pkgs: craneLib:
       pkgs.lib.cleanSourceWith {
-        src = pkgs.lib.cleanSource ./.;
+        src = harborRoot.outPath;
         filter = path: type:
           (craneLib.filterCargoSources path type)
           # The catalog and retained-baseline tests inspect the public Nix/CI
@@ -70,9 +68,9 @@
       pname = "harbor-db";
       version = "0.1.0";
       strictDeps = true;
-      cargoExtraArgs = "--locked";
+      cargoExtraArgs = "--locked -p harbor-db";
       postPatch = ''
-        for source in tests/*.rs; do
+        for source in components/database/tests/*.rs; do
           if test -f "$source"; then
             substituteInPlace "$source" --replace-warn '/bin/sh' '${pkgs.runtimeShell}'
           fi
@@ -147,8 +145,8 @@
             mainProgram = "harbor-db";
           };
         };
-      # Production receipt authority must not execute in a caller-controlled
-      # dynamic loader. Testing builds retain preload-based fault injection.
+      # Receipt authority cannot execute through a caller-controlled loader.
+      # Test builds keep dynamic linkage for preload fault-injection fixtures.
       productionArgs =
         commonArgs
         // {
@@ -175,7 +173,7 @@
         commonArgs
         // {
           pname = "harbor-db-test";
-          cargoExtraArgs = "--locked --features testing --bin harbor-db-test --bin harbor-db-native-supervisor-fixture --bin harbor-db-writer-fence-fixture --bin harbor-db-backend-transition-fixture --bin harbor-db-provision-fixture --bin harbor-db-postgres-transition-fixture --bin harbor-db-postgres-backup-fixture --bin harbor-db-source-local-recovery-fixture";
+          cargoExtraArgs = "--locked -p harbor-db --features testing --bin harbor-db-test --bin harbor-db-native-supervisor-fixture --bin harbor-db-writer-fence-fixture --bin harbor-db-backend-transition-fixture --bin harbor-db-provision-fixture --bin harbor-db-postgres-transition-fixture --bin harbor-db-postgres-backup-fixture --bin harbor-db-source-local-recovery-fixture";
           meta = commonArgs.meta // {mainProgram = "harbor-db-test";};
         };
       testingArtifacts = craneLib.buildDepsOnly testingArgs;
@@ -186,10 +184,10 @@
           nativeBuildInputs = [pkgs.makeWrapper];
           postInstall = ''
             mkdir -p "$out/share/harbor-db-test"
-            cp -r python tests "$out/share/harbor-db-test/"
+            cp -r components/database/python components/database/tests "$out/share/harbor-db-test/"
             chmod -R u+rwX "$out/share/harbor-db-test"
             find "$out/share/harbor-db-test" -name __pycache__ -type d -exec rm -rf {} +
-            cp tests/suite.toml "$out/share/harbor-db-test/suite.toml"
+            cp components/database/tests/suite.toml "$out/share/harbor-db-test/suite.toml"
             wrapProgram "$out/bin/harbor-db-test" \
               --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.nix pkgs.systemd pkgs.gitMinimal pkgs.python3 pkgs.cargo pkgs.rustc pkgs.stdenv.cc pkgs.bash pkgs.coreutils pkgs.util-linux]} \
               --set PYTHONPATH "$out/share/harbor-db-test/python:$out/share/harbor-db-test/tests"
@@ -224,12 +222,13 @@
       commonArgs =
         mkCargoArgs pkgs craneLib
         // {
-          cargoExtraArgs = "--locked --all-features";
+          cargoExtraArgs = "--locked --all-features -p harbor-db";
           nativeBuildInputs = [pkgs.postgresql_18 pkgs.postgresql_17 pkgs.python3 pkgs.gitMinimal pkgs.util-linux pkgs.bash pkgs.coreutils];
           HARBOR_DB_TEST_POSTGRES = pkgs.postgresql_18;
           HARBOR_DB_TEST_POSTGRES_17 = pkgs.postgresql_17;
           HARBOR_DB_TEST_CONFIG_FIXTURE = configurationFixture pkgs;
           HARBOR_DB_TEST_MACHINE_ID = pkgs.writeText "harbor-db-test-machine-id" "00000000000000000000000000000001\n";
+          HARBOR_DB_TEST_PRIVATE_ROOT = "1";
           preBuild = ''
             export HARBOR_DB_TEST_ROOT_UID=$(${pkgs.coreutils}/bin/stat -Lc %u "$HARBOR_DB_TEST_CONFIG_FIXTURE/postgresql.json")
           '';
@@ -238,9 +237,8 @@
             namespaceTools=${pkgs.util-linux}/bin
             if ! "$namespaceTools/unshare" --user --map-root-user --mount -- true 2>namespace-probe.log; then
               ${pkgs.lib.optionalString (pkgs.system == "aarch64-linux") ''
-              # QEMU user emulation returns EINVAL for unshare. Keep the
-              # AArch64 lifecycle binaries under test, and perform host
-              # namespace/mount syscalls with pinned kernel-native tools.
+              # Keep ARM lifecycle executables under test when QEMU's user
+              # emulation cannot perform namespace syscalls itself.
               if grep -q 'unshare failed: Invalid argument' namespace-probe.log; then
                 namespaceTools=${nixpkgs.legacyPackages.x86_64-linux.util-linux}/bin
               fi
@@ -307,14 +305,12 @@
         };
         postgres-lifecycle-oracle-test = pkgs.callPackage ./nix/test-postgres-oracle.nix {};
         harbor-db = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db;
-        cargo-fmt = craneLib.cargoFmt {
-          inherit src;
-          pname = "harbor-db";
-        };
+        # Formatting is owned by the monorepo's shared toolchain and policy.
+        cargo-fmt = harborFormatting pkgs.stdenv.hostPlatform.system;
         cargo-test = craneLib.cargoTest (commonArgs
           // {
             inherit cargoArtifacts;
-            cargoExtraArgs = "--all-targets --all-features --locked";
+            cargoExtraArgs = "--all-targets --all-features --locked -p harbor-db";
           });
         cargo-doc = craneLib.cargoDoc (commonArgs
           // {
@@ -324,7 +320,7 @@
         cargo-clippy = craneLib.cargoClippy (commonArgs
           // {
             inherit cargoArtifacts;
-            cargoExtraArgs = "--all-targets --all-features --locked";
+            cargoExtraArgs = "--all-targets --all-features --locked -p harbor-db";
             cargoClippyExtraArgs = "-- -D warnings";
           });
       }

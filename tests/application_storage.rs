@@ -90,6 +90,32 @@ fn last(t: &Path) -> Value {
     durable::read_json(&t.join("backups/LAST_SUCCESS")).unwrap()
 }
 
+fn backup_cli(python: bool) -> std::process::Command {
+    if !python {
+        return std::process::Command::new(env!("CARGO_BIN_EXE_harbor-db-application-backup"));
+    }
+    let mut command = std::process::Command::new("python3");
+    command.args([
+        "-B",
+        "-c",
+        r#"import sys
+from unittest.mock import patch
+from harbor_db import application_backup
+fixture = sys.argv.pop(1)
+if fixture:
+    original_digest = application_backup.digest
+    patch.object(application_backup, 'machine', side_effect=lambda: original_digest(fixture)).start()
+raise SystemExit(application_backup.main())
+"#,
+        option_env!("HARBOR_DB_TEST_MACHINE_ID").unwrap_or(""),
+    ]);
+    command.env(
+        "PYTHONPATH",
+        format!("{}/python", env!("CARGO_MANIFEST_DIR")),
+    );
+    command
+}
+
 #[test]
 fn oversized_capture_control_rejects_before_restore_and_preserves_success_in_both_engines() {
     for python in [false, true] {
@@ -232,17 +258,7 @@ fn automatic_manual_capture_remains_pinned_after_scheduled_retention_in_both_eng
         let (t, c) = backup_fixture();
         let config = t.path().join("config.json");
         durable::write_json(&config, &c).unwrap();
-        let mut command = if python {
-            let mut command = std::process::Command::new("python3");
-            command.args(["-B", "-c", "import sys\nfrom unittest.mock import patch\nfrom harbor_db import application_backup\nfixture=sys.argv.pop(1)\noriginal=application_backup.digest\nif fixture:\n patch.object(application_backup,'machine',side_effect=lambda:original(fixture)).start()\nraise SystemExit(application_backup.main())", option_env!("HARBOR_DB_TEST_MACHINE_ID").unwrap_or("")]);
-            command.env(
-                "PYTHONPATH",
-                format!("{}/python", env!("CARGO_MANIFEST_DIR")),
-            );
-            command
-        } else {
-            std::process::Command::new(env!("CARGO_BIN_EXE_harbor-db-application-backup"))
-        };
+        let mut command = backup_cli(python);
         let result = command
             .arg("--config")
             .arg(&config)
@@ -297,17 +313,7 @@ fn prune_peer(c: &Value, python: bool, keep: u32) -> std::process::Output {
     let t = tempfile::tempdir().unwrap();
     let config = t.path().join("config.json");
     durable::write_json(&config, c).unwrap();
-    let mut command = if python {
-        let mut command = std::process::Command::new("python3");
-        command.args(["-B", "-m", "harbor_db.application_backup"]);
-        command.env(
-            "PYTHONPATH",
-            format!("{}/python", env!("CARGO_MANIFEST_DIR")),
-        );
-        command
-    } else {
-        std::process::Command::new(env!("CARGO_BIN_EXE_harbor-db-application-backup"))
-    };
+    let mut command = backup_cli(python);
     command
         .arg("--config")
         .arg(config)
@@ -1539,7 +1545,13 @@ fn provisioning_native_privilege_convergence_and_read_only_drift() {
             "start".into(),
         ],
     );
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "PostgreSQL fixture startup failed: {}\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+        fs::read_to_string(root.join("postgres.log")).unwrap_or_default()
+    );
     struct Stop {
         package: PathBuf,
         data: PathBuf,

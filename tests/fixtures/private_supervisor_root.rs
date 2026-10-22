@@ -10,6 +10,7 @@ pub fn enter() -> bool {
     if std::env::var_os("HARBOR_SUPERVISOR_PRIVATE_ROOT_CHILD").is_some() {
         assert_eq!(unsafe { libc::geteuid() }, 0);
         assert_eq!(fs::metadata("/").unwrap().uid(), 0);
+        assert!(Path::new(env!("CARGO_BIN_EXE_harbor-db-test")).is_file());
         return true;
     }
     let root_uid = fs::metadata("/").unwrap().uid();
@@ -21,6 +22,12 @@ pub fn enter() -> bool {
     let root = tempfile::tempdir().unwrap();
     let source = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source_mount = root.path().join(source.strip_prefix("/").unwrap());
+    // Workspace and external Cargo targets live outside the component source.
+    // Preserve the compile-time launcher path inside the private root as well.
+    let binaries = Path::new(env!("CARGO_BIN_EXE_harbor-db-test"))
+        .parent()
+        .unwrap();
+    let binaries_mount = root.path().join(binaries.strip_prefix("/").unwrap());
     for path in [
         "nix/store",
         "proc",
@@ -48,6 +55,7 @@ pub fn enter() -> bool {
     .unwrap();
     fs::write(root.path().join("etc/group"), "root:x:0:\n").unwrap();
     fs::create_dir_all(&source_mount).unwrap();
+    fs::create_dir_all(&binaries_mount).unwrap();
     // Empty retained environments deliberately use exec's default /bin lookup.
     let shell = std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|path| path.join("sh"))
@@ -73,8 +81,10 @@ mount --rbind /nix/store "$1/nix/store"
 mount --rbind /proc "$1/proc"
 mount --rbind /dev "$1/dev"
 mount --rbind "$2" "$3"
+mount --rbind "$5" "$6"
 mountpoint -q "$1/nix/store"
 mountpoint -q "$3"
+mountpoint -q "$6"
 if [ -d /run/binfmt ]; then
     mount --rbind /run/binfmt "$1/run/binfmt"
     mountpoint -q "$1/run/binfmt"
@@ -88,6 +98,8 @@ exec chroot "$1" /fixture --exact "$4" --nocapture
         .arg(source)
         .arg(source_mount)
         .arg(test)
+        .arg(binaries)
+        .arg(binaries_mount)
         .env("HARBOR_SUPERVISOR_PRIVATE_ROOT_CHILD", "1")
         .output()
         .unwrap();

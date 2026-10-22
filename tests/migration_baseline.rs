@@ -141,11 +141,10 @@ fn extension_fixture() -> (tempfile::TempDir, Baseline, Suite) {
     }
     let mut ci: toml::Value = toml::from_str(&fs::read_to_string("simit.toml").unwrap()).unwrap();
     let gates = ci["ci"]["nix_builds"].as_array_mut().unwrap();
-    for gate in [
-        ".#checks.x86_64-linux.postgres-lifecycle-test",
-        ".#checks.x86_64-linux.postgres-lifecycle-oracle-test",
-        ".#checks.x86_64-linux.native-source-local-recovery",
-    ] {
+    let extensions: toml::Value =
+        toml::from_str(&fs::read_to_string("tests/runtime-extensions.toml").unwrap()).unwrap();
+    for gate in extensions["gates"].as_array().unwrap() {
+        let gate = gate.as_str().unwrap();
         if !gates.iter().any(|value| value.as_str() == Some(gate)) {
             gates.push(gate.into());
         }
@@ -164,6 +163,50 @@ fn edit_extension_manifest(root: &Path, edit: impl FnOnce(&mut toml::Value)) {
     let mut manifest = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     edit(&mut manifest);
     fs::write(path, toml::to_string(&manifest).unwrap()).unwrap();
+}
+
+#[test]
+fn registered_prototypes_preserve_the_frozen_method_inventory() {
+    let (root, baseline, suite) = extension_fixture();
+    let original = baseline.python_tests(root.path()).unwrap();
+    assert_eq!(original.len(), 174);
+    assert!(original.contains(
+        "test_writer_fence.WriterFenceTest.test_open_never_claims_live_ready_and_retains_original_configuration"
+    ));
+    assert!(!original.contains(
+        "test_writer_fence.FencePolicyTest.test_public_policy_preserves_enrollment_schema_and_validation"
+    ));
+    baseline.validate_migration(root.path(), &suite).unwrap();
+}
+
+#[test]
+fn approved_source_hash_cannot_replace_an_original_method_with_a_prototype() {
+    use sha2::{Digest, Sha256};
+    let (root, baseline, _) = extension_fixture();
+    let path = "tests/test_writer_fence.py";
+    let file = root.path().join(path);
+    let source = fs::read_to_string(&file).unwrap();
+    let original = "def test_open_never_claims_live_ready_and_retains_original_configuration(";
+    assert_eq!(source.matches(original).count(), 1);
+    let replacement = source.replace(original, "def test_unreviewed_replacement(");
+    fs::write(&file, &replacement).unwrap();
+    let hash = format!("{:x}", Sha256::digest(replacement.as_bytes()));
+    edit_extension_manifest(root.path(), |manifest| {
+        let extension = manifest["extensions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| entry["path"].as_str() == Some(path))
+            .unwrap();
+        extension["sha256"] = hash.into();
+    });
+    assert!(
+        baseline
+            .python_tests(root.path())
+            .unwrap_err()
+            .to_string()
+            .contains("original Python method removed")
+    );
 }
 
 #[test]

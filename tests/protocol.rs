@@ -149,9 +149,13 @@ from harbor_db.test_bridge import dispatch
 root=pathlib.Path(sys.argv[1])
 payload=bytes(range(256))+b'\x00acknowledged\xff'
 class Driver:
+    out_dir=root/'driver-output'
     def copy_from_machine(self, source, target_dir):
-        # The pinned NixOS driver appends the guest basename to target_dir.
-        target=pathlib.Path(target_dir)/pathlib.Path(source).name
+        # The pinned driver uses target_dir beneath both /tmp/shared and $out.
+        # An absolute path bypasses the writable guest exchange mount.
+        relative=pathlib.Path(target_dir)
+        assert not relative.is_absolute() and '..' not in relative.parts
+        target=self.out_dir/relative/pathlib.Path(source).name
         target.parent.mkdir(parents=True,exist_ok=True)
         target.write_bytes(payload)
     def copy_from_host(self, source, destination):
@@ -160,10 +164,23 @@ class Driver:
         assert destination=='/run/receipt.json'
 destination=root/'different-host-name.bin'
 driver=Driver()
+driver.out_dir.mkdir()
 assert dispatch({'operation':'copy_from','node':'guest','source':'/run/export.tar','destination':str(destination)},{'guest':driver})=={'transferred':True}
 assert destination.is_file() and destination.read_bytes()==payload
-assert sorted(p.name for p in root.iterdir())==['different-host-name.bin']
+assert sorted(p.name for p in root.iterdir())==['different-host-name.bin','driver-output']
+assert list(driver.out_dir.iterdir())==[]
 assert dispatch({'operation':'copy_to','node':'guest','source':str(destination),'destination':'/run/receipt.json'},{'guest':driver})=={'transferred':True}
+class RefusingDriver(Driver):
+    def copy_from_machine(self, source, target_dir):
+        super().copy_from_machine(source,target_dir)
+        raise RuntimeError('export refused')
+try:
+    dispatch({'operation':'copy_from','node':'guest','source':'/run/export.tar','destination':str(root/'refused.bin')},{'guest':RefusingDriver()})
+    raise AssertionError('driver refusal was swallowed')
+except RuntimeError as error:
+    assert str(error)=='export refused'
+assert not (root/'refused.bin').exists()
+assert destination.read_bytes()==payload and list(driver.out_dir.iterdir())==[]
 "#;
     let mut command = std::process::Command::new("python3");
     command.args(["-B", "-c", script]).arg(root.path()).env(
