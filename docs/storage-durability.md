@@ -317,9 +317,11 @@ adopt, and later guarded switches coexist with the writer's shared lease.
 
 Hosted qualification selects the lifecycle package and each check explicitly in
 `simit.toml`. The generated matrix preserves the existing Rust format, test,
-Clippy, documentation and module gates, limits parallel jobs to two, and retains
-the exact source revision, installable, build log and JSON output map. VM jobs
-require hosted KVM. A queued or skipped job is not acceptance evidence.
+Clippy, documentation and module gates. Four shared-store groups (`aarch64`,
+`x86-rust`, `x86-native-vm` and `x86-lifecycle-vm`) run concurrently, so each
+builds the shared Rust closure once; every member still retains its exact
+source revision, installable, build log and JSON output map. x86 jobs require
+hosted KVM. A queued or skipped job is not acceptance evidence.
 
 The default `harbor-db` package and its aliases are portable uncached builds.
 `harbor-db-cached` explicitly opts into the managed compiler-cache transport and
@@ -331,13 +333,15 @@ transport to the pinned Harbor RS wrapper. The wrapper creates and admits only i
 versioned, mode-0770 `nixbld` namespace, and still prefers the host Redis socket
 when present. The managed-transport requirement and per-sandbox compiler daemon
 remain enforced; the hosted disk cache needs no credentials.
-Push and pull-request runs share a branch concurrency group by Simit policy.
-One run can be canceled when the other starts; qualification requires a complete
-successful run for the exact PR head, rather than combining jobs across runs.
+Branch pushes run only on `trunk`; pull requests qualify their exact head once.
+A newer push supersedes an older run of the same branch and event; qualification
+requires a complete successful run for the exact PR head, rather than combining
+jobs across runs.
 
 The workflow was generated with Simit commit
-`beea3e284a613d46468779bd998e51be2d63566c` (Simit PR #26), which supports
-`[ci.nix_build].only` for Rust flakes. Regenerate and verify with that capability:
+`de3325be17104fbdb0d70f1da38149d4016f1790`, which supports grouped matrices.
+Grouped jobs build the engine named by the repository variable
+`SIMIT_CI_ENGINE_REVISION`, enrolled at the same revision. Regenerate and verify:
 
 ```sh
 simit init ci --platform github --ci-provider actions --runtime nix
