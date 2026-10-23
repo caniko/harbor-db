@@ -212,16 +212,13 @@ the independent executor. One resumable journal at the fixed root
 manifest closure copy (`nix copy --to ssh-ng://<executor> <manifest>`), because
 the executor runs the Harbor and certify argv that closure contains, as well as
 the export transfer. Every step is idempotent; rerun it after an interruption.
-Steps are bound to the manifest that opened the journal, but `abort` accepts
-another manifest of the same primary so a superseded candidate can always be
-unwound, provided its fence, startup-inhibition and data bindings are the ones
-the journal recorded; otherwise it refuses and names the opening manifest to
-rerun with (`--config`, or canix `--candidate`).
-Whichever manifest unwinds it, the rollout undoes what it wrote, as journaled
-before each write: the publisher-pause drop-ins (each must name
-`<drop-in root>/<unit>.d/zz-harbor-db-rollout-pause.conf`) and the import slot
-it staged into (moved only while it is a private root file holding the
-recorded receipt). Journals predating this fall back to the current manifest.
+Only the manifest that opened the journal steps or unwinds it (`abort` and
+`thaw` included): every policy its fence, inhibition, clients and slot were made
+under is that manifest's. Another manifest refuses and names the opener to rerun
+with (`--config <opening manifest>`, or canix `--candidate <generation>`); the
+opener is kept alive by the GC root `/nix/var/nix/gcroots/harbor-db-postgresql-rollout`
+from the journal's creation until it is archived. Only a thawed journal, which
+leaves nothing open, may be archived by any manifest.
 The journal ignores unknown fields and omits empty ones, and new fields are
 optional and additive (only an incompatible change bumps its `version`), so a
 rollback generation can still read and abort a newer coordinator's journal.
@@ -274,24 +271,31 @@ Exclusion and recovery:
 - **Crash windows.** Every external change is journaled before it is made, or
   recovered from Harbor's own record on retry: the inhibition intent (its token
   is recovered from the held inhibition), the fence-opening intent, stopped
-  clients, publishers and receivers, pause drop-ins and the staged slot.
-  Provisioned directories appear only complete: they are made, permissioned
-  and owned under a private name and then renamed into place.
-- **Undo what was decided.** Which stopped clients stay down (the opening
-  manifest's retired clients) is journaled when they are stopped, so no
-  manifest that unwinds the rollout changes what is restarted.
+  clients, publishers and receivers, and the staged receipt. Provisioned
+  directories appear only complete: they are made, permissioned and owned under
+  a private name and then renamed into place.
+- **One role per unit.** Clients (with retired clients), paused publishers,
+  receivers, setup units and `postgresql.service` may not overlap, templates
+  included, both in Nix and when the manifest is loaded: a retired client that
+  is also a paused publisher would be restarted when the pause lifts.
+- **Preflight.** Anything static that could fail `prepare` once the fence is
+  held is checked by `fence` before any side effect (and again by `prepare`):
+  each provisioned directory either already has its declared owner, group and
+  mode (an existing one, perhaps a mountpoint, is never re-owned) or is
+  creatable under trusted ancestry and present mounts.
 - **Pinned reads.** Files other writers control (a transported receipt, the
   acceptance, preparation evidence, Harbor's fence selector and records) are
   read through one descriptor opened without following a symlink or blocking,
   checked as a bounded regular file.
-- **Starting again.** A finished rollout is archived beside the journal by the
-  next `fence` or `next`, under any manifest, which then starts afresh: a thawed
-  one to `rollout.<unix-seconds>.thawed.json`, an abort (only once its reopen is
-  recorded and no Harbor fence is held) to `rollout.<unix-seconds>.aborted.json`.
-  A staged receipt left in the import slot moves first to
-  `rollout.<unix-seconds>.receipt.json` (root-only), so the next rollout's
-  `prepare` never meets it as unrecorded. `status` lists the archives.
-
+- **Starting again.** At its terminal transition a rollout moves a staged
+  receipt out of the import slot into the journal root, so the next rollout's
+  `prepare` never meets it as unrecorded. The next `fence` or `next` archives a
+  finished rollout and starts afresh: a thawed one under any manifest, an abort
+  (only by its opener, once its reopen is recorded and no Harbor fence is held).
+  The journal and its receipt share one collision-free id,
+  `rollout.<n>.{thawed,aborted,receipt}.json`, the next sequence number,
+  published with no-replace links so no archive is ever overwritten. `status`
+  lists the archives.
 - **Start limits.** Every coordinator start (primary, clients, receivers,
   publishers) runs `systemctl reset-failed` first, so repeated cycles never
   leave a unit down on its start limit.

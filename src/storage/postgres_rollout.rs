@@ -20,6 +20,10 @@ const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
 const STATE_ROOT: &str = "/var/lib/harbor-db/postgresql-rollout";
 /// The manifest the running generation carries.
 const INSTALLED: &str = "/etc/harbor-db/postgresql-rollout.json";
+const GC_ROOTS: &str = "/nix/var/nix/gcroots";
+const GC_ROOT: &str = "harbor-db-postgresql-rollout";
+/// A staged receipt the finished rollout retired from the import slot.
+const RETIRED_RECEIPT: &str = "receipt.retired.json";
 /// One deterministic worker: a retry finds an orphaned preparation by name.
 const PREPARE_UNIT: &str = "harbor-db-rollout-prepare.service";
 const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(600);
@@ -144,40 +148,18 @@ pub struct Journal {
     /// no token yet, a live fence is adopted only explicitly.
     #[serde(default, skip_serializing_if = "is_false")]
     pub fence_opening: bool,
-    /// Stopped clients the opening manifest retires (never restarted), decided
-    /// when they were stopped so no other manifest changes what is undone.
-    /// Absent in older journals, which fall back to the current manifest.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kept_down: Option<Vec<String>>,
     /// The fence is closed and the normal primary verified; an unwinding retry
     /// only returns clients, receivers and publishers.
     #[serde(default, skip_serializing_if = "is_false")]
     pub reopened: bool,
-    /// The manifest that opened the journal and the fingerprint of its fence,
-    /// startup and data bindings: another manifest may unwind the rollout only
-    /// through the same ones.
+    /// The manifest that opened the journal: the only one that may step or
+    /// unwind it (kept alive by a GC root until the journal is archived).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening_config: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub maintenance_sha256: Option<String>,
-    /// What this rollout wrote outside its journal, recorded before each
-    /// write, so any manifest unwinds exactly that. Absent in older journals,
-    /// which fall back to the current manifest's declarations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub written: Option<Written>,
 }
 
 fn is_false(value: &bool) -> bool {
     !value
-}
-
-/// Under the journal's schema rule too.
-#[derive(Default, Deserialize, Serialize)]
-pub struct Written {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pause_drop_ins: Vec<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub staged_slot: Option<PathBuf>,
 }
 
 pub enum Action {
@@ -227,8 +209,8 @@ pub struct Rollout {
     /// Owner of provisioned directories (`postgres` and each declared group on
     /// hosts; tests cannot chown to them).
     service_owner: Option<(u32, u32)>,
-    /// Fingerprint of the maintenance bindings an open window lives under.
-    binding: String,
+    /// Where the open journal's opening manifest is rooted against GC.
+    gcroots: PathBuf,
 }
 
 fn root() -> bool {
@@ -568,6 +550,37 @@ impl Rollout {
         {
             return Err(invalid("invalid rollout manifest or primary binding"));
         }
+        // Each unit has one role: a retired client that is also a paused
+        // publisher would be restarted when the pause lifts, a receiver that is
+        // also a client restarted by both. Templates cover their instances.
+        let primary = [maintenance["startup_inhibition"]["unit"]
+            .as_str()
+            .unwrap_or("postgresql.service")
+            .to_owned()];
+        let roles: [Vec<&String>; 5] = [
+            manifest
+                .clients
+                .iter()
+                .chain(&manifest.retired_clients)
+                .collect(),
+            manifest.paused_publishers.iter().collect(),
+            manifest.receiver_units.iter().collect(),
+            manifest.setup_units.iter().collect(),
+            primary.iter().collect(),
+        ];
+        let overlap = |a: &str, b: &str| a == b || unit_matches(a, b) || unit_matches(b, a);
+        for (index, role) in roles.iter().enumerate() {
+            for other in &roles[index + 1..] {
+                if let Some((a, b)) = (role.iter())
+                    .flat_map(|a| other.iter().map(move |b| (a, b)))
+                    .find(|(a, b)| overlap(a, b))
+                {
+                    return Err(invalid(format!(
+                        "rollout units must each have one role; {a} and {b} overlap"
+                    )));
+                }
+            }
+        }
         // systemd splits ReadWritePaths/RequiresMountsFor/SupplementaryGroups
         // on whitespace and LoadCredential on `:`, so one entry must never
         // smuggle in another (or a quote, escape or specifier).
@@ -621,23 +634,8 @@ impl Rollout {
                 }
             }
         }
-        // Where the writer fence, startup inhibition and data live: a window
-        // opened under one set can only be closed through the same.
-        let startup = &maintenance["startup_inhibition"];
-        let binding = codec::digest(&codec::encode(
-            &json!({
-                "data_dir": maintenance["data_dir"],
-                "state_dir": maintenance["state_dir"],
-                "startup_inhibition": {
-                    "state_dir": startup["state_dir"],
-                    "drop_in_root": startup["drop_in_root"],
-                    "unit": startup["unit"],
-                },
-            }),
-            false,
-        )?);
         Ok(Self {
-            binding,
+            gcroots: PathBuf::from(GC_ROOTS),
             digest: codec::file_digest(config)?,
             maintenance,
             manifest,
@@ -684,45 +682,45 @@ impl Rollout {
             stopped_publishers: Vec::new(),
             inhibiting: false,
             fence_opening: false,
-            kept_down: Some(Vec::new()),
             reopened: false,
             opening_config: Some(self.config.clone()),
-            maintenance_sha256: Some(self.binding.clone()),
-            written: Some(Written::default()),
         }
     }
 
-    /// Steps are bound to the exact manifest; only `abort` may unwind a journal
-    /// opened by another manifest of the same primary.
-    /// Another manifest may unwind a journal only under the same fence, startup
-    /// and data bindings; otherwise the window lives where this one cannot
-    /// reach it, so name the manifest that opened it (it may be collected, so
-    /// it is never loaded implicitly). An unrecorded binding matches only the
-    /// opening manifest itself.
-    fn require_binding(&self, journal: &Journal) -> Result<()> {
-        if journal.manifest_sha256 == self.digest
-            || journal.maintenance_sha256.as_deref() == Some(self.binding.as_str())
-        {
+    /// Only the manifest that opened a journal steps or unwinds it: every
+    /// policy its fence, inhibition, clients and slots were made under is that
+    /// manifest's. It is rooted against GC while the journal is open, but never
+    /// loaded implicitly; name it instead.
+    fn require_opener(&self, journal: &Journal) -> Result<()> {
+        if journal.manifest_sha256 == self.digest {
             return Ok(());
         }
+        let opener = journal.opening_config.as_deref().map_or_else(
+            || "<the opening manifest>".into(),
+            |path| path.display().to_string(),
+        );
         Err(invalid(format!(
-            "the rollout journal was opened under other fence, startup or data bindings; rerun \
-             with `--config {}` (canix: `--candidate` of that generation)",
-            journal.opening_config.as_deref().map_or_else(
-                || "<the opening manifest>".into(),
-                |path| path.display().to_string()
-            )
+            "this rollout was opened by {opener}; rerun with `--config {opener}` (canix: \
+             `--candidate <generation>`)"
         )))
     }
 
     fn bound(&self) -> Result<Journal> {
         let journal = self.journal()?.unwrap_or_else(|| self.fresh_journal());
-        if journal.manifest_sha256 != self.digest {
-            return Err(invalid(
-                "retained rollout journal belongs to another manifest; finish or abort it first",
-            ));
-        }
+        self.require_opener(&journal)?;
         Ok(journal)
+    }
+
+    /// Root the opening manifest (and so its closure) against GC while its
+    /// journal exists: swapped in atomically, removed when it is archived.
+    fn root_opening_manifest(&self) -> Result<()> {
+        let staging = self
+            .gcroots
+            .join(format!(".{GC_ROOT}.{}", std::process::id()));
+        let _ = fs::remove_file(&staging);
+        std::os::unix::fs::symlink(&self.config, &staging)?;
+        fs::rename(&staging, self.gcroots.join(GC_ROOT))?;
+        Ok(())
     }
 
     /// Fail unless every declared mount covering `path` is mounted.
@@ -765,8 +763,14 @@ impl Rollout {
             let leaf = current == *path;
             let metadata = match fs::symlink_metadata(&current) {
                 Ok(metadata) => metadata,
+                // Absent, and so creatable only below a directory others
+                // cannot write (where its name could be raced).
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
-                    return Ok(None);
+                    return if parent_shared {
+                        Err(untrusted(&current))
+                    } else {
+                        Ok(None)
+                    };
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     if parent_shared {
@@ -827,6 +831,9 @@ impl Rollout {
 
     fn save(&self, journal: &Journal) -> Result<()> {
         self.state_dir()?;
+        if !writer_fence::exists(&self.journal_path()) {
+            self.root_opening_manifest()?;
+        }
         durable::write_json(&self.journal_path(), &serde_json::to_value(journal)?)
     }
 
@@ -1171,15 +1178,12 @@ impl Rollout {
         durable::atomic_write_mode(&self.pause_marker(), b"", 0o600)?;
         for unit in &self.manifest.paused_publishers {
             let directory = root.join(format!("{unit}.d"));
-            let file = directory.join(PAUSE_DROP_IN);
-            if let Some(written) = &mut journal.written
-                && !written.pause_drop_ins.contains(&file)
-            {
-                written.pause_drop_ins.push(file.clone());
-                self.save(journal)?;
-            }
             fs::create_dir_all(&directory)?;
-            durable::atomic_write_mode(&file, condition.as_bytes(), 0o644)?;
+            durable::atomic_write_mode(
+                &directory.join(PAUSE_DROP_IN),
+                condition.as_bytes(),
+                0o644,
+            )?;
         }
         self.systemctl(&["daemon-reload"])?;
         for unit in &self.manifest.paused_publishers {
@@ -1196,48 +1200,22 @@ impl Rollout {
         Ok(())
     }
 
-    /// Where the pause drop-in of `unit` lives (one directory per unit under the
-    /// bound drop-in root).
-    fn pause_drop_in(&self, unit: &str) -> Result<PathBuf> {
-        Ok(self
-            .drop_in_root()?
-            .join(format!("{unit}.d"))
-            .join(PAUSE_DROP_IN))
-    }
-
     fn lift_pause(&self, journal: &mut Journal) -> Result<()> {
         // Publishers must not snapshot a cluster a preparation is still copying.
         if self.preparing()? {
             return Err(invalid(BUSY));
         }
         let mut lifted = false;
-        // The drop-ins the opening run wrote, whichever manifest unwinds it.
-        let files = match &journal.written {
-            Some(written) => written.pause_drop_ins.clone(),
-            None => (self.manifest.paused_publishers.iter())
-                .map(|unit| self.pause_drop_in(unit))
-                .collect::<Result<_>>()?,
-        };
-        for file in files {
-            // A tampered journal must never steer root into removing another path.
-            let unit = (file.parent())
-                .and_then(Path::file_name)
-                .and_then(|name| name.to_str())
-                .and_then(|name| name.strip_suffix(".d"))
-                .filter(|unit| valid_unit(unit));
-            if unit.map(|unit| self.pause_drop_in(unit)).transpose()? != Some(file.clone()) {
-                return Err(invalid(format!(
-                    "the journal names {} as a publisher pause drop-in",
-                    file.display()
-                )));
-            }
-            if fs::symlink_metadata(&file).is_ok() {
-                fs::remove_file(&file)?;
-                lifted = true;
+        if !self.manifest.paused_publishers.is_empty() {
+            let root = self.drop_in_root()?;
+            for unit in &self.manifest.paused_publishers {
+                let file = root.join(format!("{unit}.d")).join(PAUSE_DROP_IN);
+                if fs::symlink_metadata(&file).is_ok() {
+                    fs::remove_file(&file)?;
+                    lifted = true;
+                }
             }
         }
-        // The marker gates every manifest's drop-ins (a cross-manifest abort may
-        // declare other publishers), so it always goes.
         if self.pause_marker().exists() {
             fs::remove_file(self.pause_marker())?;
             lifted = true;
@@ -1251,22 +1229,7 @@ impl Rollout {
     }
 
     fn stop_clients(&self, journal: &mut Journal) -> Result<()> {
-        let active = self.active_clients()?;
-        // Which of them stay down is this manifest's decision, journaled with them.
-        if let Some(kept_down) = &mut journal.kept_down {
-            kept_down.extend(
-                active
-                    .iter()
-                    .filter(|unit| {
-                        (self.manifest.retired_clients.iter())
-                            .any(|pattern| unit_matches(pattern, unit))
-                    })
-                    .cloned(),
-            );
-            kept_down.sort();
-            kept_down.dedup();
-        }
-        journal.clients.extend(active);
+        journal.clients.extend(self.active_clients()?);
         journal.clients.sort();
         journal.clients.dedup();
         self.save(journal)?;
@@ -1288,6 +1251,48 @@ impl Rollout {
         Ok(())
     }
 
+    /// The owner a provisioned directory of `group` must have.
+    fn provision_owner(&self, group: &str) -> Result<(u32, u32)> {
+        Ok(match self.service_owner {
+            Some(owner) => owner,
+            None => (account("postgres")?.0, group_id(group)?),
+        })
+    }
+
+    /// Everything static that could fail `prepare` once the fence is held:
+    /// each provisioned directory either already has its declared owner,
+    /// group and mode (an existing one, perhaps a mountpoint, is never
+    /// re-owned) or is creatable under trusted ancestry and present mounts;
+    /// an undeclared export root likewise.
+    fn preflight_paths(&self) -> Result<()> {
+        let prepare = &self.manifest.prepare;
+        let holders: Vec<&Path> = (prepare.provision_directories.iter())
+            .map(|directory| directory.path.as_path())
+            .collect();
+        for directory in &prepare.provision_directories {
+            self.require_covering_mounts(&directory.path)?;
+            let Some(metadata) = self.walk(&directory.path, &holders, false)? else {
+                continue;
+            };
+            let (uid, gid) = self.provision_owner(&directory.group)?;
+            if (metadata.uid(), metadata.gid(), metadata.mode() & 0o7777)
+                != (uid, gid, directory.mode)
+            {
+                return Err(invalid(format!(
+                    "{} exists but is not {uid}:{gid} mode {:o}; fix it first (an existing \
+                     directory is never re-owned)",
+                    directory.path.display(),
+                    directory.mode
+                )));
+            }
+        }
+        if !holders.contains(&prepare.export_root.as_path()) {
+            self.require_covering_mounts(&prepare.export_root)?;
+            self.walk(&prepare.export_root, &holders, false)?;
+        }
+        Ok(())
+    }
+
     /// Create a service directory as root without ever following a symlink.
     fn provision(&self, path: &Path, group: &str, mode: u32) -> Result<()> {
         // Never provision on the root filesystem below an absent mount.
@@ -1301,10 +1306,7 @@ impl Rollout {
         if self.walk(path, &holders, false)?.is_some() {
             return Ok(());
         }
-        let (uid, gid) = match self.service_owner {
-            Some(owner) => owner,
-            None => (account("postgres")?.0, group_id(group)?),
-        };
+        let (uid, gid) = self.provision_owner(group)?;
         // Publish the directory only once complete: made, permissioned and
         // owned under a private name, then renamed into place, so a crash never
         // leaves it root-owned where a retry would accept it as provisioned.
@@ -1333,6 +1335,7 @@ impl Rollout {
         }
         // Before any side effect: a refusal must leave production untouched.
         self.refuse_foreign_fence(journal, adopt)?;
+        self.preflight_paths()?;
         let authority = Path::new(super::string(&self.maintenance, "state_dir")?);
         self.provision(authority, "postgres", 0o700)?;
         self.inhibit(journal)?;
@@ -1503,6 +1506,7 @@ impl Rollout {
         if self.preparing()? {
             return Err(invalid(BUSY));
         }
+        self.preflight_paths()?;
         self.provision_all()?;
         self.check_sandbox_paths()?;
         let signals = Deferred::block()?;
@@ -1636,12 +1640,8 @@ impl Rollout {
                 ));
             }
         }
-        // Recorded before staging, so whichever manifest finishes the rollout
-        // archives exactly this slot.
+        // Recorded before staging, so the finished rollout retires exactly it.
         journal.receipt_sha256 = Some(expected);
-        if let Some(written) = &mut journal.written {
-            written.staged_slot = Some(slot.clone());
-        }
         self.save(journal)?;
         if fs::symlink_metadata(slot).is_err() {
             let verified = self.state.join("receipt.verified.json");
@@ -1750,13 +1750,10 @@ impl Rollout {
             journal.reopened = true;
             self.save(journal)?;
         }
+        // Only the opening manifest unwinds, so its retirement policy decides.
         for unit in &journal.clients {
-            // The opening run's retirement decision, whichever manifest unwinds.
-            let retired = match &journal.kept_down {
-                Some(kept_down) => kept_down.contains(unit),
-                None => (self.manifest.retired_clients.iter())
-                    .any(|pattern| unit_matches(pattern, unit)),
-            };
+            let retired =
+                (self.manifest.retired_clients.iter()).any(|pattern| unit_matches(pattern, unit));
             if !retired {
                 self.start(unit)?;
             }
@@ -1834,6 +1831,7 @@ impl Rollout {
             }
         }
         self.reopen(journal, None)?;
+        self.retire_slot(journal)?;
         journal.phase = Phase::Thawed;
         self.save(journal)
     }
@@ -1986,9 +1984,38 @@ impl Rollout {
         Ok(names)
     }
 
+    /// At a terminal transition the opening manifest moves a staged receipt
+    /// out of its import slot into the journal root, so the slot is free for
+    /// the next rollout and archival needs no manifest. Only a private root
+    /// file holding exactly the recorded receipt moves. Written before the slot
+    /// is removed, so an interrupted move is simply repeated.
+    fn retire_slot(&self, journal: &Journal) -> Result<()> {
+        let Some(recorded) = journal.receipt_sha256.as_deref() else {
+            return Ok(());
+        };
+        let slot = &self.manifest.import_slot;
+        let metadata = match fs::symlink_metadata(slot) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+            Ok(metadata) => metadata,
+        };
+        trusted_file(&metadata, slot, euid())?;
+        let bytes = read_pinned(slot, MAX_RECEIPT_BYTES)?.1;
+        if codec::digest(&bytes) != recorded {
+            return Err(invalid(format!(
+                "{} does not hold the receipt this rollout staged",
+                slot.display()
+            )));
+        }
+        durable::atomic_write_mode(&self.state.join(RETIRED_RECEIPT), &bytes, 0o600)?;
+        fs::remove_file(slot)?;
+        durable::sync_directory(slot.parent().unwrap_or(Path::new("/")))
+    }
+
     /// A finished rollout (thawed, or aborted and fully unwound) is archived so
-    /// any candidate, under any manifest, can start afresh; an unwind that is
-    /// unrecorded or under a held fence never is.
+    /// a new one can start: a thawed one by any manifest (nothing is open), an
+    /// aborted one only by its opener. An unwind that is unrecorded or under a
+    /// held fence never is.
     fn archive_finished(&self) -> Result<()> {
         let Some(journal) = self.journal()? else {
             return Ok(());
@@ -1996,8 +2023,7 @@ impl Rollout {
         let kind = match journal.phase {
             Phase::Thawed => "thawed",
             Phase::Aborted => {
-                // "No live fence" only means something under the same bindings.
-                self.require_binding(&journal)?;
+                self.require_opener(&journal)?;
                 if let Some(token) = self.live_fence()? {
                     return Err(invalid(format!(
                         "the aborted rollout is not fully unwound: Harbor holds writer fence {token}"
@@ -2008,58 +2034,50 @@ impl Rollout {
                         "the aborted rollout is not fully unwound: its reopen is unrecorded",
                     ));
                 }
+                // A journal aborted before slots were retired at the transition.
+                self.retire_slot(&journal)?;
                 "aborted"
             }
             _ => return Ok(()),
         };
-        let seconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| invalid("clock precedes the epoch"))?
-            .as_secs();
-        // The import slot the rollout staged into would read as an unrecorded
-        // receipt to the next rollout: keep its bytes beside the archive first,
-        // so a retry after a crash finds the slot already gone and archives
-        // only the journal. Only a private root file holding exactly the
-        // recorded receipt moves, so a tampered journal cannot steer this.
-        let slot = match &journal.written {
-            Some(written) => written.staged_slot.clone(),
-            None => Some(self.manifest.import_slot.clone()),
-        };
-        let metadata = match slot.as_deref().map(fs::symlink_metadata) {
-            None => None,
-            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Some(Err(error)) => return Err(error.into()),
-            Some(Ok(metadata)) => Some(metadata),
-        };
-        if let (Some(slot), Some(metadata), Some(recorded)) =
-            (slot.as_deref(), metadata, journal.receipt_sha256.as_deref())
-        {
-            trusted_file(&metadata, slot, euid())?;
-            let mut bytes = Vec::new();
-            durable::open_regular(slot, false)?
-                .take(MAX_RECEIPT_BYTES + 1)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() as u64 > MAX_RECEIPT_BYTES || codec::digest(&bytes) != recorded {
-                return Err(invalid(format!(
-                    "{} does not hold the receipt this rollout staged",
-                    slot.display()
-                )));
+        // One collision-free id for the receipt and journal of an archive:
+        // the next sequence number, published with no-replace hard links (a
+        // taken name fails with EEXIST and the next is tried), so nothing is
+        // ever overwritten. A retry after a crash takes a new id.
+        let receipt = self.state.join(RETIRED_RECEIPT);
+        let has_receipt = writer_fence::exists(&receipt);
+        let mut id = (self.archives()?.iter())
+            .filter_map(|name| name.split('.').nth(1)?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        loop {
+            id += 1;
+            let archived = |name: &str| self.state.join(format!("rollout.{id}.{name}.json"));
+            if has_receipt {
+                match fs::hard_link(&receipt, archived("receipt")) {
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    other => other?,
+                }
             }
-            durable::atomic_write_mode(
-                &self.state.join(format!("rollout.{seconds}.receipt.json")),
-                &bytes,
-                0o600,
-            )?;
-            fs::remove_file(slot)?;
-            durable::sync_directory(slot.parent().unwrap_or(Path::new("/")))?;
+            match fs::hard_link(self.journal_path(), archived(kind)) {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if has_receipt {
+                        fs::remove_file(archived("receipt"))?;
+                    }
+                }
+                other => break other?,
+            }
         }
-        // A hard link never replaces an earlier archive.
-        fs::hard_link(
-            self.journal_path(),
-            self.state.join(format!("rollout.{seconds}.{kind}.json")),
-        )?;
+        if has_receipt {
+            fs::remove_file(&receipt)?;
+        }
         fs::remove_file(self.journal_path())?;
-        durable::sync_directory(&self.state)
+        durable::sync_directory(&self.state)?;
+        // Its opening manifest no longer needs to survive GC.
+        match fs::remove_file(self.gcroots.join(GC_ROOT)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => Ok(other?),
+        }
     }
 
     fn execution_lease(&self) -> Result<Option<durable::Lease>> {
@@ -2086,7 +2104,7 @@ impl Rollout {
         let mut opening = None;
         let retained = self.journal()?;
         if let Some(journal) = &retained {
-            self.require_binding(journal)?;
+            self.require_opener(journal)?;
         }
         if let Some(token) = adopt_startup_token {
             return self.abort_inhibition(retained.is_some(), &token);
@@ -2148,6 +2166,7 @@ impl Rollout {
         }
         if journal.phase != Phase::Aborted {
             self.reopen(&mut journal, opening.as_deref())?;
+            self.retire_slot(&journal)?;
             journal.phase = Phase::Aborted;
             self.save(&journal)?;
         }
@@ -2331,6 +2350,7 @@ mod tests {
                 "control",
                 "state",
                 "startup",
+                "gcroots",
             ] {
                 fs::create_dir(p(dir)).unwrap();
             }
@@ -2452,6 +2472,7 @@ esac"#,
             // A build sandbox's `/` need not be root-owned.
             rollout.anchor = self.root.path().to_owned();
             rollout.service_owner = Some((euid(), unsafe { libc::getegid() }));
+            rollout.gcroots = self.p("gcroots");
             Ok(rollout)
         }
 
@@ -2540,10 +2561,12 @@ esac"#,
         assert!(f.rollout().run(Action::Adopt).is_err());
 
         let other = f.load(&f.manifest("other.json", 5)).unwrap();
-        let error = other.run(Action::Prepare).unwrap_err().to_string();
-        assert!(error.contains("another manifest"), "{error}");
-        // A different manifest of the same primary may still unwind the fence.
-        assert_eq!(other.run(NO_ADOPTION).unwrap()["phase"], "aborted");
+        for action in [Action::Prepare, NO_ADOPTION] {
+            let error = other.run(action).unwrap_err().to_string();
+            assert!(error.contains("opened by"), "{error}");
+        }
+        // Only the opening manifest unwinds it.
+        assert_eq!(f.rollout().run(NO_ADOPTION).unwrap()["phase"], "aborted");
         assert_eq!(f.unit("a.service"), "active");
     }
 
@@ -2649,9 +2672,6 @@ esac"#,
         // The staged copy is reused, so the retry reaches admission.
         let error = import();
         assert!(error.contains("not admitted"), "{error}");
-        // The slot is journaled, so any manifest finishing the rollout archives it.
-        let written = rollout.journal().unwrap().unwrap().written.unwrap();
-        assert_eq!(written.staged_slot, Some(f.p("import/receipt.json")));
         fs::set_permissions(
             f.p("import/receipt.json"),
             fs::Permissions::from_mode(0o600),
@@ -3036,48 +3056,6 @@ esac"#,
         }
     }
 
-    #[test]
-    fn another_manifest_unwinds_only_under_the_opening_bindings() {
-        let f = Fixture::new(0);
-        let rollout = f.rollout();
-        rollout.run(FENCE).unwrap();
-        // A superseding manifest whose authority (fence) state moved elsewhere.
-        let mut maintenance: Value =
-            serde_json::from_slice(&fs::read(f.p("maintenance.json")).unwrap()).unwrap();
-        maintenance["state_dir"] = json!(f.p("authority-moved"));
-        fs::write(f.p("maintenance-moved.json"), maintenance.to_string()).unwrap();
-        let moved = f.manifest("moved.json", 2);
-        let mut manifest: Value = serde_json::from_slice(&fs::read(&moved).unwrap()).unwrap();
-        manifest["maintenance"] = json!(f.p("maintenance-moved.json"));
-        fs::write(&moved, manifest.to_string()).unwrap();
-        let error = f
-            .load(&moved)
-            .unwrap()
-            .run(NO_ADOPTION)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains(&format!("--config {}", f.p("rollout.json").display())),
-            "{error}"
-        );
-        assert!(!f.calls().contains("fence-close"));
-        // The same bindings under another manifest still unwind it.
-        let other = f.load(&f.manifest("other.json", 5)).unwrap();
-        assert_eq!(other.run(NO_ADOPTION).unwrap()["phase"], "aborted");
-        // "No live fence" under moved bindings says nothing: never archive.
-        let error = f.load(&moved).unwrap().run(FENCE).unwrap_err().to_string();
-        assert!(error.contains("--config"), "{error}");
-        assert!(rollout.archives().unwrap().is_empty());
-        // A journal without a recorded binding is the opening manifest's alone.
-        let mut journal = rollout.journal().unwrap().unwrap();
-        journal.phase = Phase::Fenced;
-        journal.reopened = false;
-        journal.maintenance_sha256 = None;
-        rollout.save(&journal).unwrap();
-        assert!(other.run(NO_ADOPTION).is_err());
-        assert_eq!(rollout.run(NO_ADOPTION).unwrap()["phase"], "aborted");
-    }
-
     /// Fake a ready hand-off export that preparation reported as `backup_id`.
     fn reported(f: &Fixture, backup_id: &str) {
         fs::write(
@@ -3127,38 +3105,152 @@ esac"#,
         let mut journal = rollout.journal().unwrap().unwrap();
         journal.phase = Phase::Prepared;
         journal.receipt_sha256 = Some(codec::digest(bytes));
-        journal.written.as_mut().unwrap().staged_slot = Some(slot);
         rollout.save(&journal).unwrap();
     }
 
     #[test]
-    fn another_manifest_unwinds_what_the_opening_run_wrote() {
+    fn another_manifest_is_refused_and_named() {
         let f = Fixture::new(0);
         let rollout = f.rollout();
         rollout.run(FENCE).unwrap();
-        let drop_in = f.p("control/pub.service.d").join(PAUSE_DROP_IN);
-        assert!(drop_in.exists());
-        let bytes = br#"{"status":"ready"}"#;
-        staged(&f, &rollout, "import/receipt.json", bytes);
-        // B: same bindings, but it no longer pauses pub.service and stages elsewhere.
-        let path = f.manifest("b.json", 2);
-        let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        manifest["paused_publishers"] = json!([]);
-        manifest["import_slot"] = json!(f.p("import-b/receipt.json"));
-        fs::write(&path, manifest.to_string()).unwrap();
-        let b = f.load(&path).unwrap();
-        assert_eq!(b.run(NO_ADOPTION).unwrap()["phase"], "aborted");
-        assert!(!drop_in.exists(), "A's pause drop-in stays behind");
-        assert_eq!(f.unit("pub.service"), "active");
-        assert_eq!(b.run(FENCE).unwrap()["phase"], "fenced");
-        assert!(
-            !f.p("import/receipt.json").exists(),
-            "A's receipt stays behind"
+        let other = f.load(&f.manifest("other.json", 5)).unwrap();
+        let opener = format!("--config {}", f.p("rollout.json").display());
+        let before = f.calls();
+        let mut journal = rollout.journal().unwrap().unwrap();
+        for phase in [Phase::Fenced, Phase::Aborted] {
+            journal.phase = phase;
+            journal.reopened = phase == Phase::Aborted;
+            rollout.save(&journal).unwrap();
+            for action in [NO_ADOPTION, FENCE, NEXT, Action::Prepare] {
+                let error = other.run(action).unwrap_err().to_string();
+                assert!(error.contains(&opener), "{phase:?}: {error}");
+            }
+        }
+        assert_eq!(
+            f.calls()[before.len()..].matches("systemctl stop").count(),
+            0
         );
-        let receipt = (b.archives().unwrap().into_iter())
-            .find(|name| name.ends_with(".receipt.json"))
+        // A thawed rollout leaves nothing open: any manifest archives it.
+        journal.phase = Phase::Thawed;
+        rollout.save(&journal).unwrap();
+        fs::remove_file(f.p("authority/writer-fence.json")).unwrap();
+        assert_eq!(other.run(FENCE).unwrap()["phase"], "fenced");
+    }
+
+    #[test]
+    fn the_opening_manifest_is_rooted_while_its_journal_is_open() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        let root = f.p("gcroots").join(GC_ROOT);
+        rollout.run(FENCE).unwrap();
+        assert_eq!(fs::read_link(&root).unwrap(), f.p("rollout.json"));
+        rollout.run(NO_ADOPTION).unwrap();
+        assert!(fs::symlink_metadata(&root).is_ok());
+        rollout.archive_finished().unwrap();
+        assert!(fs::symlink_metadata(&root).is_err());
+        // No stray staging link is left in the roots directory.
+        assert_eq!(fs::read_dir(f.p("gcroots")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn rollout_units_each_have_one_role() {
+        let f = Fixture::new(0);
+        for (field, value) in [
+            ("retired_clients", json!(["pub.service"])),
+            ("receiver_units", json!(["a.service"])),
+            ("clients", json!(["postgresql.service"])),
+            ("receiver_units", json!(["setup.service"])),
+            ("clients", json!(["a@.service"])),
+        ] {
+            let edited = edit_manifest(&f, |m| {
+                m[field] = value.clone();
+                if value == json!(["a@.service"]) {
+                    m["paused_publishers"] = json!(["a@backup.service"]);
+                }
+            });
+            let error = edited
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+            assert!(error.contains("one role"), "{field}={value}: {error}");
+            f.manifest("rollout.json", 2);
+        }
+        // A client may be retired too (stopped, never restarted).
+        assert!(edit_manifest(&f, |m| m["retired_clients"] = json!(["a.service"])).is_ok());
+    }
+
+    #[test]
+    fn a_static_preparation_failure_is_refused_before_the_fence() {
+        let f = Fixture::new(0);
+        fs::create_dir(f.p("export")).unwrap();
+        fs::set_permissions(f.p("export"), fs::Permissions::from_mode(0o755)).unwrap();
+        let rollout = edit_manifest(&f, |m| {
+            m["prepare"]["provision_directories"] =
+                json!([{"path": f.p("export"), "group": "users", "mode": 0o750}])
+        })
+        .unwrap();
+        // An existing export root (perhaps a mountpoint) the worker cannot
+        // write is never re-owned: fencing refuses before any side effect.
+        let error = rollout.run(FENCE).unwrap_err().to_string();
+        assert!(error.contains("never re-owned"), "{error}");
+        let read_only = |f: &Fixture| {
+            let calls = fs::read_to_string(f.p("calls.log")).unwrap_or_default();
+            assert!(
+                calls
+                    .lines()
+                    .all(|line| line.starts_with("systemctl show ")),
+                "{calls}"
+            );
+        };
+        read_only(&f);
+        assert!(rollout.journal().unwrap().is_none());
+        assert_eq!(fs::metadata(f.p("export")).unwrap().mode() & 0o7777, 0o755);
+        // An absent one must be creatable: not below a directory others write
+        // (even a sticky one, where its name could be taken first).
+        fs::remove_dir(f.p("export")).unwrap();
+        fs::create_dir(f.p("shared")).unwrap();
+        fs::set_permissions(f.p("shared"), fs::Permissions::from_mode(0o1777)).unwrap();
+        let rollout =
+            edit_manifest(
+                &f,
+                |m| {
+                    m["prepare"]["provision_directories"] =
+                        json!([{"path": f.p("shared/export"), "group": "users", "mode": 0o750}])
+                },
+            )
             .unwrap();
-        assert_eq!(fs::read(f.p("state").join(receipt)).unwrap(), bytes);
+        let error = rollout.run(FENCE).unwrap_err().to_string();
+        assert!(error.contains("untrusted ancestry"), "{error}");
+        read_only(&f);
+        // Creatable, it fences.
+        fs::set_permissions(f.p("shared"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(rollout.run(FENCE).unwrap()["phase"], "fenced");
+    }
+
+    #[test]
+    fn archives_finished_in_the_same_second_never_overwrite_each_other() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        for receipt in [br#"{"n":1}"#, br#"{"n":2}"#] {
+            rollout.run(FENCE).unwrap();
+            staged(&f, &rollout, "import/receipt.json", receipt);
+            rollout.run(NO_ADOPTION).unwrap();
+            rollout.archive_finished().unwrap();
+        }
+        let archives = rollout.archives().unwrap();
+        assert_eq!(
+            archives,
+            [
+                "rollout.1.aborted.json",
+                "rollout.1.receipt.json",
+                "rollout.2.aborted.json",
+                "rollout.2.receipt.json"
+            ],
+        );
+        for (id, receipt) in [(1, br#"{"n":1}"#), (2, br#"{"n":2}"#)] {
+            let archived = f.p("state").join(format!("rollout.{id}.receipt.json"));
+            assert_eq!(fs::read(archived).unwrap(), receipt);
+        }
     }
 
     #[test]
@@ -3255,28 +3347,6 @@ esac"#,
     }
 
     #[test]
-    fn the_opening_runs_retirement_decides_what_an_abort_restarts() {
-        let f = Fixture::new(0);
-        // A retires b.service; B retires a.service instead.
-        let a = edit_manifest(&f, |m| m["retired_clients"] = json!(["b.service"])).unwrap();
-        a.run(FENCE).unwrap();
-        assert_eq!(
-            a.journal().unwrap().unwrap().kept_down,
-            Some(vec!["b.service".to_owned()])
-        );
-        let path = f.manifest("b.json", 2);
-        let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        manifest["retired_clients"] = json!(["a.service"]);
-        fs::write(&path, manifest.to_string()).unwrap();
-        assert_eq!(
-            f.load(&path).unwrap().run(NO_ADOPTION).unwrap()["phase"],
-            "aborted"
-        );
-        assert_eq!(f.unit("a.service"), "active");
-        assert_eq!(f.unit("b.service"), "inactive");
-    }
-
-    #[test]
     fn files_other_writers_control_are_read_through_one_pinned_descriptor() {
         let f = Fixture::new(0);
         let rollout = f.rollout();
@@ -3340,40 +3410,11 @@ esac"#,
         }
         // A later generation's additive fields, unknown to this one.
         journal["transported"] = json!({"receipt": "/srv/x", "sha256": "0".repeat(64)});
-        journal["written"]["future"] = json!(["/run/x"]);
+        journal["future"] = json!({"written": ["/run/x"]});
         durable::write_json(&path, &journal).unwrap();
         assert_eq!(rollout.status().unwrap()["phase"], "fenced");
         assert_eq!(rollout.run(NO_ADOPTION).unwrap()["phase"], "aborted");
         assert_eq!(f.unit("postgresql.service"), "active");
-    }
-
-    #[test]
-    fn a_tampered_journal_never_steers_removal_or_archival() {
-        let f = Fixture::new(0);
-        let rollout = f.rollout();
-        rollout.run(FENCE).unwrap();
-        // A root-private file the journal could be made to name.
-        let victim = f.p("data/victim.json");
-        fs::write(&victim, b"{}").unwrap();
-        fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
-        let mut journal = rollout.journal().unwrap().unwrap();
-        let written = journal.written.as_mut().unwrap();
-        written.pause_drop_ins.push(victim.clone());
-        rollout.save(&journal).unwrap();
-        let error = rollout.run(NO_ADOPTION).unwrap_err().to_string();
-        assert!(error.contains("pause drop-in"), "{error}");
-        assert!(victim.exists());
-        // Unwound, but naming a slot that does not hold the recorded receipt.
-        let mut journal = rollout.journal().unwrap().unwrap();
-        let written = journal.written.as_mut().unwrap();
-        written.pause_drop_ins.retain(|file| *file != victim);
-        written.staged_slot = Some(victim.clone());
-        journal.receipt_sha256 = Some(codec::digest(b"other"));
-        rollout.save(&journal).unwrap();
-        rollout.run(NO_ADOPTION).unwrap();
-        let error = rollout.run(FENCE).unwrap_err().to_string();
-        assert!(error.contains("does not hold the receipt"), "{error}");
-        assert_eq!(fs::read(&victim).unwrap(), b"{}");
     }
 
     #[test]

@@ -557,6 +557,30 @@ in {
         message = "The rollout coordinator needs recovery, recoveryPreparation with an off-host receipt import file and an export command (the executor hand-off), and an explicit client inventory.";
       }
       {
+        # Mirrors the coordinator: each unit has one role (templates cover
+        # their instances), e.g. a retired client must not be a paused
+        # publisher, which the lifted pause would restart.
+        assertion = let
+          template = pattern: unit:
+            lib.hasSuffix "@.service" pattern
+            && unit != pattern
+            && lib.hasSuffix ".service" unit
+            && lib.hasPrefix (lib.removeSuffix ".service" pattern) unit;
+          overlap = a: b: a == b || template a b || template b a;
+          roles = [
+            (rollout.clients ++ rollout.retiredClients)
+            rollout.pausedPublishers
+            rollout.receiverUnits
+            cfg.writerFence.setupUnits
+            ["postgresql.service"]
+          ];
+          disjoint = xs: ys: lib.all (x: lib.all (y: !(overlap x y)) ys) xs;
+          pairs = lib.concatLists (lib.imap0 (i: xs: map (ys: disjoint xs ys) (lib.drop (i + 1) roles)) roles);
+        in
+          rollout == null || lib.all lib.id pairs;
+        message = "Rollout units must each have one role: clients and retired clients, paused publishers, receivers, setup units and postgresql.service may not overlap (templates included).";
+      }
+      {
         # Mirrors the coordinator: systemd splits these property values on
         # whitespace (LoadCredential on `:`).
         assertion = let

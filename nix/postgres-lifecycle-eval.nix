@@ -381,7 +381,13 @@ in
           && lib.all (path: !accepted (rollout path)) ["/srv/harbor-db/ex port" "/srv/harbor-db/ex\tport" "/srv/harbor-db/ex%h" "/srv/harbor-db/ex\\port" "/srv/harbor-db/ex'port"]
           && !accepted (preparation "readWritePaths" ["/srv/backups /srv/postgres/18" "/srv/disposable"])
           && !accepted (preparation "supplementaryGroups" ["users wheel"])
-          && !accepted (preparation "offHostReceiptImportFile" "/srv/import/off:host.json");
+          && !accepted (preparation "offHostReceiptImportFile" "/srv/import/off:host.json")
+          # Each unit has one role: a retired client is never a paused publisher.
+          && lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout units must each have one role" entry.message)) withRollout.config.assertions
+          && lib.any (entry: !entry.assertion && lib.hasPrefix "Rollout units must each have one role" entry.message)
+          (withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.retiredClients = ["fixture-backup.service"];}];}).config.assertions
+          && lib.any (entry: !entry.assertion && lib.hasPrefix "Rollout units must each have one role" entry.message)
+          (withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.receiverUnits = ["postgresql.service"];}];}).config.assertions;
         message = "A rollout replaces the legacy pre-switch preparation with its activation guard and refuses systemd property values that split into extra entries.";
       }
       {
