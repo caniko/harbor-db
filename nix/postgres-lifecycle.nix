@@ -591,6 +591,24 @@ in {
         message = "Rollout paused publishers, receivers and setup units must name units, not templates, and the export root must not also be a recoveryPreparation provision directory.";
       }
       {
+        # Mirrors the coordinator's manifest load, so a generation it cannot
+        # run fails at evaluation instead of at activation.
+        assertion = let
+          units = rollout.clients ++ rollout.retiredClients ++ rollout.receiverUnits ++ rollout.pausedPublishers ++ cfg.writerFence.setupUnits;
+          validUnit = unit: builtins.match "[A-Za-z0-9_@.:-]+[.]service" unit != null;
+          disjoint = a: b: a != b && !(lib.hasPrefix "${a}/" b) && !(lib.hasPrefix "${b}/" a);
+          roots = ["/var/lib/harbor-db/postgresql-rollout" cfg.stateDir pg.dataDir];
+          valid =
+            cfg.recovery.requireWriterFence
+            && cfg.recovery.repositoryProtocol == "legacy"
+            && lib.all validUnit units
+            && rollout.executor.command != []
+            && lib.all (disjoint rollout.exportRoot) roots;
+        in
+          rollout == null || cfg.recovery == null || valid;
+        message = "Rollout coordinator: recovery must require the writer fence over the legacy repository protocol, units must be `.service` names, the executor command non-empty, and the export root apart from the journal root (/var/lib/harbor-db/postgresql-rollout), the identity state directory and the PostgreSQL data directory.";
+      }
+      {
         # Mirrors the coordinator: systemd splits these property values on
         # whitespace (LoadCredential on `:`).
         assertion = let

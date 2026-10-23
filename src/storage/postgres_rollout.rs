@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 const PAUSE_DROP_IN: &str = "zz-harbor-db-rollout-pause.conf";
 const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
+/// Record snapshots carry per-table records; still bounded.
+const MAX_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 /// The journal root is fixed, so every manifest of a primary (including a
 /// superseded one) finds the same journal and no manifest can relocate it.
 const STATE_ROOT: &str = "/var/lib/harbor-db/postgresql-rollout";
@@ -550,6 +552,16 @@ impl Rollout {
         {
             return Err(invalid("invalid rollout manifest or primary binding"));
         }
+        // Source-local repositories prepare from a selected capture without a
+        // preparation binding the coordinator could hand off; not supported.
+        if !matches!(
+            super::recovery_repository::source_local(&maintenance["recovery"]),
+            Ok(false)
+        ) {
+            return Err(invalid(
+                "the rollout coordinator requires the legacy recovery repository protocol",
+            ));
+        }
         // Only clients are enumerated from active units, so only they may be
         // templates; publishers, receivers and setup units are acted on by name.
         if (manifest.paused_publishers.iter())
@@ -919,7 +931,14 @@ impl Rollout {
     /// A never-loaded or collected (`--collect`) worker reads `not-found`
     /// (systemctl still exits 0) and is idle; any other unknown state is busy.
     fn preparing(&self) -> Result<bool> {
-        let output = self.systemctl(&["show", PREPARE_UNIT, "--property=LoadState,ActiveState"])?;
+        let (loaded, state) = self.unit_state(PREPARE_UNIT)?;
+        Ok(loaded && !matches!(state.as_str(), "inactive" | "failed"))
+    }
+
+    /// Whether `unit` is loaded (not `not-found`, which systemctl reports with
+    /// exit 0 for a never-loaded or collected unit) and its ActiveState.
+    fn unit_state(&self, unit: &str) -> Result<(bool, String)> {
+        let output = self.systemctl(&["show", unit, "--property=LoadState,ActiveState"])?;
         let text = String::from_utf8_lossy(&output.stdout);
         let value = |key: &str| {
             text.lines()
@@ -927,8 +946,7 @@ impl Rollout {
                 .unwrap_or_default()
                 .to_owned()
         };
-        Ok(value("LoadState=") != "not-found"
-            && !matches!(value("ActiveState=").as_str(), "inactive" | "failed"))
+        Ok((value("LoadState=") != "not-found", value("ActiveState=")))
     }
 
     fn active_clients(&self) -> Result<Vec<String>> {
@@ -964,6 +982,30 @@ impl Rollout {
         self.systemctl(&["start", "--", unit]).map(drop)
     }
 
+    /// Start a client, receiver or publisher without waiting for it to finish:
+    /// a oneshot (a base backup can run for an hour) completes only when its
+    /// command exits, which would outlast any bound. The job is queued, then
+    /// the unit must be running or have ended without failing.
+    fn start_queued(&self, unit: &str) -> Result<()> {
+        let _ = self.systemctl(&["reset-failed", "--", unit]);
+        self.systemctl(&["--no-block", "start", "--", unit])
+            .map_err(|error| invalid(format!("starting {unit}: {error}")))?;
+        let deadline = Instant::now() + Duration::from_secs(self.manifest.setup_settle_seconds);
+        loop {
+            let (_, state) = self.unit_state(unit)?;
+            match state.as_str() {
+                "active" | "activating" | "reloading" => return Ok(()),
+                "failed" => return Err(invalid(format!("{unit} failed to start"))),
+                // A queued job is still pending; with none, a oneshot ended.
+                _ if self.show(unit, "Job")?.is_empty() => return Ok(()),
+                _ if Instant::now() >= deadline => {
+                    return Err(invalid(format!("{unit} did not start")));
+                }
+                _ => std::thread::sleep(Duration::from_millis(250)),
+            }
+        }
+    }
+
     fn stop(&self, unit: &str) -> Result<()> {
         self.systemctl(&["stop", "--", unit])?;
         match self.show(unit, "ActiveState")?.as_str() {
@@ -974,6 +1016,65 @@ impl Rollout {
 
     /// Start the primary, then wait for the declared setup units: they connect
     /// as the control role right after startup and must not race inspection.
+    /// Stopping the primary also stops every unit that Requires or BindsTo it
+    /// (through targets such as `postgresql.target`). Record the active ones
+    /// first so reopen restores them: as clients, or as pending receivers.
+    /// Retired clients, setup units and paused publishers are not restored
+    /// this way (they have their own handling); only services are recorded.
+    fn stop_primary(&self, journal: &mut Journal) -> Result<()> {
+        let primary = self.primary_unit().to_owned();
+        let mut seen = vec![primary.clone()];
+        let mut queue = vec![primary.clone()];
+        let mut recorded = false;
+        while let Some(unit) = queue.pop() {
+            let output =
+                self.systemctl(&["show", &unit, "--property=RequiredBy,BoundBy,ConsistsOf"])?;
+            let dependents: Vec<String> = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_once('=').map(|(_, units)| units.to_owned()))
+                .flat_map(|units| {
+                    units
+                        .split_whitespace()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            for dependent in dependents {
+                if seen.contains(&dependent) {
+                    continue;
+                }
+                seen.push(dependent.clone());
+                queue.push(dependent.clone());
+                let excluded = !valid_unit(&dependent)
+                    || (self.manifest.retired_clients.iter())
+                        .any(|pattern| unit_matches(pattern, &dependent))
+                    || self.manifest.setup_units.contains(&dependent)
+                    || self.manifest.paused_publishers.contains(&dependent);
+                if excluded {
+                    continue;
+                }
+                let (loaded, state) = self.unit_state(&dependent)?;
+                if !loaded || !matches!(state.as_str(), "active" | "activating" | "reloading") {
+                    continue;
+                }
+                let list = if self.manifest.receiver_units.contains(&dependent) {
+                    &mut journal.pending_receivers
+                } else {
+                    &mut journal.clients
+                };
+                if !list.contains(&dependent) {
+                    list.push(dependent);
+                    recorded = true;
+                }
+            }
+        }
+        if recorded {
+            journal.clients.sort();
+            self.save(journal)?;
+        }
+        self.stop(&primary)
+    }
+
     /// Fencing requires setup to have succeeded (a oneshot ends `inactive`);
     /// unwinding only waits, since refusing there would keep writers down.
     fn start_primary(&self, require_setup: bool) -> Result<()> {
@@ -1220,11 +1321,14 @@ impl Rollout {
         }
         self.systemctl(&["daemon-reload"])?;
         for unit in &self.manifest.paused_publishers {
+            // A publisher the running generation lacks (the candidate brings
+            // it) is not loaded: nothing to stop, and `stop` would exit 5.
+            let (loaded, state) = self.unit_state(unit)?;
+            if !loaded || matches!(state.as_str(), "inactive" | "failed") {
+                continue;
+            }
             // Recorded before stopping, so abort or thaw restarts it.
-            let state = self.show(unit, "ActiveState")?;
-            if !matches!(state.as_str(), "inactive" | "failed")
-                && !journal.stopped_publishers.contains(unit)
-            {
+            if !journal.stopped_publishers.contains(unit) {
                 journal.stopped_publishers.push(unit.clone());
                 self.save(journal)?;
             }
@@ -1326,6 +1430,86 @@ impl Rollout {
         Ok(())
     }
 
+    /// The record snapshot and preparation binding Harbor's preparation left
+    /// (postgres-written: read pinned and bounded).
+    fn evidence(&self) -> Result<[(PathBuf, Option<Value>); 2]> {
+        let read = |path: PathBuf| -> Result<(PathBuf, Option<Value>)> {
+            if !writer_fence::exists(&path) {
+                return Ok((path, None));
+            }
+            let value = codec::decode(&read_pinned(&path, MAX_EVIDENCE_BYTES)?.1)?;
+            Ok((path, Some(value)))
+        };
+        let snapshot = super::string(&self.maintenance["recovery"], "snapshot_file")?;
+        Ok([
+            read(PathBuf::from(snapshot))?,
+            read(self.evidence_dir()?.join("preparation.json"))?,
+        ])
+    }
+
+    /// Before the fence no evidence can be this window's yet: a snapshot or
+    /// preparation binding from another window (or none) would only fail
+    /// `prepare` once production is fenced. It is never removed implicitly.
+    fn refuse_stale_evidence(&self, journal: &Journal) -> Result<()> {
+        let [snapshot, preparation] = self.evidence()?;
+        let resumed = snapshot.1.as_ref().is_some_and(|value| {
+            journal.fence_token.is_some()
+                && value["writer_fence_token"].as_str() == journal.fence_token.as_deref()
+        });
+        let stale: Vec<String> = [snapshot, preparation]
+            .into_iter()
+            .filter(|(_, value)| value.is_some() && !resumed)
+            .map(|(path, _)| path.display().to_string())
+            .collect();
+        if stale.is_empty() {
+            return Ok(());
+        }
+        Err(invalid(format!(
+            "recovery evidence from another writer window ({}) would fail preparation after the \
+             fence; move it aside, then rerun",
+            stale.join(", ")
+        )))
+    }
+
+    /// The prepared evidence is this rollout's only if its snapshot is bound to
+    /// this rollout's fence and its preparation binding is that snapshot's.
+    fn require_bound_evidence(&self, journal: &Journal) -> Result<()> {
+        let [(_, snapshot), (_, preparation)] = self.evidence()?;
+        let (Some(snapshot), Some(preparation)) = (snapshot, preparation) else {
+            return Err(invalid("preparation left no bound record snapshot"));
+        };
+        let bound = journal.fence_token.is_some()
+            && snapshot["writer_fence_token"].as_str() == journal.fence_token.as_deref()
+            && (preparation.as_object()).is_some_and(|fields| {
+                fields
+                    .iter()
+                    .all(|(key, value)| snapshot.get(key) == Some(value))
+            });
+        if !bound {
+            return Err(invalid(
+                "the prepared evidence is bound to another writer window (stale); abort, move it \
+                 aside and fence again",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Staging the receipt needs a root-private directory under root-owned
+    /// ancestry: an existing one must already be, an absent one creatable.
+    fn check_slot_directory(&self) -> Result<()> {
+        let directory = (self.manifest.import_slot.parent())
+            .ok_or_else(|| invalid("import slot has no directory"))?;
+        if let Some(metadata) = self.walk(directory, &[], false)?
+            && (metadata.uid() != euid() || metadata.mode() & 0o077 != 0)
+        {
+            return Err(invalid(format!(
+                "import slot directory {} must be private to root",
+                directory.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// Create a service directory as root without ever following a symlink.
     fn provision(&self, path: &Path, group: &str, mode: u32) -> Result<()> {
         // Never provision on the root filesystem below an absent mount.
@@ -1369,12 +1553,15 @@ impl Rollout {
         // Before any side effect: a refusal must leave production untouched.
         self.refuse_foreign_fence(journal, adopt)?;
         self.preflight_paths()?;
+        self.check_sandbox_paths()?;
+        self.check_slot_directory()?;
+        self.refuse_stale_evidence(journal)?;
         let authority = Path::new(super::string(&self.maintenance, "state_dir")?);
         self.provision(authority, "postgres", 0o700)?;
         self.inhibit(journal)?;
         self.pause_publishers(journal)?;
         self.stop_clients(journal)?;
-        self.stop(self.primary_unit())?;
+        self.stop_primary(journal)?;
         self.open_fence(journal, adopt)?;
         self.release_startup(journal, "prepared")?;
         self.start_primary(true)?;
@@ -1479,7 +1666,7 @@ impl Rollout {
     /// Start every unit; those that fail stay listed for the next retry.
     fn restart(&self, units: &mut Vec<String>) -> Result<()> {
         let mut first = None;
-        units.retain(|unit| match self.start(unit) {
+        units.retain(|unit| match self.start_queued(unit) {
             Ok(()) => false,
             Err(error) => {
                 first.get_or_insert(error);
@@ -1637,6 +1824,7 @@ impl Rollout {
             // Postgres-written evidence: read pinned and bounded.
             let evidence = self.evidence_dir()?.join("preparation.json");
             let preparation = codec::decode(&read_pinned(&evidence, MAX_RECEIPT_BYTES)?.1)?;
+            self.require_bound_evidence(journal)?;
             let (export, digest) = self.reported_export(&preparation)?;
             journal.export_sha256 = Some(digest);
             journal.export = Some(export);
@@ -1673,15 +1861,28 @@ impl Rollout {
             ));
         }
         // Stage the verified bytes, never a pathname the transport can still swap.
-        // An interrupted import may already have staged these exact bytes;
-        // reuse them, but never replace a different staged receipt.
+        // An interrupted import may already have staged these exact bytes:
+        // reuse them. A recorded receipt that failed admission is set aside
+        // for the new one; a slot that holds anything else is never replaced.
         let slot = &self.manifest.import_slot;
+        // Staging needs a root-private directory under root-owned ancestry.
+        let directory = slot
+            .parent()
+            .ok_or_else(|| invalid("import slot has no directory"))?;
+        self.walk(directory, &[], true)?;
         if let Ok(metadata) = fs::symlink_metadata(slot) {
             trusted_file(&metadata, slot, euid())?;
-            if codec::file_digest(slot)? != expected {
-                return Err(invalid(
-                    "import slot holds a different receipt; retain the writer window",
-                ));
+            let staged = read_pinned(slot, MAX_RECEIPT_BYTES)?.1;
+            let digest = codec::digest(&staged);
+            if digest != expected {
+                if journal.receipt_sha256.as_deref() != Some(digest.as_str()) {
+                    return Err(invalid(
+                        "import slot holds a different, unrecorded receipt; retain the writer window",
+                    ));
+                }
+                self.set_aside(&staged)?;
+                fs::remove_file(slot)?;
+                durable::sync_directory(directory)?;
             }
         }
         // Recorded before staging, so the finished rollout retires exactly it.
@@ -1768,14 +1969,14 @@ impl Rollout {
                 } else {
                     // Refuse an unadopted fence before touching the primary.
                     self.refuse_foreign_fence(journal, adopt)?;
-                    self.stop(self.primary_unit())?;
+                    self.stop_primary(journal)?;
                     self.open_fence(journal, adopt)?;
                     self.release_startup(journal, "prepared")?;
                 }
             }
             if let Some(token) = journal.fence_token.clone() {
                 self.inhibit(journal)?;
-                self.stop(self.primary_unit())?;
+                self.stop_primary(journal)?;
                 let closed = self.harbor_output(
                     true,
                     &[
@@ -1797,15 +1998,18 @@ impl Rollout {
             self.save(journal)?;
         }
         // Only the opening manifest unwinds, so its retirement policy decides.
-        for unit in &journal.clients {
-            let retired =
-                (self.manifest.retired_clients.iter()).any(|pattern| unit_matches(pattern, unit));
-            if !retired {
-                self.start(unit)?;
-            }
-        }
-        self.restart_receivers(journal)?;
-        self.lift_pause(journal)
+        // Every client, receiver and publisher is tried before the first
+        // failure is reported: one failing client must not keep the rest down.
+        let mut clients: Vec<String> = (journal.clients.iter())
+            .filter(|unit| {
+                !(self.manifest.retired_clients.iter()).any(|pattern| unit_matches(pattern, unit))
+            })
+            .cloned()
+            .collect();
+        let started = self.restart(&mut clients);
+        let receivers = self.restart_receivers(journal);
+        let lifted = self.lift_pause(journal);
+        started.and(receivers).and(lifted)
     }
 
     /// `activated` and `thaw` act on the deployed generation, so it must carry
@@ -2047,15 +2251,37 @@ impl Rollout {
         };
         trusted_file(&metadata, slot, euid())?;
         let bytes = read_pinned(slot, MAX_RECEIPT_BYTES)?.1;
-        if codec::digest(&bytes) != recorded {
-            return Err(invalid(format!(
-                "{} does not hold the receipt this rollout staged",
-                slot.display()
-            )));
+        if codec::digest(&bytes) == recorded {
+            durable::atomic_write_mode(&self.state.join(RETIRED_RECEIPT), &bytes, 0o600)?;
+        } else {
+            // Not what was recorded (an older staging left it truncated): keep
+            // it for inspection, but never let it hold the slot.
+            self.set_aside(&bytes)?;
         }
-        durable::atomic_write_mode(&self.state.join(RETIRED_RECEIPT), &bytes, 0o600)?;
         fs::remove_file(slot)?;
         durable::sync_directory(slot.parent().unwrap_or(Path::new("/")))
+    }
+
+    /// Keep receipt bytes that no longer hold the slot beside the journal,
+    /// as the next free `receipt.rejected.<n>.json`, never replacing one.
+    fn set_aside(&self, bytes: &[u8]) -> Result<PathBuf> {
+        let staging = self
+            .state
+            .join(format!(".receipt.rejected.{}", std::process::id()));
+        durable::atomic_write_mode(&staging, bytes, 0o600)?;
+        let mut kept = None;
+        for n in 1.. {
+            let target = self.state.join(format!("receipt.rejected.{n}.json"));
+            match fs::hard_link(&staging, &target) {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                linked => {
+                    kept = Some(linked.map(|()| target));
+                    break;
+                }
+            }
+        }
+        let _ = fs::remove_file(&staging);
+        Ok(kept.expect("an unbounded search ends")?)
     }
 
     /// A finished rollout (thawed, or aborted and fully unwound) is archived so
@@ -2069,7 +2295,14 @@ impl Rollout {
         let kind = match journal.phase {
             Phase::Thawed => "thawed",
             Phase::Aborted => {
-                self.require_opener(&journal)?;
+                // Fully unwound with its receipt (if any) already retired, an
+                // abort holds nothing of its opener's: any manifest archives it.
+                // Older journals, whose slot was never retired, need the opener.
+                let retired = journal.receipt_sha256.is_none()
+                    || writer_fence::exists(&self.state.join(RETIRED_RECEIPT));
+                if !(journal.reopened && retired) {
+                    self.require_opener(&journal)?;
+                }
                 if let Some(token) = self.live_fence()? {
                     return Err(invalid(format!(
                         "the aborted rollout is not fully unwound: Harbor holds writer fence {token}"
@@ -2080,8 +2313,9 @@ impl Rollout {
                         "the aborted rollout is not fully unwound: its reopen is unrecorded",
                     ));
                 }
-                // A journal aborted before slots were retired at the transition.
-                self.retire_slot(&journal)?;
+                if !retired {
+                    self.retire_slot(&journal)?;
+                }
                 "aborted"
             }
             _ => return Ok(()),
@@ -2225,6 +2459,13 @@ impl Rollout {
         if matches!(journal.phase, Phase::Activated | Phase::Thawed) {
             return Err(invalid(
                 "the candidate is activated; thaw with an acceptance instead of aborting",
+            ));
+        }
+        // Adopted but already installed is activated in all but the journal:
+        // aborting would skip the thaw's acceptance and cutover checks.
+        if journal.phase == Phase::Adopted && self.require_installed().is_ok() {
+            return Err(invalid(
+                "the candidate is activated; run `rollout activated`, then thaw with an acceptance",
             ));
         }
         if journal.phase != Phase::Aborted {
@@ -2432,13 +2673,13 @@ mod tests {
                 fs::write(p("units").join(unit), "active").unwrap();
             }
             fs::write(p("units/setup.service"), "inactive").unwrap();
-            fs::write(p("evidence/records.json"), "{}").unwrap();
             let log = p("calls.log");
             executable(
                 &p("systemctl"),
                 &format!(
                     r#"u={units}; log={log}
 echo "systemctl $*" >> "$log"
+[ "$1" = --no-block ] && shift
 case "$1" in
   list-units) for f in "$u"/*; do [ "$(cat "$f")" = active ] && echo "$(basename "$f") loaded active running x"; done ;;
   stop) echo inactive > "$u/$3" ;;
@@ -2451,6 +2692,9 @@ case "$1" in
     if [ "$3" = --property=LoadState,ActiveState ]; then
       if [ -f "$u/$unit" ]; then echo LoadState=loaded; echo "ActiveState=$(cat "$u/$unit")"
       else echo LoadState=not-found; echo ActiveState=inactive; fi; exit 0
+    fi
+    if [ "$3" = --property=RequiredBy,BoundBy,ConsistsOf ]; then
+      echo "RequiredBy=$(cat "$u/.deps-$unit" 2>/dev/null)"; echo BoundBy=; echo ConsistsOf=; exit 0
     fi
     if [ "$unit" = setup.service ] && [ -f "$u/.setup-polls" ]; then
       n=$(cat "$u/.setup-polls")
@@ -2701,7 +2945,7 @@ esac"#,
         assert!(!worker_ready(&rollout, &mut rollout.bound().unwrap()).unwrap());
         let calls = f.calls();
         assert!(calls.contains("systemctl stop -- r.service"), "{calls}");
-        assert!(calls.contains("systemctl start -- r.service"), "{calls}");
+        assert!(calls.contains("start -- r.service"), "{calls}");
         assert_eq!(f.unit("d.service"), "active");
     }
 
@@ -2743,7 +2987,7 @@ esac"#,
         .unwrap();
         fs::write(f.p("import/receipt.json"), br#"{"status":"other"}"#).unwrap();
         let error = import();
-        assert!(error.contains("different receipt"), "{error}");
+        assert!(error.contains("unrecorded receipt"), "{error}");
     }
 
     /// The worker's readiness, settled as `prepare` and `import` would.
@@ -2821,11 +3065,7 @@ esac"#,
         // A directory makes the fake systemctl's stop and show fail for r2.
         fs::create_dir(f.p("units/r2.service")).unwrap();
         assert!(worker_ready(&rollout, &mut rollout.bound().unwrap()).is_err());
-        assert!(
-            f.calls().contains("systemctl start -- r1.service"),
-            "{}",
-            f.calls()
-        );
+        assert!(f.calls().contains("start -- r1.service"), "{}", f.calls());
         assert_eq!(f.unit("r1.service"), "active");
     }
 
@@ -3133,6 +3373,13 @@ esac"#,
             json!({ "backup_id": backup_id }).to_string(),
         )
         .unwrap();
+        // Harbor's record snapshot: the same backup binding, under this fence.
+        fs::write(
+            f.p("evidence/records.json"),
+            json!({ "backup_id": backup_id, "version": 1, "writer_fence_token": TOKEN })
+                .to_string(),
+        )
+        .unwrap();
         fs::create_dir_all(f.p("export/backup-1")).unwrap();
         fs::write(f.p("export/backup-1/recovery-export.json"), "{}").unwrap();
     }
@@ -3170,12 +3417,276 @@ esac"#,
     fn staged(f: &Fixture, rollout: &Rollout, slot: &str, bytes: &[u8]) {
         let slot = f.p(slot);
         fs::create_dir_all(slot.parent().unwrap()).unwrap();
+        fs::set_permissions(slot.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(&slot, bytes).unwrap();
         fs::set_permissions(&slot, fs::Permissions::from_mode(0o400)).unwrap();
         let mut journal = rollout.journal().unwrap().unwrap();
         journal.phase = Phase::Prepared;
         journal.receipt_sha256 = Some(codec::digest(bytes));
         rollout.save(&journal).unwrap();
+    }
+
+    /// Insert a shell line into the fake systemctl, before it reads options.
+    fn inject(f: &Fixture, script: &str, line: &str) -> String {
+        let original = fs::read_to_string(f.p(script)).unwrap();
+        fs::write(
+            f.p(script),
+            original.replacen(
+                "[ \"$1\" = --no-block ] && shift",
+                &format!("{line}\n[ \"$1\" = --no-block ] && shift"),
+                1,
+            ),
+        )
+        .unwrap();
+        original
+    }
+
+    #[test]
+    fn long_running_starts_are_queued_not_awaited() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        // pub.service is an hour-long oneshot: a blocking start never returns
+        // within any bound (the fake makes it 30 seconds).
+        inject(
+            &f,
+            "systemctl",
+            "[ \"$*\" = \"start -- pub.service\" ] && sleep 30",
+        );
+        let started = Instant::now();
+        assert_eq!(rollout.run(NO_ADOPTION).unwrap()["phase"], "aborted");
+        assert!(started.elapsed() < Duration::from_secs(20));
+        let calls = f.calls();
+        for unit in ["pub.service", "a.service", "b.service"] {
+            assert!(
+                calls.contains(&format!("--no-block start -- {unit}")),
+                "{calls}"
+            );
+        }
+        // A queued start that fails is still reported.
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        inject(
+            &f,
+            "systemctl",
+            "[ \"$*\" = \"--no-block start -- a.service\" ] && { echo failed > \"$u/a.service\"; exit 0; }",
+        );
+        let error = rollout.run(NO_ADOPTION).unwrap_err().to_string();
+        assert!(error.contains("a.service failed to start"), "{error}");
+    }
+
+    #[test]
+    fn one_failing_client_never_keeps_the_rest_of_the_unwind_down() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| m["receiver_units"] = json!(["r.service"])).unwrap();
+        rollout.run(FENCE).unwrap();
+        let mut journal = rollout.journal().unwrap().unwrap();
+        journal.pending_receivers = vec!["r.service".into()];
+        rollout.save(&journal).unwrap();
+        let systemctl = fail_start(&f, "a.service");
+        let error = rollout.run(NO_ADOPTION).unwrap_err().to_string();
+        assert!(error.contains("a.service"), "{error}");
+        // b, the receiver and the publisher pause were all still handled.
+        assert_eq!(f.unit("b.service"), "active");
+        assert_eq!(f.unit("r.service"), "active");
+        assert!(!f.p("state/paused").exists());
+        fs::write(f.p("systemctl"), systemctl).unwrap();
+        assert_eq!(rollout.run(NO_ADOPTION).unwrap()["phase"], "aborted");
+        assert_eq!(f.unit("a.service"), "active");
+    }
+
+    #[test]
+    fn a_slot_not_holding_the_recorded_receipt_is_set_aside_not_wedging_abort() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        // An older staging left the slot truncated.
+        staged(&f, &rollout, "import/receipt.json", br#"{"status":"#);
+        let mut journal = rollout.journal().unwrap().unwrap();
+        journal.receipt_sha256 = Some(codec::digest(br#"{"status":"ready"}"#));
+        rollout.save(&journal).unwrap();
+        assert_eq!(rollout.run(NO_ADOPTION).unwrap()["phase"], "aborted");
+        assert!(!f.p("import/receipt.json").exists());
+        assert_eq!(
+            fs::read(f.p("state/receipt.rejected.1.json")).unwrap(),
+            br#"{"status":"#
+        );
+    }
+
+    #[test]
+    fn prepared_evidence_must_be_bound_to_this_rollouts_fence() {
+        let f = Fixture::new(0);
+        // Evidence an earlier window left is refused before the fence.
+        reported(&f, "backup-1");
+        let error = f.rollout().run(FENCE).unwrap_err().to_string();
+        assert!(error.contains("another writer window"), "{error}");
+        assert!(f.rollout().journal().unwrap().is_none());
+        fs::remove_file(f.p("evidence/records.json")).unwrap();
+        let error = f.rollout().run(FENCE).unwrap_err().to_string();
+        assert!(error.contains("preparation.json"), "{error}");
+        fs::remove_file(f.p("evidence/preparation.json")).unwrap();
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        // Preparation failed under this fence but left the old window's evidence.
+        reported(&f, "backup-1");
+        let snapshot = f.p("evidence/records.json");
+        let mut value = durable::read_json(&snapshot).unwrap();
+        value["writer_fence_token"] = json!("f".repeat(32));
+        fs::write(&snapshot, value.to_string()).unwrap();
+        let error = rollout.run(Action::Prepare).unwrap_err().to_string();
+        assert!(error.contains("another writer window"), "{error}");
+        // Bound to this fence, but not the snapshot's backup.
+        value["writer_fence_token"] = json!(TOKEN);
+        value["backup_id"] = json!("backup-0");
+        fs::write(&snapshot, value.to_string()).unwrap();
+        assert!(rollout.run(Action::Prepare).is_err());
+        assert_eq!(rollout.journal().unwrap().unwrap().phase, Phase::Fenced);
+        reported(&f, "backup-1");
+        assert_eq!(rollout.run(Action::Prepare).unwrap()["phase"], "prepared");
+    }
+
+    #[test]
+    fn an_installed_adopted_candidate_is_thawed_not_aborted() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        let mut journal = rollout.journal().unwrap().unwrap();
+        journal.phase = Phase::Adopted;
+        rollout.save(&journal).unwrap();
+        std::os::unix::fs::symlink(f.p("rollout.json"), f.p("installed.json")).unwrap();
+        let error = rollout.run(NO_ADOPTION).unwrap_err().to_string();
+        assert!(error.contains("run `rollout activated`"), "{error}");
+        // Not yet installed, an adopted rollout still aborts.
+        fs::remove_file(f.p("installed.json")).unwrap();
+        assert_eq!(rollout.run(NO_ADOPTION).unwrap()["phase"], "aborted");
+    }
+
+    #[test]
+    fn static_failures_of_the_hand_off_are_refused_before_the_fence() {
+        let f = Fixture::new(0);
+        // A writable path below a directory others can write.
+        fs::create_dir_all(f.p("shared/backups")).unwrap();
+        fs::set_permissions(f.p("shared"), fs::Permissions::from_mode(0o777)).unwrap();
+        let rollout = edit_manifest(&f, |m| {
+            m["prepare"]["read_write_paths"] = json!([f.p("shared/backups")])
+        })
+        .unwrap();
+        let error = rollout.run(FENCE).unwrap_err().to_string();
+        assert!(error.contains("untrusted ancestry"), "{error}");
+        f.manifest("rollout.json", 2);
+        // An import slot directory staging would refuse.
+        fs::create_dir(f.p("import")).unwrap();
+        fs::set_permissions(f.p("import"), fs::Permissions::from_mode(0o755)).unwrap();
+        let error = f.rollout().run(FENCE).unwrap_err().to_string();
+        assert!(error.contains("must be private to root"), "{error}");
+        let calls = fs::read_to_string(f.p("calls.log")).unwrap_or_default();
+        assert!(
+            calls
+                .lines()
+                .all(|line| line.starts_with("systemctl show ")),
+            "{calls}"
+        );
+        // `import` creates a missing one private before staging.
+        fs::remove_dir(f.p("import")).unwrap();
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        let mut journal = rollout.journal().unwrap().unwrap();
+        journal.phase = Phase::Prepared;
+        rollout.save(&journal).unwrap();
+        let receipt = f.p("receipt.json");
+        fs::write(&receipt, "{}").unwrap();
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+        let _ = rollout.run(Action::Import {
+            receipt,
+            sha256: codec::digest(b"{}"),
+        });
+        assert_eq!(fs::metadata(f.p("import")).unwrap().mode() & 0o7777, 0o700);
+    }
+
+    #[test]
+    fn source_local_recovery_is_refused_at_load() {
+        let f = Fixture::new(0);
+        let mut maintenance: Value =
+            serde_json::from_slice(&fs::read(f.p("maintenance.json")).unwrap()).unwrap();
+        maintenance["recovery"]["repository_protocol"] = json!("source-local-v1");
+        fs::write(f.p("maintenance.json"), maintenance.to_string()).unwrap();
+        let error = f.load(&f.p("rollout.json")).err().unwrap().to_string();
+        assert!(error.contains("legacy recovery repository"), "{error}");
+    }
+
+    #[test]
+    fn a_recorded_receipt_that_failed_admission_is_replaced() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        let rejected = br#"{"status":"stale"}"#;
+        staged(&f, &rollout, "import/receipt.json", rejected);
+        let fresh = br#"{"status":"ready"}"#;
+        let receipt = f.p("receipt.json");
+        fs::write(&receipt, fresh).unwrap();
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+        // Staging itself needs root; the replacement before it does not.
+        let _ = rollout.run(Action::Import {
+            receipt,
+            sha256: codec::digest(fresh),
+        });
+        assert_eq!(
+            fs::read(f.p("state/receipt.rejected.1.json")).unwrap(),
+            rejected
+        );
+        let journal = rollout.journal().unwrap().unwrap();
+        assert_eq!(journal.receipt_sha256, Some(codec::digest(fresh)));
+        if !root() {
+            assert!(!f.p("import/receipt.json").exists());
+        }
+    }
+
+    #[test]
+    fn publishers_the_running_generation_lacks_are_not_stopped() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| {
+            m["paused_publishers"] = json!(["pub.service", "ghost.service"])
+        })
+        .unwrap();
+        assert_eq!(rollout.run(FENCE).unwrap()["phase"], "fenced");
+        let calls = f.calls();
+        assert!(!calls.contains("stop -- ghost.service"), "{calls}");
+        assert_eq!(f.unit("pub.service"), "inactive");
+    }
+
+    #[test]
+    fn units_the_primary_stop_takes_down_are_restored() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| m["receiver_units"] = json!(["r.service"])).unwrap();
+        // postgresql.target Requires the primary; ml (not a client) and the
+        // receiver Require the target; setup is excluded.
+        fs::write(
+            f.p("units/.deps-postgresql.service"),
+            "postgresql.target setup.service",
+        )
+        .unwrap();
+        fs::write(f.p("units/.deps-postgresql.target"), "ml.service r.service").unwrap();
+        for unit in ["ml.service", "r.service"] {
+            fs::write(f.p("units").join(unit), "active").unwrap();
+        }
+        rollout.run(FENCE).unwrap();
+        let journal = rollout.journal().unwrap().unwrap();
+        assert!(
+            journal.clients.contains(&"ml.service".to_owned()),
+            "{:?}",
+            journal.clients
+        );
+        assert!(!journal.clients.iter().any(|unit| unit.ends_with(".target")));
+        assert!(!journal.clients.contains(&"setup.service".to_owned()));
+        assert_eq!(journal.pending_receivers, ["r.service"]);
+        // The stop took them down with the primary.
+        for unit in ["ml.service", "r.service"] {
+            fs::write(f.p("units").join(unit), "inactive").unwrap();
+        }
+        rollout.run(NO_ADOPTION).unwrap();
+        assert_eq!(f.unit("ml.service"), "active");
+        assert_eq!(f.unit("r.service"), "active");
     }
 
     #[test]
@@ -3299,24 +3810,32 @@ esac"#,
         let opener = format!("--config {}", f.p("rollout.json").display());
         let before = f.calls();
         let mut journal = rollout.journal().unwrap().unwrap();
-        for phase in [Phase::Fenced, Phase::Aborted] {
-            journal.phase = phase;
-            journal.reopened = phase == Phase::Aborted;
-            rollout.save(&journal).unwrap();
-            for action in [NO_ADOPTION, FENCE, NEXT, Action::Prepare] {
-                let error = other.run(action).unwrap_err().to_string();
-                assert!(error.contains(&opener), "{phase:?}: {error}");
-            }
+        for action in [NO_ADOPTION, FENCE, NEXT, Action::Prepare] {
+            let error = other.run(action).unwrap_err().to_string();
+            assert!(error.contains(&opener), "{error}");
+        }
+        // Fully unwound, an abort is still the opener's to step on, but
+        // archiving it (with no receipt left to retire) is anyone's.
+        journal.phase = Phase::Aborted;
+        journal.reopened = true;
+        rollout.save(&journal).unwrap();
+        fs::remove_file(f.p("authority/writer-fence.json")).unwrap();
+        for action in [NO_ADOPTION, Action::Prepare] {
+            let error = other.run(action).unwrap_err().to_string();
+            assert!(error.contains(&opener), "{error}");
         }
         assert_eq!(
             f.calls()[before.len()..].matches("systemctl stop").count(),
             0
         );
-        // A thawed rollout leaves nothing open: any manifest archives it.
-        journal.phase = Phase::Thawed;
-        rollout.save(&journal).unwrap();
-        fs::remove_file(f.p("authority/writer-fence.json")).unwrap();
         assert_eq!(other.run(FENCE).unwrap()["phase"], "fenced");
+        assert!(rollout.archives().unwrap()[0].ends_with(".aborted.json"));
+        // A thawed rollout leaves nothing open: any manifest archives it too.
+        let mut journal = other.journal().unwrap().unwrap();
+        journal.phase = Phase::Thawed;
+        other.save(&journal).unwrap();
+        fs::remove_file(f.p("authority/writer-fence.json")).unwrap();
+        assert_eq!(f.rollout().run(FENCE).unwrap()["phase"], "fenced");
     }
 
     #[test]

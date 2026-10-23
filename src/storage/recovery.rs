@@ -8,7 +8,7 @@ use std::{
     io::{Read, Write},
     os::{
         fd::RawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
+        unix::fs::{MetadataExt, PermissionsExt},
     },
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -1204,16 +1204,22 @@ pub fn stage_off_host_import(incoming: &Path, destination: &Path) -> Result<()> 
     if bytes.len() > 16 << 20 {
         return Err(invalid("off-host import receipt exceeds the byte limit"));
     }
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o400)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(destination)?;
-    output.write_all(&bytes)?;
-    output.sync_all()?;
-    durable::sync_directory(parent)?;
-    Ok(())
+    // Publish only complete bytes: write and sync a private temporary beside
+    // the slot, then link it into place without replacing anything, so a
+    // crash or a full disk never leaves a truncated slot behind.
+    let name = destination
+        .file_name()
+        .ok_or_else(|| invalid("missing off-host staging name"))?;
+    let (temporary, mut output) = durable::temporary_file(parent, name)?;
+    let staged = (|| {
+        output.write_all(&bytes)?;
+        output.set_permissions(fs::Permissions::from_mode(0o400))?;
+        output.sync_all()?;
+        fs::hard_link(&temporary, destination)?;
+        durable::sync_directory(parent)
+    })();
+    let _ = fs::remove_file(&temporary);
+    staged
 }
 
 pub fn import_off_host(config: &Value, incoming: &Path, now: Option<i64>) -> Result<Value> {

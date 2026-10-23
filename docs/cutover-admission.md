@@ -205,7 +205,7 @@ the independent executor. One resumable journal at the fixed root
 | `adopt` | `adopted` | re-verify live records against the accepted snapshot, then `adopt-live` and `check` |
 | `activated` | `activated` | require the running generation to carry this manifest, then record that it is active under the fence |
 | `thaw --acceptance` | `thawed` | require the running generation to carry this manifest; verify a root-owned acceptance bound to host, primary, manifest, fence token and snapshot; close the fence, restart the primary and clients, lift the pause |
-| `abort` | `aborted` | before activation only: close (or confirm closed) the fence, restart the primary and recorded clients, lift the pause; evidence is kept |
+| `abort` | `aborted` | before activation only (an adopted candidate that is already installed must run `activated` and thaw): close (or confirm closed) the fence, restart the primary and recorded clients, lift the pause; evidence is kept |
 
 `rollout next` performs the next local step or prints the exact external action
 (executor certification, activation, thaw). From `prepared` it names the
@@ -217,8 +217,9 @@ Only the manifest that opened the journal steps or unwinds it (`abort` and
 under is that manifest's. Another manifest refuses and names the opener to rerun
 with (`--config <opening manifest>`, or canix `--candidate <generation>`); the
 opener is kept alive by the GC root `/nix/var/nix/gcroots/harbor-db-postgresql-rollout`
-from the journal's creation until it is archived. Only a thawed journal, which
-leaves nothing open, may be archived by any manifest.
+from the journal's creation until it is archived. Only a finished journal,
+which leaves nothing open, may be archived by any manifest: a thawed one, or a
+fully unwound abort whose receipt (if any) is already retired.
 The journal ignores unknown fields and omits empty ones, and new fields are
 optional and additive (only an incompatible change bumps its `version`), so a
 rollback generation can still read and abort a newer coordinator's journal.
@@ -261,7 +262,8 @@ Exclusion and recovery:
   to the `postgres` account in-process.
 - **Unwinding.** Once `abort` or `thaw` has closed the fence and verified the
   normal primary, the journal records it; a retry only returns clients,
-  receivers and publishers and never restarts the primary again.
+  receivers and publishers and never restarts the primary again. Every client,
+  receiver and publisher is attempted before the first failure is reported.
 - **Lost journal.** Without a journal, `abort` names Harbor's live fence token
   (verify it with `inspect-fence --token`). `rollout abort --adopt-fence-token
   <token>` then unwinds that fence through the normal close, restarting every
@@ -295,7 +297,13 @@ Exclusion and recovery:
   held is checked by `fence` before any side effect (and again by `prepare`):
   each provisioned directory either already has its declared owner, group and
   mode (an existing one, perhaps a mountpoint, is never re-owned) or is
-  creatable under trusted ancestry and present mounts.
+  creatable under trusted ancestry and present mounts; every writable sandbox
+  path, the export root and the required mounts lie on a chain no other user
+  can swap; the import slot's directory is (or can be created) private to root;
+  and no record snapshot or `preparation.json` from another writer window (or
+  none) is present. Before `prepare` records `prepared`, the snapshot must be
+  bound to this rollout's fence and `preparation.json` must be its backup
+  binding. Stale evidence is never moved implicitly: move it aside first.
 - **Pinned reads.** Files other writers control (a transported receipt, the
   acceptance, preparation evidence, Harbor's fence selector and records) are
   read through one descriptor opened without following a symlink or blocking,
@@ -303,15 +311,30 @@ Exclusion and recovery:
 - **Starting again.** At its terminal transition a rollout moves a staged
   receipt out of the import slot into the journal root, so the next rollout's
   `prepare` never meets it as unrecorded. The next `fence` or `next` archives a
-  finished rollout and starts afresh: a thawed one under any manifest, an abort
-  (only by its opener, once its reopen is recorded and no Harbor fence is held).
+  finished rollout and starts afresh: a thawed one, or an abort once its reopen
+  is recorded, its receipt retired and no Harbor fence is held, under any
+  manifest (an older abort whose slot was never retired: only its opener). A
+  slot that does not hold the recorded receipt is kept aside as
+  `receipt.rejected.<n>.json` instead of holding the rollout. Harbor stages the
+  slot itself atomically (a synced temporary linked into place, never
+  replacing), and `import` creates its private directory. While `prepared`,
+  `import` with a new receipt sets the recorded one (which failed admission)
+  aside and stages the new one; it still refuses a slot it never recorded.
   The journal and its receipt share one collision-free id,
   `rollout.<n>.{thawed,aborted,receipt}.json`, the next sequence number,
   published with no-replace links so no archive is ever overwritten. `status`
   lists the archives.
 - **Start limits.** Every coordinator start (primary, clients, receivers,
   publishers) runs `systemctl reset-failed` first, so repeated cycles never
-  leave a unit down on its start limit.
+  leave a unit down on its start limit. Clients, receivers and publishers are
+  started without waiting for them to finish (`--no-block`; a oneshot backup
+  can run for an hour): the unit must then be running or have ended without
+  failing. Only the primary's start waits, for readiness and its setup units.
+- **Hard dependents.** Before every primary stop, the active services in its
+  reverse Requires/BindsTo closure (through targets such as
+  `postgresql.target`) are recorded, as clients or as pending receivers, so the
+  stop's propagation is undone; retired clients, setup units and paused
+  publishers keep their own handling.
 - **Reported export.** The `backup_id` the (postgres-written) preparation
   evidence names must be a repository identifier directly below the export
   root; the export is reached and its plan hashed without following symlinks.
@@ -321,7 +344,11 @@ Exclusion and recovery:
   preparation worker's and the executor command's own output goes to stderr.
 - **Publishers.** Publishers that were running when the pause began are
   journaled and restarted (after `reset-failed`) once `abort` or `thaw` lifts
-  the pause; idle ones keep waiting for their own triggers.
+  the pause; idle ones keep waiting for their own triggers. A publisher the
+  running generation does not load (the candidate brings it) is left alone.
+- **Repository protocol.** The coordinator requires the legacy recovery
+  repository protocol (checked in Nix and at load), as source-local preparation
+  leaves no preparation binding to hand off.
 - **Mounts and systemd values.** Every directory the coordinator provisions
   (and its journal root) is created only after the declared mounts covering
   it are mounted. Paths, mounts, groups and the import slot rendered into the

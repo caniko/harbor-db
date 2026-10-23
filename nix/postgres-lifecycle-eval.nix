@@ -396,6 +396,17 @@ in
             {services.harbor-db.postgresql.rollout.pausedPublishers = lib.mkForce ["fixture-backup@.service"];}
             {services.harbor-db.postgresql.rollout.receiverUnits = ["fixture-receiver@.service"];}
             {services.harbor-db.postgresql.recoveryPreparation.provisionDirectories = ["/srv/harbor-db/export"];}
+          ]
+          # What the coordinator's load refuses fails evaluation too.
+          && lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout coordinator:" entry.message)) withRollout.config.assertions
+          && lib.all (module:
+            lib.any (entry: !entry.assertion && lib.hasPrefix "Rollout coordinator:" entry.message)
+            (withRollout.extendModules {modules = [module];}).config.assertions) [
+            {services.harbor-db.postgresql.recovery.requireWriterFence = lib.mkForce false;}
+            {services.harbor-db.postgresql.recovery.repositoryProtocol = "source-local-v1";}
+            {services.harbor-db.postgresql.rollout.pausedPublishers = lib.mkForce ["fixture-backup.timer"];}
+            {services.harbor-db.postgresql.rollout.executor.command = lib.mkForce [];}
+            {services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce "/var/lib/harbor-db/postgresql-rollout/export";}
           ];
         message = "A rollout replaces the legacy pre-switch preparation with its activation guard and refuses systemd property values that split into extra entries.";
       }
