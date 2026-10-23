@@ -246,12 +246,10 @@ def verify_backup(config, directory):
     )
 
 
-def query(config, socket_dir, port, database, sql):
+def query(config, socket_dir, port, database, sql, *, timeout=60):
     argv = query_argv(config, socket_dir, port, database, sql)
     env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
     env["PGCONNECT_TIMEOUT"] = "5"
-    # Record checks hash whole relations; recovery configs carry the bound.
-    timeout = (config.get("recovery") or {}).get("verify_timeout_seconds") or 60
     return postgres.run(
         argv, env=env, capture_output=True, text=True, timeout=timeout
     ).stdout
@@ -307,7 +305,15 @@ def query_argv(
 def records(config, settings, socket_dir, port):
     return {
         item["name"]: hashlib.sha256(
-            query(config, socket_dir, port, item["database"], item["sql"]).encode()
+            # Record checks hash whole relations; auxiliary queries keep 60 s.
+            query(
+                config,
+                socket_dir,
+                port,
+                item["database"],
+                item["sql"],
+                timeout=config["recovery"]["verify_timeout_seconds"],
+            ).encode()
         ).hexdigest()
         for item in settings["record_checks"]
     }
@@ -518,15 +524,19 @@ def storage_identities(path, identities, *, primary=False, deadline=None):
             storage_identities(entry, identities, primary=primary, deadline=deadline)
 
 
-def isolated_restore(restored, authoritative, backup):
+def isolated_restore(restored, authoritative, backup, *, independent=False):
     restored_root = restored.lstat()
     for root in (authoritative, backup):
         try:
             info = root.lstat()
-        except (FileNotFoundError, PermissionError):
-            # The source primary's path names storage on the certified host;
-            # an independent executor may find it absent or unsearchable.
+        except FileNotFoundError:
             if root == authoritative:
+                continue
+            raise
+        except PermissionError:
+            # Only an independent executor may skip an unsearchable source path;
+            # a local certifier must still scan its own primary.
+            if root == authoritative and independent:
                 continue
             raise
         if (info.st_dev, info.st_ino) == (restored_root.st_dev, restored_root.st_ino):
@@ -536,8 +546,11 @@ def isolated_restore(restored, authoritative, backup):
     primary = set()
     try:
         authoritative.lstat()
-    except (FileNotFoundError, PermissionError):
+    except FileNotFoundError:
         pass
+    except PermissionError:
+        if not independent:
+            raise
     else:
         storage_identities(authoritative, primary, primary=True)
     protected = set()
@@ -568,7 +581,12 @@ def certify(config, data_dir, socket_dir, port, *, now=None, hostname=None):
         evidence_lease(settings),
     ):
         directory, binding = backup(config, settings, now)
-        isolated_restore(restored, absolute(config["data_dir"]), directory)
+        isolated_restore(
+            restored,
+            absolute(config["data_dir"]),
+            directory,
+            independent=settings["source_hostname"] != executor,
+        )
         source = snapshot_evidence(config, settings, binding, now)
         source_fence(settings, source)
         machine_acceptance(
