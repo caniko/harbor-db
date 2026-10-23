@@ -217,7 +217,8 @@ Only the manifest that opened the journal steps or unwinds it (`abort` and
 under is that manifest's. Another manifest refuses and names the opener to rerun
 with (`--config <opening manifest>`, or canix `--candidate <generation>`); the
 opener is kept alive by the GC root `/nix/var/nix/gcroots/harbor-db-postgresql-rollout`
-from the journal's creation until it is archived. Only a finished journal,
+from the journal's creation until it is archived. The root's directory is synced
+before the journal is first written, and again after archiving removes it. Only a finished journal,
 which leaves nothing open, may be archived by any manifest: a thawed one, or a
 fully unwound abort whose receipt (if any) is already retired.
 The journal ignores unknown fields and omits empty ones, and new fields are
@@ -322,7 +323,9 @@ Exclusion and recovery:
 - **Preflight.** Anything static that could fail a later step once the fence
   is held is checked by `fence` before any side effect (and the worker's part
   again by `prepare`):
-  - every declared mount is present;
+  - every declared mount is present: the worker's and the maintenance
+    manifest's own, which every Harbor verb (`fence-open` first, and the abort
+    that must reopen) requires;
   - every name a later step resolves exists: the `postgres` account and group,
     each provisioned directory's group (including directories still to be
     created) and the worker's supplementary groups;

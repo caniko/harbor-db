@@ -223,25 +223,7 @@ fn root() -> bool {
 }
 
 pub fn operate(config: &Path, action: Action) -> Result<Value> {
-    let rollout = Rollout::load(&durable::immutable_config_path(config)?)?;
-    match action {
-        Action::Status => rollout.status(),
-        Action::ActivationCheck => rollout.activation_check(),
-        Action::Certify {
-            export,
-            export_sha256,
-            workspace,
-        } => rollout.certify(&export, &export_sha256, &workspace),
-        action => {
-            if !root() {
-                return Err(invalid("rollout steps require root on the primary host"));
-            }
-            if fs::read_to_string("/proc/sys/kernel/hostname")?.trim() != rollout.manifest.host {
-                return Err(invalid("rollout must run on its declared primary host"));
-            }
-            rollout.run(action)
-        }
-    }
+    Rollout::load(&durable::immutable_config_path(config)?)?.dispatch(action)
 }
 
 /// Refuse activating a generation that would strand an open rollout: one
@@ -880,12 +862,20 @@ impl Rollout {
         let _ = fs::remove_file(&staging);
         std::os::unix::fs::symlink(&self.config, &staging)?;
         fs::rename(&staging, self.gcroots.join(GC_ROOT))?;
-        Ok(())
+        // Durable before the journal that relies on it is first written.
+        durable::sync_directory(&self.gcroots)
     }
 
-    /// Fail unless every declared mount covering `path` is mounted.
+    /// Fail unless every declared mount (the worker's or the maintenance
+    /// manifest's) covering `path` is mounted.
     fn require_covering_mounts(&self, path: &Path) -> Result<()> {
+        let maintenance = (self.maintenance["required_mounts"].as_array().into_iter())
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(Path::new);
         let covering: Vec<_> = (self.manifest.prepare.required_mounts.iter())
+            .map(PathBuf::as_path)
+            .chain(maintenance)
             .filter(|mount| path.starts_with(mount))
             .collect();
         if covering.is_empty() {
@@ -1581,6 +1571,9 @@ impl Rollout {
     fn preflight_paths(&self) -> Result<()> {
         let prepare = &self.manifest.prepare;
         super::pg_core::require_mounts(&json!({ "required_mounts": prepare.required_mounts }))?;
+        // The maintenance manifest's own, which every Harbor verb requires:
+        // `fence-open` (and the abort that must reopen) first.
+        super::pg_core::require_mounts(&self.maintenance)?;
         let holders: Vec<&Path> = (prepare.provision_directories.iter())
             .map(|directory| directory.path.as_path())
             .collect();
@@ -2621,9 +2614,10 @@ impl Rollout {
         durable::sync_directory(&self.state)?;
         // Its opening manifest no longer needs to survive GC.
         match fs::remove_file(self.gcroots.join(GC_ROOT)) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            other => Ok(other?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            other => other?,
         }
+        durable::sync_directory(&self.gcroots)
     }
 
     fn execution_lease(&self) -> Result<Option<durable::Lease>> {
@@ -2782,6 +2776,29 @@ impl Rollout {
             "restart the writer clients the lost journal had stopped (re-activate the current generation)"
         );
         Ok(status)
+    }
+
+    /// Read-only actions and the executor's `certify` are answered here;
+    /// only steps reach `run` (whose arm for these is therefore unreachable).
+    fn dispatch(&self, action: Action) -> Result<Value> {
+        match action {
+            Action::Status => self.status(),
+            Action::ActivationCheck => self.activation_check(),
+            Action::Certify {
+                export,
+                export_sha256,
+                workspace,
+            } => self.certify(&export, &export_sha256, &workspace),
+            action => {
+                if !root() {
+                    return Err(invalid("rollout steps require root on the primary host"));
+                }
+                if fs::read_to_string("/proc/sys/kernel/hostname")?.trim() != self.manifest.host {
+                    return Err(invalid("rollout must run on its declared primary host"));
+                }
+                self.run(action)
+            }
+        }
     }
 
     pub fn run(&self, action: Action) -> Result<Value> {
@@ -5001,7 +5018,20 @@ exit 1"#,
         let mode = |f: &Fixture, path: &str, mode: u32| {
             fs::set_permissions(f.p(path), fs::Permissions::from_mode(mode)).unwrap();
         };
-        let cases: [(&str, Setup, &str); 8] = [
+        let cases: [(&str, Setup, &str); 9] = [
+            // Harbor's own mounts (`fence-open` checks them), declared only in
+            // the maintenance manifest.
+            (
+                "maintenance mount",
+                |f| {
+                    let path = f.p("maintenance.json");
+                    let mut maintenance = durable::read_json(&path).unwrap();
+                    maintenance["required_mounts"] = json!([f.p("data")]);
+                    fs::write(&path, maintenance.to_string()).unwrap();
+                    json!({})
+                },
+                "required mount is absent",
+            ),
             // Adoption and the fence write the identity state as postgres.
             (
                 "authority",
@@ -5281,27 +5311,90 @@ exit 1"#,
 
     #[test]
     fn import_never_creates_its_slot_directory_below_an_absent_mount() {
-        let f = Fixture::new(0);
-        let rollout = edit_manifest(&f, |m| {
-            m["prepare"]["required_mounts"] = json!([f.p("import")])
-        })
-        .unwrap();
-        let mut journal = rollout.bound().unwrap();
-        journal.phase = Phase::Prepared;
-        journal.fence_token = Some(TOKEN.into());
-        rollout.save(&journal).unwrap();
-        let receipt = f.p("receipt.json");
-        fs::write(&receipt, "{}").unwrap();
-        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
-        let error = rollout
-            .run(Action::Import {
-                receipt,
-                sha256: codec::digest(b"{}"),
+        // Declared for the worker, or only by the maintenance manifest.
+        for in_maintenance in [false, true] {
+            let f = Fixture::new(0);
+            if in_maintenance {
+                let path = f.p("maintenance.json");
+                let mut maintenance = durable::read_json(&path).unwrap();
+                maintenance["required_mounts"] = json!([f.p("import")]);
+                fs::write(&path, maintenance.to_string()).unwrap();
+            }
+            let rollout = edit_manifest(&f, |m| {
+                if !in_maintenance {
+                    m["prepare"]["required_mounts"] = json!([f.p("import")]);
+                }
             })
+            .unwrap();
+            let mut journal = rollout.bound().unwrap();
+            journal.phase = Phase::Prepared;
+            journal.fence_token = Some(TOKEN.into());
+            rollout.save(&journal).unwrap();
+            let receipt = f.p("receipt.json");
+            fs::write(&receipt, "{}").unwrap();
+            fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+            let error = rollout
+                .run(Action::Import {
+                    receipt,
+                    sha256: codec::digest(b"{}"),
+                })
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("required mount"),
+                "{in_maintenance}: {error}"
+            );
+            assert!(!f.p("import").exists(), "{in_maintenance}");
+        }
+    }
+
+    #[test]
+    fn the_opening_manifests_gc_root_is_synced_around_the_journal() {
+        let f = Fixture::new(0);
+        // The GC root's directory is synced without following a symlink:
+        // reached through one, its sync fails visibly where a skipped sync
+        // would pass unnoticed.
+        std::os::unix::fs::symlink(f.p("gcroots"), f.p("gcroots-link")).unwrap();
+        let mut rollout = f.rollout();
+        rollout.gcroots = f.p("gcroots-link");
+        // The journal is never written before its GC root is durable.
+        assert!(rollout.save(&rollout.bound().unwrap()).is_err());
+        assert!(!f.p("state/rollout.json").exists());
+        rollout.gcroots = f.p("gcroots");
+        rollout.run(FENCE).unwrap();
+        rollout.run(NO_ADOPTION).unwrap();
+        // Archiving removes the GC root, then syncs its directory again.
+        rollout.gcroots = f.p("gcroots-link");
+        assert!(rollout.archive_finished().is_err());
+        assert!(!f.p("gcroots").join(GC_ROOT).exists());
+        assert!(!f.p("state/rollout.json").exists());
+    }
+
+    #[test]
+    fn read_only_actions_are_dispatched_before_steps_require_root() {
+        if root() {
+            return;
+        }
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        // Steps need root; a test never has it.
+        let step = rollout.dispatch(FENCE).unwrap_err().to_string();
+        assert!(step.contains("require root"), "{step}");
+        // Status and the activation check are answered by their own handlers
+        // (a misrouted one would meet that refusal, never `run`).
+        assert_eq!(rollout.dispatch(Action::Status).unwrap()["phase"], "idle");
+        assert_eq!(
+            rollout.dispatch(Action::ActivationCheck).unwrap()["phase"],
+            "idle"
+        );
+        // Between fence and adoption the check refuses for its own reason.
+        rollout.run(FENCE).unwrap();
+        let error = rollout
+            .dispatch(Action::ActivationCheck)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("required mount"), "{error}");
-        assert!(!f.p("import").exists());
+        assert!(!error.contains("require root"), "{error}");
+        assert!(error.contains("between fence and adoption"), "{error}");
     }
 
     #[test]
