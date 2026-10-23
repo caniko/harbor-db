@@ -364,6 +364,7 @@
         };
         native-postgres-interrupted-upgrade = pkgs.callPackage ./nix/test-postgres-upgrade.nix {inherit nativePackage;};
         native-postgres-recovery-acceptance = pkgs.callPackage ./nix/test-postgres-recovery.nix {inherit nativePackage;};
+        native-postgres-rollout = pkgs.callPackage ./nix/test-postgres-rollout.nix {inherit nativePackage;};
         native-postgres-writer-fence = pkgs.callPackage ./nix/test-postgres-writer-fence.nix {
           inherit nativePackage;
           interop = true;

@@ -1745,6 +1745,48 @@ dimension = "compatibility"
 evidence = "nix/test-postgres-writer-fence.nix native testScript executes tests/fixtures/writer_fence.rs across legacy and guarded generations. existing-client-condition-preserved checks the original /etc/os-release condition; legacy-generation-thaw-root-barrier and legacy-thaw-reboot-root-barrier retain primary/setup inhibition through unit replacement and reboot."
 
 [[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "positive"
+evidence = "nix/test-postgres-rollout.nix drives the real coordinator across two VMs: fence and prepare run the consumer backup, record snapshot, local restore certification and export, stopping at Prepared; the executor's rollout certify restores the transported export and certifies off-host; import is admitted, then adopt, activation of the guarded specialisation, activated and thaw restore application writes, clients and receivers."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "rejection"
+evidence = "nix/test-postgres-rollout.nix requires import to refuse a receipt whose independently retained SHA-256 differs and abort to refuse an activated rollout, while application SQL is rejected under every fenced phase."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "repetition"
+evidence = "nix/test-postgres-rollout.nix repeats fence on a fenced journal (idempotent resume) and runs separate pre-fence, fenced and full rollouts on the same primary, re-verifying the restored primary after each."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "interruption"
+evidence = "nix/test-postgres-rollout.nix interrupts acquisition after startup inhibition (a client refuses to stop) and thaw after the fence closed (a client fails to start); the journal retains the startup token or acceptance for the explicit retry."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "recovery"
+evidence = "nix/test-postgres-rollout.nix aborts the interrupted acquisition and the fenced rollout, then reruns thaw: each closes the writer fence, releases startup inhibition, restarts recorded clients and quiesced receivers, never restarts retired clients and lifts the publisher pause drop-in."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "compatibility"
+evidence = "nix/test-postgres-rollout.nix starts from the legacy unguarded PostgreSQL generation with a slow control-role setup unit, adopts it live and activates the guarded specialisation with its real switch-to-configuration under the retained fence before thaw."
+
+[[coverage]]
 case = "nix.x86_64-linux.cutover-eval"
 capability = "nixos"
 operation = "nixos.cutover"
@@ -2839,6 +2881,7 @@ operations = [
   "nixos.pg-backup",
   "nixos.postgres-lifecycle",
   "nixos.postgres-writer-fence",
+  "nixos.postgres-rollout",
   "nixos.cutover",
 ]
 required = [
@@ -4499,6 +4542,7 @@ names = [
   "native-postgres-crash-rollback",
   "native-postgres-interrupted-upgrade",
   "native-postgres-recovery-acceptance",
+  "native-postgres-rollout",
   "native-application-backup",
 ]
 profile = "vm"
