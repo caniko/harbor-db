@@ -1505,7 +1505,10 @@ impl Rollout {
             "# Harbor DB rollout publisher pause.\n[Unit]\nConditionPathExists=!{}\n",
             self.pause_marker().display()
         );
-        durable::atomic_write_mode(&self.pause_marker(), b"", 0o600)?;
+        // Written once: its mtime is when the pause began.
+        if !self.pause_marker().exists() {
+            durable::atomic_write_mode(&self.pause_marker(), b"", 0o600)?;
+        }
         for unit in &self.manifest.paused_publishers {
             let directory = root.join(format!("{unit}.d"));
             fs::create_dir_all(&directory)?;
@@ -1538,6 +1541,20 @@ impl Rollout {
         if self.preparing()? {
             return Err(invalid(BUSY));
         }
+        // A declared publisher whose start the pause skipped (one the candidate
+        // brought, or a timer that fired meanwhile) is restarted too; never
+        // one whose last failed condition predates the pause. Recorded before
+        // the pause lifts, so a retry still restarts it.
+        if let Ok(marker) = fs::symlink_metadata(self.pause_marker()) {
+            for unit in &self.manifest.paused_publishers {
+                if !journal.stopped_publishers.contains(unit)
+                    && self.skipped_since(unit, marker.mtime())?
+                {
+                    journal.stopped_publishers.push(unit.clone());
+                    self.save(journal)?;
+                }
+            }
+        }
         let mut lifted = false;
         if !self.manifest.paused_publishers.is_empty() {
             let root = self.drop_in_root()?;
@@ -1559,6 +1576,26 @@ impl Rollout {
         let restarted = self.restart(&mut journal.stopped_publishers);
         self.save(journal)?;
         restarted
+    }
+
+    /// Whether `unit` is loaded and its last start was skipped by a failed
+    /// condition at or after `since` (Unix seconds).
+    fn skipped_since(&self, unit: &str, since: i64) -> Result<bool> {
+        let output = self.systemctl(&[
+            "show",
+            unit,
+            "--timestamp=unix",
+            "--property=LoadState,ConditionResult,ConditionTimestamp",
+        ])?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let value = |key: &str| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(key))
+                .unwrap_or_default()
+        };
+        Ok(value("LoadState=") == "loaded"
+            && value("ConditionResult=") == "no"
+            && (value("ConditionTimestamp=@").parse::<i64>()).is_ok_and(|at| at >= since))
     }
 
     fn stop_clients(&self, journal: &mut Journal) -> Result<()> {
@@ -2114,8 +2151,12 @@ impl Rollout {
     /// following a symlink, so no postgres-side writer can point the journal
     /// or the hand-off at another directory.
     fn reported_export(&self, preparation: &Value) -> Result<(PathBuf, String)> {
+        self.export_plan(super::string(preparation, "backup_id")?)
+    }
+
+    /// The export `backup` names below the export root and its plan's digest.
+    fn export_plan(&self, backup: &str) -> Result<(PathBuf, String)> {
         let root = &self.manifest.prepare.export_root;
-        let backup = super::string(preparation, "backup_id")?;
         let export = root.join(backup);
         if !super::recovery_repository::valid_identifier(backup)
             || export.parent() != Some(root.as_path())
@@ -2185,6 +2226,17 @@ impl Rollout {
     }
 
     fn settle_imported(&self, journal: &mut Journal) -> Result<()> {
+        // The import's preparation reruns the export command: admission is
+        // recorded only over the certified hand-off, its plan unchanged.
+        if let (Some(export), Some(expected)) = (&journal.export, &journal.export_sha256) {
+            let backup = (export.file_name().and_then(|name| name.to_str()))
+                .ok_or_else(|| invalid("the recorded export has no name"))?;
+            if !(self.export_plan(backup)).is_ok_and(|(_, digest)| digest == *expected) {
+                return Err(invalid(
+                    "the exporter rewrote the certified hand-off while the receipt was imported; the writer window is retained: restore the certified export and rerun import, or abort",
+                ));
+            }
+        }
         journal.phase = Phase::Imported;
         self.save(journal)
     }
@@ -3132,6 +3184,12 @@ case "$1" in
     if [ "$3" = --property=LoadState,ActiveState ]; then
       if [ -f "$u/$unit" ]; then echo LoadState=loaded; echo "ActiveState=$(cat "$u/$unit")"
       else echo LoadState=not-found; echo ActiveState=inactive; fi; exit 0
+    fi
+    if [ "$4" = --property=LoadState,ConditionResult,ConditionTimestamp ]; then
+      if [ -f "$u/$unit" ]; then echo LoadState=loaded; else echo LoadState=not-found; fi
+      if [ -f "$u/.condition-$unit" ]; then read -r result at < "$u/.condition-$unit"
+        echo "ConditionResult=$result"; echo "ConditionTimestamp=@$at"
+      else echo ConditionResult=yes; echo ConditionTimestamp=; fi; exit 0
     fi
     if [ "$3" = --property=RequiredBy,BoundBy,ConsistsOf ]; then
       echo "RequiredBy=$(cat "$u/.deps-$unit" 2>/dev/null)"; echo BoundBy=; echo ConsistsOf=; exit 0
@@ -5467,6 +5525,113 @@ exit 1"#,
             .to_string();
         assert!(error.contains("untrusted ancestry"), "{error}");
         assert_eq!(fs::read_dir(f.p("shared")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn an_import_never_admits_over_a_rewritten_certified_export() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        reported(&f, "backup-1");
+        assert_eq!(rollout.run(Action::Prepare).unwrap()["phase"], "prepared");
+        // The import's preparation reruns the exporter, which rewrites the
+        // certified plan, and Harbor admits.
+        executable(
+            &f.p("systemd-run"),
+            &format!(
+                r#"echo "systemd-run $*" >> {log}
+printf rewritten > {export}/backup-1/recovery-export.json
+touch {admitted}"#,
+                log = f.p("calls.log").display(),
+                export = f.p("export").display(),
+                admitted = f.p("evidence/.admitted").display(),
+            ),
+        );
+        // As `import` stages it (staging itself needs root).
+        staged(&f, &rollout, "import/receipt.json", b"{}");
+        let receipt = f.p("receipt.json");
+        fs::write(&receipt, "{}").unwrap();
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+        let import = || {
+            rollout.run(Action::Import {
+                receipt: receipt.clone(),
+                sha256: codec::digest(b"{}"),
+            })
+        };
+        let rewritten = |error: Result<Value>| {
+            let error = error.unwrap_err().to_string();
+            assert!(error.contains("rewrote the certified hand-off"), "{error}");
+            assert_eq!(rollout.journal().unwrap().unwrap().phase, Phase::Prepared);
+        };
+        rewritten(import());
+        // A retry recovering the admission is held to the same hand-off.
+        rewritten(import());
+        // With the certified export restored, the admission is recorded.
+        fs::write(f.p("export/backup-1/recovery-export.json"), "{}").unwrap();
+        assert_eq!(import().unwrap()["phase"], "imported");
+    }
+
+    #[test]
+    fn publishers_whose_start_the_pause_skipped_are_started_when_it_lifts() {
+        let f = Fixture::new(0);
+        let units = ["cand", "old", "ran", "never", "gone"].map(|unit| format!("{unit}.service"));
+        let rollout = edit_manifest(&f, |m| {
+            m["paused_publishers"] = json!(["pub.service"]);
+            m["paused_publishers"]
+                .as_array_mut()
+                .unwrap()
+                .extend(units.iter().map(|u| json!(u)));
+        })
+        .unwrap();
+        rollout.run(FENCE).unwrap();
+        // The marker keeps when the pause began, even if pausing is retried.
+        let marker = f.p("state/paused");
+        let began = std::time::SystemTime::now() - Duration::from_secs(60);
+        (fs::File::options().write(true).open(&marker).unwrap())
+            .set_modified(began)
+            .unwrap();
+        rollout
+            .pause_publishers(&mut rollout.journal().unwrap().unwrap())
+            .unwrap();
+        let paused = fs::metadata(&marker).unwrap().mtime();
+        assert_eq!(fs::metadata(&marker).unwrap().modified().unwrap(), began);
+        // The candidate's publisher was loaded and its start skipped by the
+        // pause; another's last failed condition predates it; one ran; one
+        // never did; one is not loaded at all.
+        for (unit, condition, loaded) in [
+            ("cand.service", Some(("no", paused)), true),
+            ("old.service", Some(("no", paused - 3600)), true),
+            ("ran.service", Some(("yes", paused)), true),
+            ("never.service", None, true),
+            ("gone.service", Some(("no", paused)), false),
+        ] {
+            if loaded {
+                fs::write(f.p("units").join(unit), "inactive").unwrap();
+            }
+            if let Some((result, at)) = condition {
+                let file = f.p("units").join(format!(".condition-{unit}"));
+                fs::write(file, format!("{result} {at}")).unwrap();
+            }
+        }
+        rollout.run(NO_ADOPTION).unwrap();
+        let calls = f.calls();
+        assert!(
+            calls.contains("--no-block start -- cand.service"),
+            "{calls}"
+        );
+        assert_eq!(f.unit("cand.service"), "active");
+        for unit in [
+            "old.service",
+            "ran.service",
+            "never.service",
+            "gone.service",
+        ] {
+            assert!(
+                !calls.contains(&format!("start -- {unit}")),
+                "{unit}: {calls}"
+            );
+        }
+        assert_eq!(f.unit("pub.service"), "active");
     }
 
     #[test]

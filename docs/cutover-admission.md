@@ -299,6 +299,12 @@ Exclusion and recovery:
   and `import` recover it from Harbor's evidence, admission (`inspect-recovery`
   ready) as `imported`, a fence-bound snapshot with its preparation binding and
   export plan as `prepared`.
+  The import's preparation reruns the export command, so admission is recorded
+  as `imported` only if the export plan, read through the pinned export
+  directory, still has the certified digest. If the exporter rewrote it, the
+  step fails closed and the window is retained: restore the certified export
+  and rerun `import`, or abort. A recovered admission is held to the same
+  check.
 - **Disjoint roots.** Both Nix and the manifest load require the PostgreSQL
   data directory, the identity state directory (which also holds the writer
   fence), the startup inhibition state directory, the journal root, the import
@@ -411,6 +417,10 @@ Exclusion and recovery:
   journaled and restarted (after `reset-failed`) once `abort` or `thaw` lifts
   the pause; idle ones keep waiting for their own triggers. A publisher the
   running generation does not load (the candidate brings it) is left alone.
+  A loaded publisher whose start the pause itself skipped (its last condition
+  check failed after the pause marker was written; the marker is written once,
+  so its mtime is when the pause began) is started too. One whose condition
+  failed before the pause, or that never ran, is not.
 - **Repository protocol.** The coordinator requires the legacy recovery
   repository protocol (checked in Nix and at load), as source-local preparation
   leaves no preparation binding to hand off.
