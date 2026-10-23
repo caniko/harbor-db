@@ -1749,35 +1749,42 @@ case = "vm.x86_64-linux.native-postgres-rollout"
 capability = "nixos"
 operation = "nixos.postgres-rollout"
 dimension = "positive"
-evidence = "nix/test-postgres-rollout.nix drives the real coordinator across two VMs: fence and prepare run the consumer backup, record snapshot, local restore certification and export, stopping at Prepared; the executor's rollout certify restores the transported export and certifies off-host; import is admitted, then adopt, activation of the guarded specialisation, activated and thaw restore application writes, clients and receivers."
+evidence = "nix/test-postgres-rollout.nix drives the real coordinator across two VMs: fence and prepare run the consumer backup, record snapshot, local restore certification and export, stopping at Prepared; the executor's rollout certify restores the transported export and certifies off-host; import is admitted, then adopt, activation of the guarded specialisation, activated and thaw restore application writes, clients, receivers and paused publishers. Every step's stdout is exactly one JSON document."
 
 [[coverage]]
 case = "vm.x86_64-linux.native-postgres-rollout"
 capability = "nixos"
 operation = "nixos.postgres-rollout"
 dimension = "rejection"
-evidence = "nix/test-postgres-rollout.nix requires import to refuse a receipt whose independently retained SHA-256 differs and abort to refuse an activated rollout, while application SQL is rejected under every fenced phase."
+evidence = "nix/test-postgres-rollout.nix requires refusal, without side effects, of a fence while Harbor holds a fence this rollout did not open; abort without a journal or with a different token; import of a receipt whose retained SHA-256 differs; the candidate's real switch-to-configuration while Fenced and Prepared; activated before the running generation carries the manifest; and abort of an activated rollout. Application SQL is rejected in every fenced phase."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "concurrency"
+evidence = "nix/test-postgres-rollout.nix holds the manifest's host execution lock from another process and requires a mutating step to be refused while status still answers, and requires a surviving harbor-db-rollout-prepare.service to block preparation before any receiver is quiesced."
 
 [[coverage]]
 case = "vm.x86_64-linux.native-postgres-rollout"
 capability = "nixos"
 operation = "nixos.postgres-rollout"
 dimension = "repetition"
-evidence = "nix/test-postgres-rollout.nix repeats fence on a fenced journal (idempotent resume) and runs separate pre-fence, fenced and full rollouts on the same primary, re-verifying the restored primary after each."
+evidence = "nix/test-postgres-rollout.nix repeats fence on a fenced journal (idempotent resume), archives each finished abort so the same candidate starts afresh three times, and re-verifies the restored primary after every unwind."
 
 [[coverage]]
 case = "vm.x86_64-linux.native-postgres-rollout"
 capability = "nixos"
 operation = "nixos.postgres-rollout"
 dimension = "interruption"
-evidence = "nix/test-postgres-rollout.nix interrupts acquisition after startup inhibition (a client refuses to stop) and thaw after the fence closed (a client fails to start); the journal retains the startup token or acceptance for the explicit retry."
+evidence = "nix/test-postgres-rollout.nix interrupts acquisition after startup inhibition (a client refuses to stop), loses the journal of a fenced rollout, and fails thaw after the fence closed (a client fails to start); the journal or Harbor's live fence retains what the explicit retry needs."
 
 [[coverage]]
 case = "vm.x86_64-linux.native-postgres-rollout"
 capability = "nixos"
 operation = "nixos.postgres-rollout"
 dimension = "recovery"
-evidence = "nix/test-postgres-rollout.nix aborts the interrupted acquisition and the fenced rollout, then reruns thaw: each closes the writer fence, releases startup inhibition, restarts recorded clients and quiesced receivers, never restarts retired clients and lifts the publisher pause drop-in."
+evidence = "nix/test-postgres-rollout.nix aborts the interrupted acquisition, the fenced rollout and the journal-less rollout (by adopting Harbor's fence token), then reruns thaw without restarting the reopened primary (same MainPID): each closes the fence, releases startup inhibition, restarts recorded clients and quiesced receivers, never restarts retired clients and lifts the publisher pause drop-in."
 
 [[coverage]]
 case = "vm.x86_64-linux.native-postgres-rollout"

@@ -179,6 +179,8 @@ in
         "d /srv/rollout 0755 root root -"
         "d /var/lib/harbor-db 0755 root root -"
         "d /var/lib/harbor-db/import 0700 root root -"
+        # The host activation lock every mutating rollout step shares.
+        "f /run/lock/fixture-switch.lock 0644 root root -"
       ];
       # The candidate generation carries the guarded primary and the rollout manifest.
       specialisation.guarded.configuration = {config, ...}: let
@@ -215,6 +217,7 @@ in
             receiverUnits = ["fixture-receiver.service"];
             pausedPublishers = ["fixture-publisher.service"];
             exportRoot = "/srv/rollout/export";
+            executionLock = "/run/lock/fixture-switch.lock";
             executor = {
               host = "executor";
               user = "can";
@@ -263,9 +266,7 @@ in
       pause = "/etc/systemd/system.control/fixture-publisher.service.d/zz-harbor-db-rollout-pause.conf"
 
       def step(arguments):
-          # TEMP: strict json.loads of the whole stdout once the coordinator
-          # keeps child stdout (prepare-recovery, executor) out of its own.
-          return json.loads(primary.succeed(rollout + arguments).strip().splitlines()[-1])
+          return json.loads(primary.succeed(rollout + arguments))
 
       def refused(arguments, reason):
           code, output = primary.execute(rollout + arguments + " 2>&1")
@@ -285,8 +286,11 @@ in
           primary.succeed("systemctl is-active fixture-daemon.service fixture-receiver.service")
           primary.fail("systemctl is-active fixture-retired.service")
           primary.succeed(f"test ! -e {pause}; test ! -e {state}/paused")
-          primary.succeed("systemctl start fixture-publisher.service")
+          # The publisher active at pause time is restarted with its condition lifted.
+          primary.succeed("systemctl is-active fixture-publisher.service")
           primary.succeed("test \"$(systemctl show fixture-publisher.service -p ConditionResult --value)\" = yes")
+          # Every scenario starts with the retired client running again.
+          primary.succeed("systemctl start fixture-retired.service")
 
       def drop_in(unit, text):
           primary.succeed(f"mkdir -p /run/systemd/system/{unit}.d; printf {shlex.quote(text)} > /run/systemd/system/{unit}.d/fault.conf; systemctl daemon-reload")
@@ -294,10 +298,15 @@ in
       def clear_drop_in(unit):
           primary.succeed(f"rm -r /run/systemd/system/{unit}.d; systemctl daemon-reload; systemctl reset-failed {unit}")
 
-      def restart_rollout(retired):
-          primary.succeed(f"mv {state}/rollout.json {state}/{retired}.json")
-          primary.succeed("systemctl start fixture-retired.service")
-          primary.succeed("systemctl reset-failed postgresql.service")  # TEMP until start_primary resets the start limit
+      def primary_pid():
+          return primary.succeed("systemctl show postgresql.service -p MainPID --value").strip()
+
+      def activation_refused():
+          running = primary_pid()
+          code, output = primary.execute(f"{candidate}/bin/switch-to-configuration test 2>&1")
+          assert code != 0 and "between fence and adoption" in output, output
+          assert primary.succeed("readlink -f /run/current-system").strip() == base
+          assert primary_pid() == running
 
       with subtest("an acquisition interrupted before fence-open is aborted"):
           drop_in("fixture-daemon.service", "[Unit]\nRefuseManualStop=true\n")
@@ -308,20 +317,54 @@ in
           assert step("abort")["phase"] == "aborted"
           reopened()
 
-      with subtest("a fenced rollout is aborted and every client returns"):
-          restart_rollout("aborted-before-fence")
+      with subtest("a fenced rollout holds the host lock and is aborted"):
+          # A finished abort is archived; the same candidate starts afresh.
           assert step("fence")["phase"] == "fenced"
+          assert len(step("status")["archived"]) == 1
           fenced()
           assert step("fence")["phase"] == "fenced"
+          # Mutating steps share the host activation lock; status takes none.
+          primary.succeed("systemd-run --unit=fixture-lock-holder --collect flock /run/lock/fixture-switch.lock ${pkgs.coreutils}/bin/sleep infinity")
+          primary.wait_until_fails("flock -n /run/lock/fixture-switch.lock true")
+          refused("abort", "execution lock")
+          assert step("status")["phase"] == "fenced"
+          primary.succeed("systemctl stop fixture-lock-holder.service")
           assert step("abort")["phase"] == "aborted"
           reopened()
 
+      with subtest("a lost journal is unwound only by adopting Harbor's fence"):
+          assert step("fence")["phase"] == "fenced"
+          token = step("status")["fence_token"]
+          primary.succeed(f"rm {state}/rollout.json")
+          # Harbor's live fence is not this (fresh) rollout's: refused before any
+          # side effect, and no journal is written.
+          running = primary_pid()
+          refused("fence", "did not open")
+          assert primary_pid() == running
+          primary.succeed(f"test ! -e {state}/rollout.json; test ! -e /var/lib/harbor-db/postgresql-startup/inhibited.json")
+          fenced()
+          refused("abort", f"Harbor holds writer fence {token}")
+          refused("abort --adopt-fence-token " + "0" * 32, "differs")
+          assert step(f"abort --adopt-fence-token {token}")["phase"] == "aborted"
+          # The lost journal's stopped clients are the operator's to restart.
+          primary.succeed("systemctl start fixture-daemon.service")
+          reopened()
+
       with subtest("the full rollout hands off to the executor and thaws"):
-          restart_rollout("aborted-fenced")
           assert step("next")["phase"] == "fenced"
+          assert len(step("status")["archived"]) == 3
+          # The candidate's pre-switch check refuses activation mid-rollout.
+          activation_refused()
+          # A surviving preparation worker blocks the step, before any receiver stops.
+          primary.succeed("systemd-run --unit=harbor-db-rollout-prepare --collect ${pkgs.coreutils}/bin/sleep infinity")
+          refused("next", "still running")
+          assert step("status")["preparation_worker"] == "harbor-db-rollout-prepare.service"
+          primary.succeed("systemctl is-active fixture-receiver.service")
+          primary.succeed("systemctl stop harbor-db-rollout-prepare.service")
           prepared = step("next")
           assert prepared["phase"] == "prepared", prepared
           fenced()
+          activation_refused()
           primary.succeed("systemctl is-active fixture-receiver.service")
           export = prepared["export"]
           primary.succeed(f"tar -C {export}/.. -cf /tmp/export.tar base-1")
@@ -341,6 +384,8 @@ in
           assert step("next")["phase"] == "adopted"
           primary.succeed("test -s /var/lib/harbor-db/postgresql/identity.json")
           fenced()
+          # The legacy generation does not carry this manifest.
+          refused("activated", "is not this manifest")
           primary.succeed(f"{candidate}/bin/switch-to-configuration test")
           assert step("activated")["phase"] == "activated"
           refused("abort", "thaw with an acceptance")
@@ -351,13 +396,15 @@ in
               "snapshot_sha256": primary.succeed("sha256sum /srv/evidence/records.json").split()[0],
           }
           primary.succeed("install -d -m 0700 /root/acceptance; printf '%s' " + shlex.quote(json.dumps(acceptance)) + " > /root/acceptance/receipt.json; chmod 0600 /root/acceptance/receipt.json")
-          # A client that cannot start fails thaw after the fence closed; the
-          # retry resumes from there.
+          # A client that cannot start fails thaw after the fence closed and the
+          # primary restarted; the retry resumes without restarting it again.
           drop_in("fixture-daemon.service", "[Service]\nExecStartPre=${pkgs.coreutils}/bin/false\n")
           refused("thaw --acceptance /root/acceptance/receipt.json", "rollout command failed")
+          reopened_pid = primary_pid()
           clear_drop_in("fixture-daemon.service")
           assert step("thaw --acceptance /root/acceptance/receipt.json")["phase"] == "thawed"
+          assert primary_pid() == reopened_pid
           reopened()
-          assert sql("SELECT count(*) FROM retained WHERE id = 'daemon'") == "4"
+          assert sql("SELECT count(*) FROM retained WHERE id = 'daemon'") == "5"
     '';
   }
