@@ -892,6 +892,7 @@ selectors = [
   "local_and_off_host_receipt_paths_cannot_alias_in_admission",
   "recovery_machine_bindings_reject_hostname_only_remote_evidence_in_both_engines",
   "uts_hostname_change_cannot_certify_an_independent_machine_in_both_engines",
+  "record_queries_use_the_recovery_verification_bound_in_both_engines",
 ]
 
 [[coverage]]
@@ -6930,7 +6931,10 @@ maturity = "crystallized"
 platforms = ["x86_64-linux", "aarch64-linux"]
 deadline_seconds = 120
 resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
-selectors = ["managed_backup_outlives_the_short_probe_deadline"]
+selectors = [
+  "managed_backup_outlives_the_short_probe_deadline",
+  "independent_executor_tolerates_an_unsearchable_source_primary_path",
+]
 
 [[cases]]
 id = "vm.x86_64-linux.native-source-local-recovery"
