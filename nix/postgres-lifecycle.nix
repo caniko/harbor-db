@@ -596,17 +596,41 @@ in {
         assertion = let
           units = rollout.clients ++ rollout.retiredClients ++ rollout.receiverUnits ++ rollout.pausedPublishers ++ cfg.writerFence.setupUnits;
           validUnit = unit: builtins.match "[A-Za-z0-9_@.:-]+[.]service" unit != null;
-          disjoint = a: b: a != b && !(lib.hasPrefix "${a}/" b) && !(lib.hasPrefix "${b}/" a);
-          roots = ["/var/lib/harbor-db/postgresql-rollout" cfg.stateDir pg.dataDir];
           valid =
             cfg.recovery.requireWriterFence
             && cfg.recovery.repositoryProtocol == "legacy"
             && lib.all validUnit units
-            && rollout.executor.command != []
-            && lib.all (disjoint rollout.exportRoot) roots;
+            && rollout.executor.command != [];
         in
           rollout == null || cfg.recovery == null || valid;
-        message = "Rollout coordinator: recovery must require the writer fence over the legacy repository protocol, units must be `.service` names, the executor command non-empty, and the export root apart from the journal root (/var/lib/harbor-db/postgresql-rollout), the identity state directory and the PostgreSQL data directory.";
+        message = "Rollout coordinator: recovery must require the writer fence over the legacy repository protocol, units must be `.service` names and the executor command non-empty.";
+      }
+      {
+        # Mirrors the coordinator's load: the roots post-fence steps write are
+        # pairwise disjoint (the writer fence lives in the identity state
+        # directory), except a provisioned directory inside a writable path or
+        # another provisioned one (evidence in its backup root) and the export
+        # root inside a writable path; the worker's evidence directories lie
+        # inside its writable paths.
+        assertion = let
+          contains = root: path: root == path || lib.hasPrefix "${root}/" path;
+          slot = preparation.offHostReceiptImportFile;
+          root = kind: path: {inherit kind path;};
+          roots =
+            map (root "control") ([pg.dataDir cfg.stateDir cfg.writerFence.startupStateDir "/var/lib/harbor-db/postgresql-rollout"] ++ lib.optional (slot != null) (builtins.dirOf slot))
+            ++ [(root "export" rollout.exportRoot)]
+            ++ map (root "writable") preparation.readWritePaths
+            ++ map (root "provisioned") preparation.provisionDirectories;
+          intended = inner: outer:
+            contains outer.path inner.path
+            && (inner.kind == "provisioned" && lib.elem outer.kind ["writable" "provisioned"] || inner.kind == "export" && outer.kind == "writable");
+          apart = a: b: !(contains a.path b.path || contains b.path a.path) || intended a b || intended b a;
+          pairs = lib.concatLists (lib.imap0 (i: a: map (apart a) (lib.drop (i + 1) roots)) roots);
+          evidence = map builtins.dirOf ([cfg.recovery.snapshotFile cfg.recovery.receiptFile] ++ lib.optional (cfg.recovery.offHostReceiptFile != null) cfg.recovery.offHostReceiptFile);
+          writable = path: lib.any (root: contains root path) preparation.readWritePaths;
+        in
+          rollout == null || preparation == null || cfg.recovery == null || (lib.all lib.id pairs && lib.all writable evidence);
+        message = "Rollout roots: the PostgreSQL data directory, identity (writer-fence) state, startup inhibition state, journal root (/var/lib/harbor-db/postgresql-rollout), import slot directory, export root, writable paths and provisioned directories must be pairwise disjoint (a provisioned directory may lie in a writable path or another provisioned one, the export root in a writable path), and the recovery evidence directories inside the writable paths.";
       }
       {
         # Mirrors the coordinator: systemd splits these property values on

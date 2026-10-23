@@ -406,7 +406,28 @@ in
             {services.harbor-db.postgresql.recovery.repositoryProtocol = "source-local-v1";}
             {services.harbor-db.postgresql.rollout.pausedPublishers = lib.mkForce ["fixture-backup.timer"];}
             {services.harbor-db.postgresql.rollout.executor.command = lib.mkForce [];}
+          ]
+          # The roots post-fence steps write are disjoint but for the intended nestings.
+          && lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout roots:" entry.message)) withRollout.config.assertions
+          && lib.all (module:
+            lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout roots:" entry.message))
+            (withRollout.extendModules {modules = [module];}).config.assertions) [
+            {services.harbor-db.postgresql.recoveryPreparation.provisionDirectories = ["/srv/backups" "/srv/backups/evidence"];}
+            {services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce "/srv/disposable/export";}
+          ]
+          && lib.all (module:
+            lib.any (entry: !entry.assertion && lib.hasPrefix "Rollout roots:" entry.message)
+            (withRollout.extendModules {modules = [module];}).config.assertions) [
             {services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce "/var/lib/harbor-db/postgresql-rollout/export";}
+            {services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce "/var/lib/harbor-db/postgresql-startup/export";}
+            {
+              services.harbor-db.postgresql.recoveryPreparation.provisionDirectories = ["/srv/disposable/work"];
+              services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce "/srv/disposable/work/export";
+            }
+            {services.harbor-db.postgresql.writerFence.startupStateDir = lib.mkForce "/var/lib/harbor-db/postgresql-rollout/startup";}
+            {services.harbor-db.postgresql.recoveryPreparation.offHostReceiptImportFile = lib.mkForce "/srv/backups/import.json";}
+            {services.harbor-db.postgresql.recoveryPreparation.readWritePaths = lib.mkForce ["/srv/backups" "/srv/backups/nested"];}
+            {services.harbor-db.postgresql.recoveryPreparation.readWritePaths = lib.mkForce ["/srv/disposable"];}
           ];
         message = "A rollout replaces the legacy pre-switch preparation with its activation guard and refuses systemd property values that split into extra entries.";
       }

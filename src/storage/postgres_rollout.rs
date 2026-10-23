@@ -366,6 +366,16 @@ fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
+/// The directories Harbor's preparation writes its evidence into: the record
+/// snapshot's (with its locks and binding) and each receipt's.
+fn evidence_directories(maintenance: &Value) -> Vec<PathBuf> {
+    ["snapshot_file", "receipt_file", "off_host_receipt_file"]
+        .iter()
+        .filter_map(|key| maintenance["recovery"][key].as_str())
+        .filter_map(|file| Path::new(file).parent().map(Path::to_owned))
+        .collect()
+}
+
 fn euid() -> u32 {
     // SAFETY: geteuid has no preconditions.
     unsafe { libc::geteuid() }
@@ -645,20 +655,82 @@ impl Rollout {
                 "rollout systemd property values must not contain whitespace, quotes, `\\`, `%` (or `:` in the import slot)",
             ));
         }
-        let state = Path::new(STATE_ROOT);
-        let export = manifest.prepare.export_root.as_path();
-        if !dedicated(export) || overlaps(state, export) {
-            return Err(invalid(
-                "rollout export root must be a dedicated directory apart from the journal",
-            ));
+        let export = prepare.export_root.as_path();
+        if !dedicated(export) {
+            return Err(invalid("rollout export root must be a dedicated directory"));
         }
-        for protected in ["data_dir", "state_dir"] {
-            let path = Path::new(super::string(&maintenance, protected)?);
-            if overlaps(state, path) || overlaps(export, path) {
-                return Err(invalid(
-                    "rollout journal or export root overlaps primary/authority state",
-                ));
+        // The roots post-fence steps write are pairwise disjoint (the writer
+        // fence lives in the identity state directory), except the intended
+        // nestings: a provisioned directory inside a writable path or another
+        // provisioned one (evidence in its backup root), the export root
+        // inside a writable path. A shared root would be re-owned, hidden or
+        // made untraversable by another step after the fence.
+        let slot = (manifest.import_slot.parent())
+            .ok_or_else(|| invalid("import slot has no directory"))?;
+        let roots: Vec<(&str, &Path)> = [
+            (
+                "PostgreSQL data directory",
+                super::string(&maintenance, "data_dir")?,
+            ),
+            (
+                "identity state directory",
+                super::string(&maintenance, "state_dir")?,
+            ),
+            (
+                "startup inhibition state directory",
+                super::string(&maintenance["startup_inhibition"], "state_dir")?,
+            ),
+            ("rollout journal root", STATE_ROOT),
+        ]
+        .map(|(label, path)| (label, Path::new(path)))
+        .into_iter()
+        .chain([("import slot directory", slot), ("export root", export)])
+        .chain((prepare.read_write_paths.iter()).map(|path| ("writable path", path.as_path())))
+        .chain(
+            (prepare.provision_directories.iter())
+                .filter(|directory| directory.path != export)
+                .map(|directory| ("provisioned directory", directory.path.as_path())),
+        )
+        .collect();
+        let intended = |(a, inner): (&str, &Path), (b, outer): (&str, &Path)| {
+            inner.starts_with(outer)
+                && matches!(
+                    (a, b),
+                    (
+                        "provisioned directory",
+                        "writable path" | "provisioned directory"
+                    ) | ("export root", "writable path")
+                )
+        };
+        for (index, &a) in roots.iter().enumerate() {
+            if let Some(&b) = roots[index + 1..]
+                .iter()
+                .find(|&&b| overlaps(a.1, b.1) && !intended(a, b) && !intended(b, a))
+            {
+                return Err(invalid(format!(
+                    "rollout {} {} and {} {} overlap; give each its own tree",
+                    a.0,
+                    a.1.display(),
+                    b.0,
+                    b.1.display()
+                )));
             }
+        }
+        // The worker writes the evidence and provisioned directories: outside
+        // its writable paths they are read-only to it (the export root it is
+        // always granted).
+        let writable =
+            |path: &Path| (prepare.read_write_paths.iter()).any(|root| path.starts_with(root));
+        if let Some(path) = (prepare.provision_directories.iter())
+            .map(|directory| directory.path.clone())
+            .filter(|path| path != export)
+            .chain(evidence_directories(&maintenance))
+            .find(|path| !writable(path))
+        {
+            return Err(invalid(format!(
+                "{} is written by the preparation worker but lies outside its writable paths",
+                path.display()
+            )));
         }
         // Thaw runs the checker as root: only immutable store inputs qualify.
         if let Some(cutover) = &manifest.cutover {
@@ -1396,36 +1468,113 @@ impl Rollout {
         })
     }
 
-    /// Everything static that could fail `prepare` once the fence is held:
-    /// each provisioned directory either already has its declared owner,
-    /// group and mode (an existing one, perhaps a mountpoint, is never
-    /// re-owned) or is creatable under trusted ancestry and present mounts;
-    /// an undeclared export root likewise.
+    /// The uid and groups postgres runs a step with: Harbor's verbs with its
+    /// account's groups, the worker also with the declared supplementary ones.
+    fn service_identity(&self, worker: bool) -> Result<(u32, Vec<u32>)> {
+        let (uid, mut groups) = match self.service_owner {
+            Some((uid, gid)) => (uid, vec![gid]),
+            None => {
+                let identity = process::account("postgres")?;
+                (identity.uid, identity.groups)
+            }
+        };
+        if worker {
+            for group in &self.manifest.prepare.supplementary_groups {
+                groups.push(group_id(group)?);
+            }
+        }
+        Ok((uid, groups))
+    }
+
+    /// Every existing directory on `path` (below the anchor, `/` on hosts)
+    /// must let `identity` search it, or the step using it fails after the fence.
+    fn require_traversable(&self, path: &Path, (uid, groups): &(u32, Vec<u32>)) -> Result<()> {
+        for directory in path.ancestors().take_while(|at| *at != self.anchor) {
+            let Ok(metadata) = fs::symlink_metadata(directory) else {
+                continue;
+            };
+            let search = if metadata.uid() == *uid {
+                0o100
+            } else if groups.contains(&metadata.gid()) {
+                0o010
+            } else {
+                0o001
+            };
+            if metadata.is_dir() && metadata.mode() & search == 0 {
+                return Err(invalid(format!(
+                    "{} is not searchable by postgres at {}; grant it search permission first",
+                    path.display(),
+                    directory.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Everything static that could fail a step once the fence is held. Every
+    /// declared mount is present (the worker requires them all). Each
+    /// provisioned directory, and the identity state directory Harbor's fence
+    /// and adoption write as postgres, either already has its owner, group and
+    /// mode (an existing one, perhaps a mountpoint, is never re-owned) or is
+    /// creatable under trusted ancestry. Every writable path, evidence
+    /// directory and the export root exists or is provisioned (systemd fails
+    /// a missing writable path; Harbor creates no evidence directory). All are
+    /// searchable by the postgres identity using them.
     fn preflight_paths(&self) -> Result<()> {
         let prepare = &self.manifest.prepare;
+        super::pg_core::require_mounts(&json!({ "required_mounts": prepare.required_mounts }))?;
         let holders: Vec<&Path> = (prepare.provision_directories.iter())
             .map(|directory| directory.path.as_path())
             .collect();
-        for directory in &prepare.provision_directories {
-            self.require_covering_mounts(&directory.path)?;
-            let Some(metadata) = self.walk(&directory.path, &holders, false)? else {
-                continue;
-            };
-            let (uid, gid) = self.provision_owner(&directory.group)?;
-            if (metadata.uid(), metadata.gid(), metadata.mode() & 0o7777)
-                != (uid, gid, directory.mode)
-            {
+        let worker = self.service_identity(true)?;
+        let harbor = self.service_identity(false)?;
+        let authority = Path::new(super::string(&self.maintenance, "state_dir")?);
+        let provisioned = (prepare.provision_directories.iter())
+            .map(|directory| {
+                let path = directory.path.as_path();
+                (path, directory.group.as_str(), directory.mode, &worker)
+            })
+            .chain([(authority, "postgres", 0o700, &harbor)]);
+        for (path, group, mode, identity) in provisioned {
+            if let Some(metadata) = self.walk(path, &holders, false)? {
+                let (uid, gid) = self.provision_owner(group)?;
+                if (metadata.uid(), metadata.gid(), metadata.mode() & 0o7777) != (uid, gid, mode) {
+                    return Err(invalid(format!(
+                        "{} exists but is not {uid}:{gid} mode {mode:o}; fix it first (an \
+                         existing directory is never re-owned)",
+                        path.display()
+                    )));
+                }
+            }
+            self.require_traversable(path, identity)?;
+        }
+        for path in (prepare.read_write_paths.iter().cloned())
+            .chain(evidence_directories(&self.maintenance))
+            .chain([prepare.export_root.clone()])
+        {
+            self.require_traversable(&path, &worker)?;
+            if !holders.contains(&path.as_path()) && fs::symlink_metadata(&path).is_err() {
                 return Err(invalid(format!(
-                    "{} exists but is not {uid}:{gid} mode {:o}; fix it first (an existing \
-                     directory is never re-owned)",
-                    directory.path.display(),
-                    directory.mode
+                    "{} neither exists nor is provisioned, so the preparation worker would fail \
+                     after the fence; create it first",
+                    path.display()
                 )));
             }
         }
         if !holders.contains(&prepare.export_root.as_path()) {
-            self.require_covering_mounts(&prepare.export_root)?;
             self.walk(&prepare.export_root, &holders, false)?;
+        }
+        Ok(())
+    }
+
+    /// A directory a post-fence step writes as root: under trusted ancestry,
+    /// an existing one owned by root and writable by no one else (`mask`, as
+    /// the writing step checks), a missing one creatable.
+    fn check_root_directory(&self, path: &Path, mask: u32, owned: &str) -> Result<()> {
+        if let Some(metadata) = self.walk(path, &[], false)?
+            && (metadata.uid() != euid() || metadata.mode() & mask != 0)
+        {
+            return Err(invalid(format!("{} must be {owned}", path.display())));
         }
         Ok(())
     }
@@ -1495,16 +1644,18 @@ impl Rollout {
     }
 
     /// Staging the receipt needs a root-private directory under root-owned
-    /// ancestry: an existing one must already be, an absent one creatable.
+    /// ancestry (an existing one must already be, an absent one creatable)
+    /// and an empty slot: a receipt this rollout never recorded fails `prepare`.
     fn check_slot_directory(&self) -> Result<()> {
-        let directory = (self.manifest.import_slot.parent())
+        let slot = &self.manifest.import_slot;
+        let directory = slot
+            .parent()
             .ok_or_else(|| invalid("import slot has no directory"))?;
-        if let Some(metadata) = self.walk(directory, &[], false)?
-            && (metadata.uid() != euid() || metadata.mode() & 0o077 != 0)
-        {
+        self.check_root_directory(directory, 0o077, "private to root")?;
+        if fs::symlink_metadata(slot).is_ok() {
             return Err(invalid(format!(
-                "import slot directory {} must be private to root",
-                directory.display()
+                "import slot {} holds a receipt this rollout did not stage; move it aside, then rerun",
+                slot.display()
             )));
         }
         Ok(())
@@ -1552,12 +1703,24 @@ impl Rollout {
         }
         // Before any side effect: a refusal must leave production untouched.
         self.refuse_foreign_fence(journal, adopt)?;
+        self.state_dir()?;
         self.preflight_paths()?;
         self.check_sandbox_paths()?;
         self.check_slot_directory()?;
+        // Harbor's inhibition and the publisher pause write these as root.
+        let startup = Path::new(super::string(
+            &self.maintenance["startup_inhibition"],
+            "state_dir",
+        )?);
+        let writable_by_root = "a directory only root can write";
+        self.check_root_directory(startup, 0o022, writable_by_root)?;
+        self.check_root_directory(&self.drop_in_root()?, 0o022, writable_by_root)?;
         self.refuse_stale_evidence(journal)?;
         let authority = Path::new(super::string(&self.maintenance, "state_dir")?);
         self.provision(authority, "postgres", 0o700)?;
+        // Harbor would create missing parents of its inhibition state private
+        // to root, where a sibling postgres path could no longer be searched.
+        self.walk(startup, &[], true)?;
         self.inhibit(journal)?;
         self.pause_publishers(journal)?;
         self.stop_clients(journal)?;
@@ -1901,10 +2064,12 @@ impl Rollout {
         // reuse them. A recorded receipt that failed admission is set aside
         // for the new one; a slot that holds anything else is never replaced.
         let slot = &self.manifest.import_slot;
-        // Staging needs a root-private directory under root-owned ancestry.
+        // Staging needs a root-private directory under root-owned ancestry,
+        // never one created on the root filesystem below an absent mount.
         let directory = slot
             .parent()
             .ok_or_else(|| invalid("import slot has no directory"))?;
+        self.require_covering_mounts(directory)?;
         self.walk(directory, &[], true)?;
         if let Ok(metadata) = fs::symlink_metadata(slot) {
             trusted_file(&metadata, slot, euid())?;
@@ -2698,10 +2863,15 @@ mod tests {
                 "state",
                 "startup",
                 "gcroots",
+                "export",
             ] {
                 fs::create_dir(p(dir)).unwrap();
+                fs::set_permissions(p(dir), fs::Permissions::from_mode(0o755)).unwrap();
             }
-            fs::set_permissions(p("state"), fs::Permissions::from_mode(0o700)).unwrap();
+            // Private like the journal; the identity state as tmpfiles keeps it.
+            for dir in ["state", "authority"] {
+                fs::set_permissions(p(dir), fs::Permissions::from_mode(0o700)).unwrap();
+            }
             for unit in [
                 "a.service",
                 "b.service",
@@ -2800,7 +2970,7 @@ esac"#,
                 "clients": ["a.service", "b.service"], "retired_clients": [],
                 "setup_units": ["setup.service"], "receiver_units": [],
                 "paused_publishers": ["pub.service"], "setup_settle_seconds": settle,
-                "prepare": {"export_root": self.p("export"), "read_write_paths": [],
+                "prepare": {"export_root": self.p("export"), "read_write_paths": [self.p("evidence")],
                     "required_mounts": [], "supplementary_groups": [], "provision_directories": []},
                 "import_slot": self.p("import/receipt.json"),
                 "executor": {"host": "executor", "user": "can", "command": ["/bin/true"]},
@@ -3609,7 +3779,7 @@ esac"#,
         fs::create_dir_all(f.p("shared/backups")).unwrap();
         fs::set_permissions(f.p("shared"), fs::Permissions::from_mode(0o777)).unwrap();
         let rollout = edit_manifest(&f, |m| {
-            m["prepare"]["read_write_paths"] = json!([f.p("shared/backups")])
+            m["prepare"]["read_write_paths"] = json!([f.p("evidence"), f.p("shared/backups")])
         })
         .unwrap();
         let error = rollout.run(FENCE).unwrap_err().to_string();
@@ -3995,8 +4165,6 @@ exit 1"#,
     #[test]
     fn a_static_preparation_failure_is_refused_before_the_fence() {
         let f = Fixture::new(0);
-        fs::create_dir(f.p("export")).unwrap();
-        fs::set_permissions(f.p("export"), fs::Permissions::from_mode(0o755)).unwrap();
         let rollout = edit_manifest(&f, |m| {
             m["prepare"]["provision_directories"] =
                 json!([{"path": f.p("export"), "group": "users", "mode": 0o750}])
@@ -4020,18 +4188,14 @@ exit 1"#,
         assert_eq!(fs::metadata(f.p("export")).unwrap().mode() & 0o7777, 0o755);
         // An absent one must be creatable: not below a directory others write
         // (even a sticky one, where its name could be taken first).
-        fs::remove_dir(f.p("export")).unwrap();
         fs::create_dir(f.p("shared")).unwrap();
         fs::set_permissions(f.p("shared"), fs::Permissions::from_mode(0o1777)).unwrap();
-        let rollout =
-            edit_manifest(
-                &f,
-                |m| {
-                    m["prepare"]["provision_directories"] =
-                        json!([{"path": f.p("shared/export"), "group": "users", "mode": 0o750}])
-                },
-            )
-            .unwrap();
+        let rollout = edit_manifest(&f, |m| {
+            m["prepare"]["read_write_paths"] = json!([f.p("evidence"), f.p("shared/export")]);
+            m["prepare"]["provision_directories"] =
+                json!([{"path": f.p("shared/export"), "group": "users", "mode": 0o750}])
+        })
+        .unwrap();
         let error = rollout.run(FENCE).unwrap_err().to_string();
         assert!(error.contains("untrusted ancestry"), "{error}");
         read_only(&f);
@@ -4143,6 +4307,7 @@ exit 1"#,
             return;
         }
         let f = Fixture::new(0);
+        fs::remove_dir(f.p("export")).unwrap();
         let mut rollout = edit_manifest(&f, |m| {
             m["prepare"]["provision_directories"] =
                 json!([{"path": f.p("export"), "group": "postgres", "mode": 0o750}])
@@ -4257,14 +4422,15 @@ exit 1"#,
     fn declared_parents_are_provisioned_before_nested_children() {
         let f = Fixture::new(0);
         let rollout = edit_manifest(&f, |m| {
+            m["prepare"]["read_write_paths"] = json!([f.p("evidence"), f.p("backup")]);
             m["prepare"]["provision_directories"] = json!([
-                {"path": f.p("export/evidence"), "group": "postgres", "mode": 0o700},
-                {"path": f.p("export"), "group": "users", "mode": 0o750},
+                {"path": f.p("backup/evidence"), "group": "postgres", "mode": 0o700},
+                {"path": f.p("backup"), "group": "users", "mode": 0o750},
             ])
         })
         .unwrap();
         rollout.provision_all().unwrap();
-        for (path, mode) in [("export", 0o750), ("export/evidence", 0o700)] {
+        for (path, mode) in [("backup", 0o750), ("backup/evidence", 0o700)] {
             let metadata = fs::symlink_metadata(f.p(path)).unwrap();
             assert_eq!(metadata.mode() & 0o7777, mode, "{path}");
             assert_eq!(metadata.uid(), euid(), "{path}");
@@ -4539,19 +4705,24 @@ exit 1"#,
             error
         };
         // A symlinked export root would make systemd grant the target write access.
+        fs::remove_dir(f.p("export")).unwrap();
         std::os::unix::fs::symlink(f.p("data"), f.p("export")).unwrap();
         let error = prepare(&|_| {});
         assert!(error.contains("untrusted ancestry"), "{error}");
         fs::remove_file(f.p("export")).unwrap();
+        fs::create_dir(f.p("export")).unwrap();
         // So would a writable path whose parent another user can modify.
         fs::create_dir_all(f.p("shared/backups")).unwrap();
         fs::set_permissions(f.p("shared"), fs::Permissions::from_mode(0o777)).unwrap();
-        let error = prepare(&|m| m["prepare"]["read_write_paths"] = json!([f.p("shared/backups")]));
+        let error = prepare(&|m| {
+            m["prepare"]["read_write_paths"] = json!([f.p("evidence"), f.p("shared/backups")])
+        });
         assert!(error.contains("untrusted ancestry"), "{error}");
         // Provisioning never follows (nor re-permissions) a symlink.
         std::os::unix::fs::symlink(f.p("data"), f.p("provisioned")).unwrap();
         let mode = fs::metadata(f.p("data")).unwrap().mode();
         let error = prepare(&|m| {
+            m["prepare"]["read_write_paths"] = json!([f.p("evidence"), f.p("provisioned")]);
             m["prepare"]["provision_directories"] =
                 json!([{"path": f.p("provisioned"), "group": "postgres", "mode": 448}])
         });
@@ -4660,7 +4831,7 @@ exit 1"#,
         }
         assert!(
             edit_manifest(&f, |m| m["prepare"]["read_write_paths"] =
-                json!(["/srv/backups"]))
+                json!(["/srv/backups", f.p("evidence")]))
             .is_ok()
         );
     }
@@ -4671,6 +4842,7 @@ exit 1"#,
         fs::create_dir(f.p("mnt")).unwrap();
         let rollout = edit_manifest(&f, |m| {
             m["prepare"]["required_mounts"] = json!([f.p("mnt")]);
+            m["prepare"]["read_write_paths"] = json!([f.p("evidence"), f.p("mnt/export")]);
             m["prepare"]["provision_directories"] =
                 json!([{"path": f.p("mnt/export"), "group": "postgres", "mode": 488}]);
         })
@@ -4681,6 +4853,221 @@ exit 1"#,
         assert!(error.contains("required mount"), "{error}");
         assert!(!f.p("mnt/export").exists());
         assert!(!f.calls().contains("systemd-run"));
+    }
+
+    #[test]
+    fn every_static_contract_of_a_post_fence_step_is_refused_before_the_fence() {
+        type Setup = fn(&Fixture) -> Value;
+        let mode = |f: &Fixture, path: &str, mode: u32| {
+            fs::set_permissions(f.p(path), fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let cases: [(&str, Setup, &str); 8] = [
+            // Adoption and the fence write the identity state as postgres.
+            (
+                "authority",
+                |f| {
+                    fs::set_permissions(f.p("authority"), fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                    json!({})
+                },
+                "never re-owned",
+            ),
+            // Harbor's inhibition and the publisher pause write as root.
+            (
+                "startup",
+                |f| {
+                    fs::set_permissions(f.p("startup"), fs::Permissions::from_mode(0o775)).unwrap();
+                    json!({})
+                },
+                "only root can write",
+            ),
+            (
+                "drop-in root",
+                |f| {
+                    fs::set_permissions(f.p("control"), fs::Permissions::from_mode(0o777)).unwrap();
+                    json!({})
+                },
+                "only root can write",
+            ),
+            // systemd fails the worker on a missing writable path.
+            (
+                "writable path",
+                |f| json!({"read_write_paths": [f.p("evidence"), f.p("absent")]}),
+                "neither exists nor is provisioned",
+            ),
+            // Harbor's preparation creates no evidence directory, even one
+            // inside a writable path.
+            (
+                "evidence",
+                |f| {
+                    let path = f.p("maintenance.json");
+                    let mut maintenance = durable::read_json(&path).unwrap();
+                    maintenance["recovery"]["receipt_file"] =
+                        json!(f.p("evidence/receipts/recovery.json"));
+                    fs::write(&path, maintenance.to_string()).unwrap();
+                    json!({})
+                },
+                "neither exists nor is provisioned",
+            ),
+            // `prepare` refuses a receipt this rollout never recorded.
+            (
+                "slot",
+                |f| {
+                    staged_file(&f.p("import/receipt.json"));
+                    json!({})
+                },
+                "did not stage",
+            ),
+            // `import` would create the slot directory below the absent mount.
+            (
+                "mount",
+                |f| json!({"required_mounts": [f.p("import")]}),
+                "required mount",
+            ),
+            // The worker could not search its way to a writable path.
+            (
+                "search",
+                |f| {
+                    fs::create_dir_all(f.p("outer/rw")).unwrap();
+                    fs::set_permissions(f.p("outer"), fs::Permissions::from_mode(0o600)).unwrap();
+                    json!({"read_write_paths": [f.p("evidence"), f.p("outer/rw")]})
+                },
+                "not searchable",
+            ),
+        ];
+        for (name, setup, expected) in cases {
+            let f = Fixture::new(0);
+            let prepare = setup(&f);
+            let rollout = edit_manifest(&f, |m| {
+                for (key, value) in prepare.as_object().unwrap() {
+                    m["prepare"][key] = value.clone();
+                }
+            })
+            .unwrap();
+            let error = rollout.run(FENCE).unwrap_err().to_string();
+            assert!(error.contains(expected), "{name}: {error}");
+            let calls = fs::read_to_string(f.p("calls.log")).unwrap_or_default();
+            assert!(
+                calls
+                    .lines()
+                    .all(|line| line.starts_with("systemctl show ")),
+                "{name}: {calls}"
+            );
+            assert!(rollout.journal().unwrap().is_none(), "{name}");
+            if f.p("outer").exists() {
+                mode(&f, "outer", 0o755);
+            }
+        }
+    }
+
+    fn staged_file(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(path, "{}").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn rollout_roots_are_pairwise_disjoint_but_for_intended_nestings() {
+        let f = Fixture::new(0);
+        let load = |edit: Value| {
+            let result = edit_manifest(&f, |m| {
+                for (key, value) in edit.as_object().unwrap() {
+                    m["prepare"][key] = value.clone();
+                }
+            });
+            f.manifest("rollout.json", 2);
+            result.err().map(|error| error.to_string())
+        };
+        let provision = |path: &str| json!({"path": f.p(path), "group": "postgres", "mode": 448});
+        for (edit, expected) in [
+            // Harbor's inhibition would make the export root unsearchable.
+            (
+                json!({"export_root": f.p("startup/export")}),
+                "startup inhibition state directory",
+            ),
+            (
+                json!({"read_write_paths": [f.p("evidence"), f.p("data")]}),
+                "PostgreSQL data directory",
+            ),
+            (
+                json!({"read_write_paths": [f.p("evidence"), f.p("import")]}),
+                "import slot directory",
+            ),
+            (
+                json!({"read_write_paths": [f.p("evidence"), f.p("export/x")],
+                    "provision_directories": [provision("export/x")]}),
+                "export root",
+            ),
+            (
+                json!({"read_write_paths": [f.p("evidence"), f.p("evidence/x")]}),
+                "writable path",
+            ),
+            // The worker writes evidence and provisioned directories.
+            (
+                json!({"read_write_paths": []}),
+                "outside its writable paths",
+            ),
+            (
+                json!({"provision_directories": [provision("elsewhere")]}),
+                "outside its writable paths",
+            ),
+        ] {
+            let error = load(edit.clone()).unwrap_or_default();
+            assert!(error.contains(expected), "{edit}: {error}");
+        }
+        // Evidence in its provisioned backup root, the export root in a
+        // writable path, and the export root's own provision contract.
+        for edit in [
+            json!({"read_write_paths": [f.p("evidence"), f.p("backup")],
+                "provision_directories": [provision("backup"), provision("backup/evidence")]}),
+            json!({"read_write_paths": [f.p("evidence"), f.p("exports")],
+                "export_root": f.p("exports/x")}),
+            json!({"provision_directories": [{"path": f.p("export"), "group": "users", "mode": 488}]}),
+        ] {
+            assert_eq!(load(edit.clone()), None, "{edit}");
+        }
+    }
+
+    #[test]
+    fn harbor_never_creates_the_parents_of_its_inhibition_state() {
+        let f = Fixture::new(0);
+        let path = f.p("maintenance.json");
+        let mut maintenance = durable::read_json(&path).unwrap();
+        maintenance["startup_inhibition"]["state_dir"] = json!(f.p("ctl/startup"));
+        fs::write(&path, maintenance.to_string()).unwrap();
+        f.rollout().run(FENCE).unwrap();
+        // Root-private parents would hide sibling postgres paths from it.
+        assert_eq!(fs::metadata(f.p("ctl")).unwrap().mode() & 0o7777, 0o755);
+        assert_eq!(
+            fs::metadata(f.p("ctl/startup")).unwrap().mode() & 0o7777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn import_never_creates_its_slot_directory_below_an_absent_mount() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| {
+            m["prepare"]["required_mounts"] = json!([f.p("import")])
+        })
+        .unwrap();
+        let mut journal = rollout.bound().unwrap();
+        journal.phase = Phase::Prepared;
+        journal.fence_token = Some(TOKEN.into());
+        rollout.save(&journal).unwrap();
+        let receipt = f.p("receipt.json");
+        fs::write(&receipt, "{}").unwrap();
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+        let error = rollout
+            .run(Action::Import {
+                receipt,
+                sha256: codec::digest(b"{}"),
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("required mount"), "{error}");
+        assert!(!f.p("import").exists());
     }
 
     #[test]

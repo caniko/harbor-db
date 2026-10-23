@@ -298,17 +298,43 @@ Exclusion and recovery:
   and `import` recover it from Harbor's evidence, admission (`inspect-recovery`
   ready) as `imported`, a fence-bound snapshot with its preparation binding and
   export plan as `prepared`.
-- **Preflight.** Anything static that could fail `prepare` once the fence is
-  held is checked by `fence` before any side effect (and again by `prepare`):
-  each provisioned directory either already has its declared owner, group and
-  mode (an existing one, perhaps a mountpoint, is never re-owned) or is
-  creatable under trusted ancestry and present mounts; every writable sandbox
-  path, the export root and the required mounts lie on a chain no other user
-  can swap; the import slot's directory is (or can be created) private to root;
-  and no record snapshot or `preparation.json` from another writer window (or
-  none) is present. Before `prepare` records `prepared`, the snapshot must be
-  bound to this rollout's fence and `preparation.json` must be its backup
-  binding. Stale evidence is never moved implicitly: move it aside first.
+- **Disjoint roots.** Both Nix and the manifest load require the PostgreSQL
+  data directory, the identity state directory (which also holds the writer
+  fence), the startup inhibition state directory, the journal root, the import
+  slot's directory, the export root, the writable paths and the provisioned
+  directories to be pairwise disjoint. The only intended nestings are a
+  provisioned directory inside a writable path or inside another provisioned
+  one (evidence in its backup root), and the export root inside a writable
+  path. The recovery evidence directories (snapshot, receipt and off-host
+  receipt) and the provisioned directories must lie inside the writable paths.
+- **Preflight.** Anything static that could fail a later step once the fence
+  is held is checked by `fence` before any side effect (and the worker's part
+  again by `prepare`):
+  - every declared mount is present;
+  - each provisioned directory, and the identity state directory that Harbor's
+    fence and adoption write as postgres (`postgres:postgres` 0700), either
+    already has its declared owner, group and mode (an existing one, perhaps a
+    mountpoint, is never re-owned) or is creatable under trusted ancestry;
+  - every writable path, evidence directory and the export root exists or is
+    provisioned (systemd fails a missing writable path, and Harbor creates no
+    evidence directory);
+  - every directory postgres must traverse to reach these grants it search
+    permission;
+  - every writable sandbox path, the export root and the required mounts lie
+    on a chain no other user can swap;
+  - the journal root, the startup inhibition state directory and the drop-in
+    root are root's and writable by no one else, or creatable;
+  - the import slot's directory is (or can be created) private to root, and
+    the slot is empty;
+  - no record snapshot or `preparation.json` from another writer window (or
+    none) is present.
+
+  `fence` creates the inhibition state's missing parents searchable before
+  Harbor would create them root-private, and `import` never creates the slot
+  directory below an absent mount. Before `prepare` records `prepared`, the
+  snapshot must be bound to this rollout's fence and `preparation.json` must
+  be its backup binding. Stale evidence is never moved implicitly: move it
+  aside first.
 - **Pinned reads.** Files other writers control (a transported receipt, the
   acceptance, preparation evidence, Harbor's fence selector and records) are
   read through one descriptor opened without following a symlink or blocking,
