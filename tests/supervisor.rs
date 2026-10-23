@@ -164,6 +164,83 @@ fn bound_inputs_are_checked_before_the_next_case_can_restore_them() {
 }
 
 #[test]
+fn restored_directory_swap_cannot_hide_execution_against_replacement_inputs() {
+    if !private_root::enter() {
+        return;
+    }
+    for (external, ancestor) in [(false, false), (true, false), (true, true)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut selection = spec(tmp.path(), "true", 5);
+        let directory = tmp.path().join(if external {
+            "external"
+        } else {
+            "snapshot/nested"
+        });
+        fs::create_dir_all(directory.join("nested")).unwrap();
+        let input_directory = if ancestor {
+            directory.join("nested")
+        } else {
+            directory.clone()
+        };
+        let input = input_directory.join("input");
+        fs::write(&input, "original").unwrap();
+        if external {
+            selection
+                .inputs
+                .push(supervisor::bind_file(&input).unwrap());
+        } else {
+            selection.inputs = supervisor::bind_tree(&selection.source_root).unwrap();
+        }
+        let identity = fs::metadata(&input).unwrap();
+        let observed = tmp.path().join("observed");
+        let script = format!(
+            "mv '{0}' '{0}.saved'; mkdir -p '{1}'; printf replacement > '{1}/input'; cat '{1}/input' > '{2}'; rm -r '{0}'; mv '{0}.saved' '{0}'",
+            directory.display(),
+            input_directory.display(),
+            observed.display()
+        );
+        selection.cases[0].execution = Execution::Argv {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                format!(
+                    "{script}; printf '%s' '{{\"schema\":1,\"case_id\":\"case\",\"assertions\":[{{\"name\":\"fixture completed\",\"passed\":true}}]}}' > '{}'",
+                    tmp.path().join("assertion.json").display()
+                ),
+            ],
+            env: BTreeMap::from([("PATH".into(), std::env::var("PATH").unwrap())]),
+        };
+        let run = supervisor::create_run(Some(tmp.path()), "directory-swap", selection).unwrap();
+        supervisor::worker(&run).unwrap();
+        assert_eq!(fs::read_to_string(&observed).unwrap(), "replacement");
+        assert_eq!(fs::read_to_string(&input).unwrap(), "original");
+        use std::os::unix::fs::MetadataExt;
+        let restored = fs::metadata(&input).unwrap();
+        assert_eq!(
+            (
+                identity.dev(),
+                identity.ino(),
+                identity.ctime(),
+                identity.ctime_nsec()
+            ),
+            (
+                restored.dev(),
+                restored.ino(),
+                restored.ctime(),
+                restored.ctime_nsec()
+            )
+        );
+        assert!(
+            !supervisor::status(&run).unwrap().results[0]
+                .evidence_errors
+                .is_empty(),
+            "external={external}, ancestor={ancestor}"
+        );
+        assert_eq!(supervisor::verify(&run).unwrap().verdict, Verdict::Failed);
+    }
+}
+
+#[test]
 fn eof_is_not_exit_and_follower_has_no_authority() {
     if !private_root::enter() {
         return;
