@@ -6947,6 +6947,19 @@ selectors = [
   "every_quiesced_receiver_is_restarted_even_if_one_restart_fails",
   "abort_unwinds_an_acquisition_interrupted_before_fence_open",
   "the_state_directory_is_never_created_below_an_absent_mount",
+  "missing_journal_components_are_never_created_below_a_writable_directory",
+  "a_fence_this_rollout_did_not_open_is_refused_not_adopted",
+  "mutating_steps_hold_the_shared_execution_lock_but_status_does_not",
+  "an_active_preparation_worker_blocks_preparation_receivers_and_the_pause",
+  "an_interrupted_preparation_stops_its_worker_and_restores_receivers",
+  "subprocesses_are_bounded_and_report_their_diagnostics",
+  "an_unwinding_retry_never_restarts_the_reopened_primary",
+  "activated_and_thaw_require_the_running_generation_to_carry_the_manifest",
+  "a_lost_journal_is_aborted_only_by_explicitly_adopting_the_live_fence",
+  "deliberate_starts_clear_the_systemd_start_limit",
+  "a_finished_abort_is_archived_so_the_candidate_can_start_again",
+  "worker_and_executor_output_never_reaches_step_stdout",
+  "an_unreadable_journal_is_an_error_not_an_idle_rollout",
 ]
 
 [[inventories]]

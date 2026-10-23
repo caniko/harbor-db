@@ -146,7 +146,8 @@ enum Operation {
 }
 #[derive(Subcommand)]
 enum RolloutStep {
-    /// Show the journal phase and the next action.
+    /// Show the journal phase and the next action (needs read access to the
+    /// root-owned journal; takes no lease).
     Status,
     /// Perform the next local step, or print the external action.
     Next,
@@ -180,7 +181,11 @@ enum RolloutStep {
         acceptance: PathBuf,
     },
     /// Back out before activation: close the fence and restart clients.
-    Abort,
+    Abort {
+        /// With no journal, explicitly adopt Harbor's live writer fence by its token.
+        #[arg(long)]
+        adopt_fence_token: Option<String>,
+    },
 }
 fn operate(args: Args) -> Result<Option<Value>> {
     if let Operation::Rollout { step } = args.command {
@@ -203,7 +208,7 @@ fn operate(args: Args) -> Result<Option<Value>> {
             RolloutStep::Adopt => Action::Adopt,
             RolloutStep::Activated => Action::Activated,
             RolloutStep::Thaw { acceptance } => Action::Thaw { acceptance },
-            RolloutStep::Abort => Action::Abort,
+            RolloutStep::Abort { adopt_fence_token } => Action::Abort { adopt_fence_token },
         };
         return Ok(Some(storage::postgres_rollout::operate(
             &args.config,

@@ -345,6 +345,9 @@ in
           rollout = builtins.fromJSON (builtins.unsafeDiscardStringContext etc."harbor-db/postgresql-rollout.json".source.text);
         in
           !(eval.config.environment.etc ? "harbor-db/postgresql-rollout.json")
+          && rollout.version == 2
+          && rollout.execution_lock == null
+          && !(rollout ? state_dir || rollout ? runuser)
           && rollout.system_identifier == "12345"
           && rollout.clients == ["fixture-client.service"]
           && rollout.setup_units == ["postgresql-setup.service"]

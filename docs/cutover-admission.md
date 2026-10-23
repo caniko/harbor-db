@@ -189,8 +189,8 @@ The activation/deep-verification budget is separate and bounded at 900 seconds.
 `/etc/harbor-db/postgresql-rollout.json`. It binds the fenced maintenance
 manifest, the preparation argv, the client inventory (defaults to
 `writerFence.blockedUnits`), setup units, WAL receivers, publishers to pause and
-the independent executor. One resumable journal under `stateDir` sequences the
-existing verbs:
+the independent executor. One resumable journal at the fixed root
+`/var/lib/harbor-db/postgresql-rollout` sequences the existing verbs:
 
 ```console
 # harbor-db-postgres --config /etc/harbor-db/postgresql-rollout.json rollout next
@@ -203,12 +203,53 @@ existing verbs:
 | `certify` | (executor) | as the declared unprivileged executor, run its restore/certify argv on the transported export |
 | `import --receipt --sha256` | `imported` | stage the digest-verified receipt and re-run preparation to admission |
 | `adopt` | `adopted` | re-verify live records against the accepted snapshot, then `adopt-live` and `check` |
-| `activated` | `activated` | record that the candidate generation is active under the fence |
-| `thaw --acceptance` | `thawed` | verify a root-owned acceptance bound to host, primary, manifest, fence token and snapshot; close the fence, restart the primary and clients, lift the pause |
+| `activated` | `activated` | require the running generation to carry this manifest, then record that it is active under the fence |
+| `thaw --acceptance` | `thawed` | require the running generation to carry this manifest; verify a root-owned acceptance bound to host, primary, manifest, fence token and snapshot; close the fence, restart the primary and clients, lift the pause |
 | `abort` | `aborted` | before activation only: close (or confirm closed) the fence, restart the primary and recorded clients, lift the pause; evidence is kept |
 
 `rollout next` performs the next local step or prints the exact external action
-(executor certification, activation, thaw), and `rollout status` shows the
-journal. Every step is idempotent; rerun it after an interruption. Steps are
-bound to the manifest that opened the journal, but `abort` accepts another
-manifest of the same primary so a superseded candidate can always be unwound.
+(executor certification, activation, thaw). From `prepared` it names the
+manifest closure copy (`nix copy --to ssh-ng://<executor> <manifest>`), because
+the executor runs the Harbor and certify argv that closure contains, as well as
+the export transfer. Every step is idempotent; rerun it after an interruption.
+Steps are bound to the manifest that opened the journal, but `abort` accepts
+another manifest of the same primary so a superseded candidate can always be
+unwound.
+
+Exclusion and recovery:
+
+- **Foreign fences.** Harbor resumes any prepared writer fence, so `fence` (and
+  the pre-fence completion inside `abort`) refuses a live fence or interrupted
+  fence selector whose token this journal does not own; finish it with the
+  coordinator that opened it.
+- **Execution lock.** `executionLock` names an existing host lock file (for
+  example `/run/lock/canix/switch.lock`). Every mutating step holds a
+  non-blocking exclusive `flock` on it besides the journal's `rollout.lock`, and
+  contention names the holder PID. `status` takes no lock.
+- **Preparation worker.** Preparation runs as the transient
+  `harbor-db-rollout-prepare.service` with a one-day bound. Termination
+  signals are deferred while it runs: an interrupt stops the unit, restores the
+  receivers and fails the step. While that unit is active (for example an
+  orphan of a killed coordinator) no step starts another worker, restarts
+  receivers or lifts the publisher pause; `status` and `next` say so.
+- **Bounded commands.** Every `systemctl` and Harbor command runs in its own
+  process group with a bound (600 and 1800 seconds). Cluster-owned verbs drop
+  to the `postgres` account in-process.
+- **Unwinding.** Once `abort` or `thaw` has closed the fence and verified the
+  normal primary, the journal records it; a retry only returns clients,
+  receivers and publishers and never restarts the primary again.
+- **Lost journal.** Without a journal, `abort` names Harbor's live fence token
+  (verify it with `inspect-fence --token`). `rollout abort --adopt-fence-token
+  <token>` then unwinds that fence through the normal close. The lost journal's
+  stopped clients are unknown, so re-activate the current generation afterwards.
+- **Retrying after abort.** A finished abort (reopen recorded, no Harbor fence
+  held) is archived to `rollout.<unix-seconds>.aborted.json` beside the journal
+  by the next `fence` or `next`, which then starts a fresh rollout; `status`
+  lists the archives.
+- **Start limits.** Every coordinator start (primary, clients, receivers) runs
+  `systemctl reset-failed` first, so repeated cycles never leave a unit down on
+  its start limit.
+- **Output.** Each step prints exactly one JSON status document on stdout; the
+  preparation worker's and the executor command's own output goes to stderr.
+- **Status.** `rollout status` needs read access to the root-owned journal; an
+  unreadable journal is an error, never an idle rollout.

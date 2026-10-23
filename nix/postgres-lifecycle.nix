@@ -93,16 +93,15 @@
   });
   inherit (cfg) rollout;
   rolloutManifest = pkgs.writeText "harbor-db-postgresql-rollout.json" (builtins.toJSON {
-    version = 1;
+    version = 2;
     host = config.networking.hostName;
     system_identifier = cfg.recovery.systemIdentifier;
     harbor = lib.getExe cfg.package;
     systemctl = "${pkgs.systemd}/bin/systemctl";
-    runuser = "${pkgs.util-linux}/bin/runuser";
     systemd_run = "${pkgs.systemd}/bin/systemd-run";
     maintenance = toString rollout.maintenance;
     preparation = toString preparationManifest;
-    state_dir = rollout.stateDir;
+    execution_lock = rollout.executionLock;
     socket_dir = preparation.socketDir;
     inherit (preparation) port;
     inherit (rollout) clients;
@@ -347,11 +346,17 @@ in {
             defaultText = "the module's PostgreSQL manifest";
             description = "Fenced maintenance manifest; its recovery must require the writer fence.";
           };
-          # Dedicated directories at least three levels deep: never `/`, `/etc`
-          # or `/var/lib`. The coordinator enforces the same rule at load.
-          stateDir = mkOption {
-            type = types.strMatching "/[^/.][^/]*/[^/.][^/]*/[^/.][^/]*(/[^/.][^/]*)*";
-            default = "/var/lib/harbor-db/postgresql-rollout";
+          # The journal lives at the fixed /var/lib/harbor-db/postgresql-rollout,
+          # so no manifest can relocate (and lose) an open rollout.
+          executionLock = mkOption {
+            type = types.nullOr (types.strMatching "/[^/.][^/]*/[^/.][^/]*/[^/.][^/]*(/[^/.][^/]*)*");
+            default = null;
+            example = "/run/lock/canix/switch.lock";
+            description = ''
+              Existing host lock file every mutating rollout step holds (a
+              non-blocking exclusive flock), shared with the consumer's
+              activations and other database coordinators.
+            '';
           };
           clients = mkOption {
             type = types.listOf types.nonEmptyStr;
