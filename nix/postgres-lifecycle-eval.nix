@@ -387,7 +387,16 @@ in
           && lib.any (entry: !entry.assertion && lib.hasPrefix "Rollout units must each have one role" entry.message)
           (withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.retiredClients = ["fixture-backup.service"];}];}).config.assertions
           && lib.any (entry: !entry.assertion && lib.hasPrefix "Rollout units must each have one role" entry.message)
-          (withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.receiverUnits = ["postgresql.service"];}];}).config.assertions;
+          (withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.receiverUnits = ["postgresql.service"];}];}).config.assertions
+          # Only clients may be templates; the export root has one contract.
+          && lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout paused publishers, receivers" entry.message)) withRollout.config.assertions
+          && lib.all (module:
+            lib.any (entry: !entry.assertion && lib.hasPrefix "Rollout paused publishers, receivers" entry.message)
+            (withRollout.extendModules {modules = [module];}).config.assertions) [
+            {services.harbor-db.postgresql.rollout.pausedPublishers = lib.mkForce ["fixture-backup@.service"];}
+            {services.harbor-db.postgresql.rollout.receiverUnits = ["fixture-receiver@.service"];}
+            {services.harbor-db.postgresql.recoveryPreparation.provisionDirectories = ["/srv/harbor-db/export"];}
+          ];
         message = "A rollout replaces the legacy pre-switch preparation with its activation guard and refuses systemd property values that split into extra entries.";
       }
       {

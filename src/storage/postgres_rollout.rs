@@ -550,6 +550,31 @@ impl Rollout {
         {
             return Err(invalid("invalid rollout manifest or primary binding"));
         }
+        // Only clients are enumerated from active units, so only they may be
+        // templates; publishers, receivers and setup units are acted on by name.
+        if (manifest.paused_publishers.iter())
+            .chain(&manifest.receiver_units)
+            .chain(&manifest.setup_units)
+            .any(|unit| unit.ends_with("@.service"))
+        {
+            return Err(invalid(
+                "paused publishers, receivers and setup units must name units, not templates",
+            ));
+        }
+        // One owner and mode contract per provisioned path (an export root
+        // also listed as a generic directory could satisfy neither).
+        let provisions = &manifest.prepare.provision_directories;
+        for (index, a) in provisions.iter().enumerate() {
+            if provisions[index + 1..]
+                .iter()
+                .any(|b| b.path == a.path && (b.group != a.group || b.mode != a.mode))
+            {
+                return Err(invalid(format!(
+                    "{} is provisioned twice with different owners or modes",
+                    a.path.display()
+                )));
+            }
+        }
         // Each unit has one role: a retired client that is also a paused
         // publisher would be restarted when the pause lifts, a receiver that is
         // also a client restarted by both. Templates cover their instances.
@@ -949,13 +974,21 @@ impl Rollout {
 
     /// Start the primary, then wait for the declared setup units: they connect
     /// as the control role right after startup and must not race inspection.
-    fn start_primary(&self) -> Result<()> {
+    /// Fencing requires setup to have succeeded (a oneshot ends `inactive`);
+    /// unwinding only waits, since refusing there would keep writers down.
+    fn start_primary(&self, require_setup: bool) -> Result<()> {
         self.start(self.primary_unit())?;
         let deadline = Instant::now() + Duration::from_secs(self.manifest.setup_settle_seconds);
         loop {
             let mut busy = false;
             for unit in &self.manifest.setup_units {
                 let state = self.show(unit, "ActiveState")?;
+                if require_setup && state == "failed" {
+                    return Err(invalid(format!(
+                        "setup unit {unit} failed; the writer window is retained: inspect it \
+                         (journalctl -u {unit}), fix and restart it, then rerun"
+                    )));
+                }
                 busy |= !self.show(unit, "Job")?.is_empty()
                     || matches!(state.as_str(), "activating" | "deactivating" | "reloading");
             }
@@ -1344,7 +1377,7 @@ impl Rollout {
         self.stop(self.primary_unit())?;
         self.open_fence(journal, adopt)?;
         self.release_startup(journal, "prepared")?;
-        self.start_primary()?;
+        self.start_primary(true)?;
         self.inspect_fence(journal)?;
         journal.phase = Phase::Fenced;
         self.save(journal)
@@ -1502,7 +1535,12 @@ impl Rollout {
     /// receiver quiesced here is recorded before it is stopped and restarted
     /// whatever the outcome; a failed restart stays recorded for the next run.
     /// Returns whether preparation reported ready.
-    fn run_preparation(&self, journal: &mut Journal, import: bool) -> Result<bool> {
+    fn run_preparation(
+        &self,
+        journal: &mut Journal,
+        import: bool,
+        settle: impl FnOnce(&mut Journal, bool) -> Result<()>,
+    ) -> Result<()> {
         if self.preparing()? {
             return Err(invalid(BUSY));
         }
@@ -1530,9 +1568,13 @@ impl Rollout {
             let _ = self.restart_receivers(journal);
             return Err(error);
         }
-        let ready = self.await_worker(import, &signals);
-        self.restart_receivers(journal)?;
-        ready
+        // Journal the worker's outcome (its phase, export or admission) before
+        // receiver cleanup: a cleanup retry must never rerun preparation and
+        // its export command. Pending receivers stay journaled for the retry.
+        let settled =
+            (self.await_worker(import, &signals)).and_then(|ready| settle(journal, ready));
+        let restarted = self.restart_receivers(journal);
+        settled.and(restarted)
     }
 
     /// The hand-off export the postgres-written evidence names: one repository
@@ -1580,25 +1622,27 @@ impl Rollout {
     fn prepare(&self, journal: &mut Journal) -> Result<()> {
         self.inspect_fence(journal)?;
         let import = self.import_slot(journal)?;
-        if self.run_preparation(journal, import)? {
-            journal.phase = Phase::Imported;
-            return self.save(journal);
-        }
-        // Harbor stops before admission until the independent receipt exists;
-        // the retained export is then the hand-off to the executor.
-        // Postgres-written evidence: read pinned and bounded.
-        let evidence = self.evidence_dir()?.join("preparation.json");
-        let preparation = codec::decode(&read_pinned(&evidence, MAX_RECEIPT_BYTES)?.1)?;
-        if import {
-            return Err(invalid(
-                "recovery preparation failed; retain the writer window and inspect its unit",
-            ));
-        }
-        let (export, digest) = self.reported_export(&preparation)?;
-        journal.export_sha256 = Some(digest);
-        journal.export = Some(export);
-        journal.phase = Phase::Prepared;
-        self.save(journal)
+        self.run_preparation(journal, import, |journal, ready| {
+            if ready {
+                journal.phase = Phase::Imported;
+                return self.save(journal);
+            }
+            if import {
+                return Err(invalid(
+                    "recovery preparation failed; retain the writer window and inspect its unit",
+                ));
+            }
+            // Harbor stops before admission until the independent receipt
+            // exists; the retained export is then the hand-off to the executor.
+            // Postgres-written evidence: read pinned and bounded.
+            let evidence = self.evidence_dir()?.join("preparation.json");
+            let preparation = codec::decode(&read_pinned(&evidence, MAX_RECEIPT_BYTES)?.1)?;
+            let (export, digest) = self.reported_export(&preparation)?;
+            journal.export_sha256 = Some(digest);
+            journal.export = Some(export);
+            journal.phase = Phase::Prepared;
+            self.save(journal)
+        })
     }
 
     /// Whether a receipt that `rollout import` staged and recorded is waiting.
@@ -1649,13 +1693,15 @@ impl Rollout {
             super::recovery::stage_off_host_import(&verified, slot)?;
         }
         self.inspect_fence(journal)?;
-        if !self.run_preparation(journal, true)? {
-            return Err(invalid(
-                "independent receipt was not admitted; retain the writer window",
-            ));
-        }
-        journal.phase = Phase::Imported;
-        self.save(journal)
+        self.run_preparation(journal, true, |journal, ready| {
+            if !ready {
+                return Err(invalid(
+                    "independent receipt was not admitted; retain the writer window",
+                ));
+            }
+            journal.phase = Phase::Imported;
+            self.save(journal)
+        })
     }
 
     fn adopt(&self, journal: &mut Journal) -> Result<()> {
@@ -1708,7 +1754,7 @@ impl Rollout {
                     // The shared inhibition was already released at another
                     // coordinator's fence boundary: only restart the primary
                     // this rollout stopped (an unrecorded fence is not ours to verify).
-                    self.start_primary()?;
+                    self.start_primary(false)?;
                     if live.is_none() {
                         self.inspect_live()?;
                     }
@@ -1744,7 +1790,7 @@ impl Rollout {
                     self.response(true, &["fence-close", "--token", &token], "closed-offline")?;
                 }
                 self.release_startup(journal, "closed")?;
-                self.start_primary()?;
+                self.start_primary(false)?;
                 self.inspect_live()?;
             }
             journal.reopened = true;
@@ -2084,6 +2130,23 @@ impl Rollout {
         let Some(path) = &self.manifest.execution_lock else {
             return Ok(None);
         };
+        // The lock serializes fencing with activation only if no one else can
+        // swap its inode: it must sit in a real directory chain only root can
+        // modify (no symlink, no writable or sticky-shared directory), and the
+        // inode opened without following a symlink is the one locked.
+        let parent = path
+            .parent()
+            .ok_or_else(|| invalid("execution lock has no directory"))?;
+        match self.walk(parent, &[], false)? {
+            Some(metadata)
+                if [0, euid()].contains(&metadata.uid()) && metadata.mode() & 0o022 == 0 => {}
+            _ => {
+                return Err(invalid(format!(
+                    "execution lock {} must sit in a directory only root can modify",
+                    path.display()
+                )));
+            }
+        }
         durable::lock(path, false, false)
             .map(Some)
             .map_err(|error| {
@@ -2243,6 +2306,11 @@ impl Rollout {
             return Err(invalid(
                 "the rollout is unwinding; rerun `rollout abort` or `rollout thaw`",
             ));
+        }
+        // A step that journaled its outcome but failed restoring receivers left
+        // them pending: any retry, in whatever phase it now is, resumes them.
+        if !journal.pending_receivers.is_empty() {
+            self.restart_receivers(&mut journal)?;
         }
         let phase = journal.phase;
         let require = |allowed: &[Phase]| {
@@ -2630,11 +2698,7 @@ esac"#,
             .map(|arg| arg.to_string_lossy().into_owned())
             .any(|arg| arg.starts_with("--property=ReadWritePaths=") && arg.contains(&export));
         assert!(writable, "export root must be writable by the worker");
-        assert!(
-            !rollout
-                .run_preparation(&mut rollout.bound().unwrap(), false)
-                .unwrap()
-        );
+        assert!(!worker_ready(&rollout, &mut rollout.bound().unwrap()).unwrap());
         let calls = f.calls();
         assert!(calls.contains("systemctl stop -- r.service"), "{calls}");
         assert!(calls.contains("systemctl start -- r.service"), "{calls}");
@@ -2680,6 +2744,16 @@ esac"#,
         fs::write(f.p("import/receipt.json"), br#"{"status":"other"}"#).unwrap();
         let error = import();
         assert!(error.contains("different receipt"), "{error}");
+    }
+
+    /// The worker's readiness, settled as `prepare` and `import` would.
+    fn worker_ready(rollout: &Rollout, journal: &mut Journal) -> Result<bool> {
+        let mut ready = false;
+        rollout.run_preparation(journal, false, |_, outcome| {
+            ready = outcome;
+            Ok(())
+        })?;
+        Ok(ready)
     }
 
     fn edit_manifest(f: &Fixture, edit: impl FnOnce(&mut Value)) -> Result<Rollout> {
@@ -2746,11 +2820,7 @@ esac"#,
         fs::write(f.p("units/r1.service"), "active").unwrap();
         // A directory makes the fake systemctl's stop and show fail for r2.
         fs::create_dir(f.p("units/r2.service")).unwrap();
-        assert!(
-            rollout
-                .run_preparation(&mut rollout.bound().unwrap(), false)
-                .is_err()
-        );
+        assert!(worker_ready(&rollout, &mut rollout.bound().unwrap()).is_err());
         assert!(
             f.calls().contains("systemctl start -- r1.service"),
             "{}",
@@ -2831,7 +2901,7 @@ esac"#,
         )
         .unwrap();
         let mut journal = rollout.bound().unwrap();
-        assert!(rollout.run_preparation(&mut journal, false).is_err());
+        assert!(worker_ready(&rollout, &mut journal).is_err());
         assert_eq!(f.unit("r2.service"), "active");
         // The failed restart stays recorded and is retried by the next run.
         assert_eq!(journal.pending_receivers, ["r1.service"]);
@@ -3106,6 +3176,118 @@ esac"#,
         journal.phase = Phase::Prepared;
         journal.receipt_sha256 = Some(codec::digest(bytes));
         rollout.save(&journal).unwrap();
+    }
+
+    #[test]
+    fn a_completed_preparation_is_journaled_before_receivers_restart() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| m["receiver_units"] = json!(["r.service"])).unwrap();
+        fs::write(f.p("units/r.service"), "active").unwrap();
+        rollout.run(FENCE).unwrap();
+        // The worker admits the receipt, then restoring the receiver fails.
+        executable(
+            &f.p("systemd-run"),
+            &format!(
+                "echo \"systemd-run $*\" >> {}\nexit 0",
+                f.p("calls.log").display()
+            ),
+        );
+        let systemctl = fail_start(&f, "r.service");
+        assert!(rollout.run(Action::Prepare).is_err());
+        let journal = rollout.journal().unwrap().unwrap();
+        assert_eq!(
+            journal.phase,
+            Phase::Imported,
+            "the outcome is journaled first"
+        );
+        assert_eq!(journal.pending_receivers, ["r.service"]);
+        // The retry, now adopting, resumes the receiver and never reruns
+        // preparation (and its export command).
+        fs::write(f.p("systemctl"), systemctl).unwrap();
+        assert_eq!(rollout.run(NEXT).unwrap()["phase"], "adopted");
+        assert_eq!(f.unit("r.service"), "active");
+        assert_eq!(f.calls().matches("systemd-run ").count(), 1);
+    }
+
+    #[test]
+    fn templates_and_conflicting_provisions_are_refused_at_load() {
+        let f = Fixture::new(0);
+        for (field, value) in [
+            ("paused_publishers", json!(["pub@.service"])),
+            ("receiver_units", json!(["r@.service"])),
+            ("setup_units", json!(["setup@.service"])),
+        ] {
+            let error = edit_manifest(&f, |m| m[field] = value.clone())
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default();
+            assert!(error.contains("not templates"), "{field}: {error}");
+            f.manifest("rollout.json", 2);
+        }
+        // An export root also listed as a generic provision directory.
+        let export = f.p("export");
+        let error = edit_manifest(&f, |m| {
+            m["prepare"]["provision_directories"] = json!([
+                {"path": export, "group": "postgres", "mode": 0o700},
+                {"path": export, "group": "users", "mode": 0o750},
+            ])
+        })
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+        assert!(error.contains("provisioned twice"), "{error}");
+        f.manifest("rollout.json", 2);
+        assert!(
+            edit_manifest(&f, |m| {
+                m["prepare"]["provision_directories"] = json!([
+                    {"path": export, "group": "users", "mode": 0o750},
+                    {"path": export, "group": "users", "mode": 0o750},
+                ])
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_failed_setup_unit_fails_the_fence_and_can_be_retried() {
+        let f = Fixture::new(0);
+        fs::write(f.p("units/setup.service"), "failed").unwrap();
+        let error = f.rollout().run(FENCE).unwrap_err().to_string();
+        assert!(error.contains("setup unit setup.service failed"), "{error}");
+        assert!(!f.calls().contains("harbor inspect-fence"));
+        let journal = f.rollout().journal().unwrap().unwrap();
+        assert_eq!(journal.phase, Phase::Idle);
+        // Once fixed (a oneshot ends inactive), the retry fences.
+        fs::write(f.p("units/setup.service"), "inactive").unwrap();
+        assert_eq!(f.rollout().run(FENCE).unwrap()["phase"], "fenced");
+    }
+
+    #[test]
+    fn the_execution_lock_must_sit_in_a_directory_only_root_can_modify() {
+        let f = Fixture::new(0);
+        let locked = |path: PathBuf| {
+            let rollout = edit_manifest(&f, |m| m["execution_lock"] = json!(path)).unwrap();
+            let result = rollout.run(FENCE).map(drop);
+            f.manifest("rollout.json", 2);
+            result
+        };
+        fs::create_dir_all(f.p("locks")).unwrap();
+        fs::write(f.p("locks/switch.lock"), "").unwrap();
+        // Reached through a symlinked directory, its inode could be swapped.
+        std::os::unix::fs::symlink(f.p("locks"), f.p("linked")).unwrap();
+        let error = locked(f.p("linked/switch.lock")).unwrap_err().to_string();
+        assert!(error.contains("untrusted ancestry"), "{error}");
+        // ... or in a directory others can write.
+        fs::create_dir(f.p("open")).unwrap();
+        fs::set_permissions(f.p("open"), fs::Permissions::from_mode(0o1777)).unwrap();
+        fs::write(f.p("open/switch.lock"), "").unwrap();
+        let error = locked(f.p("open/switch.lock")).unwrap_err().to_string();
+        assert!(error.contains("only root can modify"), "{error}");
+        // The lock itself is never followed.
+        std::os::unix::fs::symlink(f.p("locks/switch.lock"), f.p("locks/link.lock")).unwrap();
+        assert!(locked(f.p("locks/link.lock")).is_err());
+        assert!(!f.p("calls.log").exists() || !f.calls().contains("inhibit-startup"));
+        locked(f.p("locks/switch.lock")).unwrap();
     }
 
     #[test]
@@ -3552,7 +3734,7 @@ esac"#,
             unsafe { libc::pthread_kill(coordinator, libc::SIGINT) };
         });
         let mut journal = rollout.bound().unwrap();
-        let error = rollout.run_preparation(&mut journal, false);
+        let error = worker_ready(&rollout, &mut journal);
         interrupter.join().unwrap();
         let error = error.unwrap_err().to_string();
         assert!(error.contains("interrupted"), "{error}");
@@ -3719,8 +3901,7 @@ esac"#,
         let f = Fixture::new(0);
         let prepare = |edit: &dyn Fn(&mut Value)| {
             let rollout = edit_manifest(&f, |m| edit(m)).unwrap();
-            let error = rollout
-                .run_preparation(&mut rollout.bound().unwrap(), false)
+            let error = worker_ready(&rollout, &mut rollout.bound().unwrap())
                 .unwrap_err()
                 .to_string();
             f.manifest("rollout.json", 2);
@@ -3863,8 +4044,7 @@ esac"#,
                 json!([{"path": f.p("mnt/export"), "group": "postgres", "mode": 488}]);
         })
         .unwrap();
-        let error = rollout
-            .run_preparation(&mut rollout.bound().unwrap(), false)
+        let error = worker_ready(&rollout, &mut rollout.bound().unwrap())
             .unwrap_err()
             .to_string();
         assert!(error.contains("required mount"), "{error}");
@@ -4054,11 +4234,7 @@ esac"#,
             let f = Fixture::new(0);
             executable(&f.p("systemd-run"), "echo WORKER-CHATTER; exit 1");
             let rollout = executor_rollout(&f);
-            assert!(
-                !rollout
-                    .run_preparation(&mut rollout.bound().unwrap(), false)
-                    .unwrap()
-            );
+            assert!(!worker_ready(&rollout, &mut rollout.bound().unwrap()).unwrap());
             if !root() {
                 rollout
                     .certify(&f.p("export"), &"a".repeat(64), &f.p("workspace"))

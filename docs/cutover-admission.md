@@ -243,9 +243,11 @@ Exclusion and recovery:
   no live fence the retry simply opens one. The flag is refused once a token is
   recorded.
 - **Execution lock.** `executionLock` names an existing host lock file (for
-  example `/run/lock/canix/switch.lock`). Every mutating step holds a
-  non-blocking exclusive `flock` on it besides the journal's `rollout.lock`, and
-  contention names the holder PID. `status` takes no lock.
+  example `/run/lock/canix/switch.lock`) in a real directory chain only root can
+  modify, so its inode cannot be swapped. Every mutating step holds a
+  non-blocking exclusive `flock` on the inode it opened without following a
+  symlink, besides the journal's `rollout.lock`; contention names the holder
+  PID. `status` takes no lock.
 - **Preparation worker.** Preparation runs as the transient
   `harbor-db-rollout-prepare.service` with a one-day bound. Termination
   signals are deferred while it runs: an interrupt stops the unit, restores the
@@ -278,6 +280,17 @@ Exclusion and recovery:
   receivers, setup units and `postgresql.service` may not overlap, templates
   included, both in Nix and when the manifest is loaded: a retired client that
   is also a paused publisher would be restarted when the pause lifts.
+  Only clients (and retired clients), enumerated from active units, may be
+  `@.service` templates; publishers, receivers and setup units name units. A
+  provisioned path has one owner and mode contract (the export root is never
+  also a generic provision directory).
+- **Setup.** Fencing requires every setup unit to settle successfully: a
+  `failed` one fails the fence with the window retained (fix and restart it,
+  then rerun); unwinding only waits for them.
+- **Preparation outcome.** The worker's outcome (phase, export or admission) is
+  journaled before the receivers it stopped are restored, so a failed restore
+  never reruns preparation or its export command; any later step first
+  restores the pending receivers.
 - **Preflight.** Anything static that could fail `prepare` once the fence is
   held is checked by `fence` before any side effect (and again by `prepare`):
   each provisioned directory either already has its declared owner, group and

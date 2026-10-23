@@ -581,6 +581,16 @@ in {
         message = "Rollout units must each have one role: clients and retired clients, paused publishers, receivers, setup units and postgresql.service may not overlap (templates included).";
       }
       {
+        # Mirrors the coordinator: only clients are enumerated from active
+        # units, and the export root gets its own owner and mode contract.
+        assertion = let
+          named = rollout.pausedPublishers ++ rollout.receiverUnits ++ cfg.writerFence.setupUnits;
+          valid = lib.all (unit: !(lib.hasSuffix "@.service" unit)) named && !(lib.elem rollout.exportRoot preparation.provisionDirectories);
+        in
+          rollout == null || preparation == null || valid;
+        message = "Rollout paused publishers, receivers and setup units must name units, not templates, and the export root must not also be a recoveryPreparation provision directory.";
+      }
+      {
         # Mirrors the coordinator: systemd splits these property values on
         # whitespace (LoadCredential on `:`).
         assertion = let
