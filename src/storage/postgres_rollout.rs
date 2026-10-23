@@ -187,6 +187,44 @@ fn response(command: &mut Command, status: &str) -> Result<Value> {
     Ok(value)
 }
 
+/// A normalized absolute path at least three levels deep (`/var/lib/x`), so a
+/// rollout never claims `/`, `/etc` or another shared system directory.
+fn dedicated(path: &Path) -> bool {
+    use std::path::Component;
+    path.is_absolute()
+        && path
+            .components()
+            .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
+        && path.components().count() >= 4
+}
+
+fn overlaps(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions.
+    unsafe { libc::geteuid() }
+}
+
+/// A private file this process owns, in a directory no one else can modify.
+fn trusted_file(metadata: &fs::Metadata, path: &Path, owner: u32) -> Result<()> {
+    let parent = fs::symlink_metadata(path.parent().ok_or_else(|| invalid("path has no parent"))?)?;
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.mode() & 0o777 != 0o600
+        || !parent.is_dir()
+        || parent.uid() != owner
+        || parent.mode() & 0o022 != 0
+    {
+        return Err(invalid(format!(
+            "{} must be a mode-0600 file owned by uid {owner} in a directory only that owner can modify",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn sha_hex(value: &str) -> Result<String> {
     if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(invalid("an independently retained SHA-256 is required"));
@@ -226,10 +264,26 @@ impl Rollout {
             return Err(invalid("invalid rollout manifest or primary binding"));
         }
         let state = manifest.state_dir.as_path();
+        let export = manifest.prepare.export_root.as_path();
+        if !dedicated(state) || !dedicated(export) || overlaps(state, export) {
+            return Err(invalid(
+                "rollout state and export roots must be distinct dedicated directories",
+            ));
+        }
         for protected in ["data_dir", "state_dir"] {
             let path = Path::new(super::string(&maintenance, protected)?);
-            if state.starts_with(path) || path.starts_with(state) {
-                return Err(invalid("rollout state overlaps primary/authority state"));
+            if overlaps(state, path) || overlaps(export, path) {
+                return Err(invalid(
+                    "rollout state or export root overlaps primary/authority state",
+                ));
+            }
+        }
+        // Thaw runs the checker as root: only immutable store inputs qualify.
+        if let Some(cutover) = &manifest.cutover {
+            for path in [&cutover.checker, &cutover.contract] {
+                if !path.starts_with("/nix/store") || !dedicated(path) {
+                    return Err(invalid("cutover checker and contract must be store paths"));
+                }
             }
         }
         Ok(Self {
@@ -282,11 +336,29 @@ impl Rollout {
         Ok(journal)
     }
 
-    fn save(&self, journal: &Journal) -> Result<()> {
-        if !self.manifest.state_dir.exists() {
-            fs::create_dir_all(&self.manifest.state_dir)?;
-            fs::set_permissions(&self.manifest.state_dir, fs::Permissions::from_mode(0o700))?;
+    /// Create the state directory privately, but never re-permission an
+    /// existing one: it must already be a private directory this process owns.
+    fn state_dir(&self) -> Result<()> {
+        let state = &self.manifest.state_dir;
+        match fs::symlink_metadata(state) {
+            Ok(metadata) => {
+                if !metadata.is_dir() || metadata.uid() != euid() || metadata.mode() & 0o077 != 0 {
+                    return Err(invalid(
+                        "rollout state directory must be a private directory owned by the coordinator",
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir_all(state)?;
+                fs::set_permissions(state, fs::Permissions::from_mode(0o700))?;
+            }
+            Err(error) => return Err(error.into()),
         }
+        Ok(())
+    }
+
+    fn save(&self, journal: &Journal) -> Result<()> {
+        self.state_dir()?;
         durable::write_json(&self.journal_path(), &serde_json::to_value(journal)?)
     }
 
@@ -614,16 +686,25 @@ impl Rollout {
             self.provision(&directory.path, &directory.group, directory.mode)?;
         }
         let mut resume = Vec::new();
-        for unit in &self.manifest.receiver_units {
-            // A transitional receiver can still be writing WAL; quiesce every
-            // non-terminal state, and resume those that were (going) up.
-            let state = self.show(unit, "ActiveState")?;
-            if !matches!(state.as_str(), "inactive" | "failed") {
-                self.stop(unit)?;
-                if state != "deactivating" {
-                    resume.push(unit);
+        let quiesced = (|| {
+            for unit in &self.manifest.receiver_units {
+                // A transitional receiver can still be writing WAL; quiesce every
+                // non-terminal state, and resume those that were (going) up.
+                let state = self.show(unit, "ActiveState")?;
+                if !matches!(state.as_str(), "inactive" | "failed") {
+                    if state != "deactivating" {
+                        resume.push(unit);
+                    }
+                    self.stop(unit)?;
                 }
             }
+            Ok(())
+        })();
+        if let Err(error) = quiesced {
+            for unit in &resume {
+                let _ = self.systemctl().args(["start", "--", unit]).output();
+            }
+            return Err(error);
         }
         let unit = format!("harbor-db-rollout-prepare-{}", std::process::id());
         let status = self.preparation_command(&unit, import).status();
@@ -639,7 +720,7 @@ impl Rollout {
 
     fn prepare(&self, journal: &mut Journal) -> Result<()> {
         self.inspect_fence(journal)?;
-        let import = self.manifest.import_slot.exists();
+        let import = self.import_slot(journal)?;
         if self.run_preparation(import)? {
             journal.phase = Phase::Imported;
             return self.save(journal);
@@ -662,6 +743,24 @@ impl Rollout {
         journal.export = Some(export);
         journal.phase = Phase::Prepared;
         self.save(journal)
+    }
+
+    /// Whether a receipt that `rollout import` staged and recorded is waiting.
+    /// An unrecorded or untrusted slot is never handed to the root-launched worker.
+    fn import_slot(&self, journal: &Journal) -> Result<bool> {
+        let slot = &self.manifest.import_slot;
+        let metadata = match fs::symlink_metadata(slot) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        trusted_file(&metadata, slot, euid())?;
+        if journal.receipt_sha256.as_deref() != Some(codec::file_digest(slot)?.as_str()) {
+            return Err(invalid(
+                "import slot holds an unrecorded receipt; stage it with `rollout import`",
+            ));
+        }
+        Ok(true)
     }
 
     fn import(&self, journal: &mut Journal, receipt: &Path, expected: &str) -> Result<()> {
@@ -688,7 +787,8 @@ impl Rollout {
         // An interrupted import may already have staged these exact bytes;
         // reuse them, but never replace a different staged receipt.
         let slot = &self.manifest.import_slot;
-        if slot.exists() {
+        if let Ok(metadata) = fs::symlink_metadata(slot) {
+            trusted_file(&metadata, slot, euid())?;
             if codec::file_digest(slot)? != expected {
                 return Err(invalid(
                     "import slot holds a different receipt; retain the writer window",
@@ -799,14 +899,29 @@ impl Rollout {
     }
 
     fn thaw(&self, journal: &mut Journal, acceptance: &Path) -> Result<()> {
-        let metadata = fs::symlink_metadata(acceptance)?;
-        if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o777 != 0o600 {
-            return Err(invalid(
-                "acceptance must be a root-owned mode-0600 regular file",
-            ));
+        // Validate, digest and parse one O_NOFOLLOW descriptor, never a
+        // pathname that could be swapped between the checks and the reads.
+        use std::os::unix::fs::OpenOptionsExt;
+        let not_root_owned = || invalid("acceptance must be a root-owned mode-0600 regular file");
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(acceptance)
+            .map_err(|_| not_root_owned())?;
+        let metadata = file.metadata()?;
+        if metadata.uid() != 0 {
+            return Err(not_root_owned());
         }
-        let digest = codec::file_digest(acceptance)?;
-        let accepted = durable::read_json(acceptance)?;
+        trusted_file(&metadata, acceptance, 0).map_err(|_| not_root_owned())?;
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(MAX_RECEIPT_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+            return Err(not_root_owned());
+        }
+        let digest = codec::digest(&bytes);
+        let accepted = codec::decode(&bytes)?;
         let snapshot = Path::new(super::string(
             &self.maintenance["recovery"],
             "snapshot_file",
@@ -933,8 +1048,7 @@ impl Rollout {
     pub fn run(&self, action: Action) -> Result<Value> {
         // ponytail: one exclusive lease per rollout; steps are idempotent, so an
         // interrupted step is resumed by rerunning it rather than by signal traps.
-        fs::create_dir_all(&self.manifest.state_dir)?;
-        fs::set_permissions(&self.manifest.state_dir, fs::Permissions::from_mode(0o700))?;
+        self.state_dir()?;
         let _lease = durable::lock(&self.manifest.state_dir.join("rollout.lock"), false, true)?;
         if let Action::Abort = action {
             let Some(mut journal) = self.journal()? else {
@@ -1047,6 +1161,7 @@ mod tests {
             for dir in ["units", "authority", "data", "evidence", "control", "state"] {
                 fs::create_dir(p(dir)).unwrap();
             }
+            fs::set_permissions(p("state"), fs::Permissions::from_mode(0o700)).unwrap();
             for unit in [
                 "a.service",
                 "b.service",
@@ -1299,6 +1414,11 @@ esac"#,
         fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
         fs::create_dir_all(f.p("import")).unwrap();
         fs::write(f.p("import/receipt.json"), bytes).unwrap();
+        fs::set_permissions(
+            f.p("import/receipt.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
         let import = || {
             rollout
                 .run(Action::Import {
@@ -1314,6 +1434,96 @@ esac"#,
         fs::write(f.p("import/receipt.json"), br#"{"status":"other"}"#).unwrap();
         let error = import();
         assert!(error.contains("different receipt"), "{error}");
+    }
+
+    fn edit_manifest(f: &Fixture, edit: impl FnOnce(&mut Value)) -> Result<Rollout> {
+        let path = f.p("rollout.json");
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        edit(&mut manifest);
+        fs::write(&path, manifest.to_string()).unwrap();
+        Rollout::load(&path)
+    }
+
+    #[test]
+    fn load_rejects_shared_overlapping_or_mutable_rollout_inputs() {
+        let f = Fixture::new(0);
+        for (field, value) in [
+            ("state_dir", json!("/etc")),
+            ("state_dir", json!(f.p("data").join("rollout"))),
+            ("state_dir", json!(f.p("export"))),
+        ] {
+            let error = edit_manifest(&f, |m| m[field] = value.clone())
+                .err()
+                .unwrap();
+            assert!(
+                error.to_string().contains("state"),
+                "{field}={value}: {error}"
+            );
+            f.manifest("rollout.json", 2);
+        }
+        for export in [
+            json!("/"),
+            json!(f.p("data")),
+            json!(f.p("authority").join("x")),
+        ] {
+            let error = edit_manifest(&f, |m| m["prepare"]["export_root"] = export.clone())
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("export"), "{export}: {error}");
+            f.manifest("rollout.json", 2);
+        }
+        let error = edit_manifest(&f, |m| {
+            m["cutover"] =
+                json!({"checker": f.p("checker"), "contract": "/nix/store/x-c/manifest.json"})
+        })
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("store paths"), "{error}");
+    }
+
+    #[test]
+    fn an_existing_shared_state_directory_is_refused_not_repermissioned() {
+        let f = Fixture::new(0);
+        fs::set_permissions(f.p("state"), fs::Permissions::from_mode(0o755)).unwrap();
+        let error = f.rollout().run(Action::Fence).unwrap_err().to_string();
+        assert!(error.contains("private directory"), "{error}");
+        assert_eq!(fs::metadata(f.p("state")).unwrap().mode() & 0o777, 0o755);
+    }
+
+    #[test]
+    fn receivers_are_restored_when_a_later_receiver_cannot_be_stopped() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| {
+            m["receiver_units"] = json!(["r1.service", "r2.service"])
+        })
+        .unwrap();
+        fs::write(f.p("units/r1.service"), "active").unwrap();
+        // A directory makes the fake systemctl's stop and show fail for r2.
+        fs::create_dir(f.p("units/r2.service")).unwrap();
+        assert!(rollout.run_preparation(false).is_err());
+        assert!(
+            f.calls().contains("systemctl start -- r1.service"),
+            "{}",
+            f.calls()
+        );
+        assert_eq!(f.unit("r1.service"), "active");
+    }
+
+    #[test]
+    fn preparation_refuses_an_unrecorded_import_slot() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(Action::Fence).unwrap();
+        fs::create_dir_all(f.p("import")).unwrap();
+        fs::write(f.p("import/receipt.json"), br#"{"status":"ready"}"#).unwrap();
+        fs::set_permissions(
+            f.p("import/receipt.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let journal = rollout.journal().unwrap().unwrap();
+        let error = rollout.import_slot(&journal).unwrap_err().to_string();
+        assert!(error.contains("unrecorded"), "{error}");
     }
 
     #[test]

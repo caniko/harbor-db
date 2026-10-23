@@ -393,8 +393,9 @@ in {
           cutover = mkOption {
             type = types.nullOr (types.submodule {
               options = {
-                checker = mkOption {type = types.strMatching "/.*";};
-                contract = mkOption {type = types.strMatching "/.*";};
+                # Thaw runs the checker as root: immutable store inputs only.
+                checker = mkOption {type = types.strMatching "/nix/store/[^/]+/.+";};
+                contract = mkOption {type = types.strMatching "/nix/store/[^/]+/.+";};
               };
             });
             default = null;

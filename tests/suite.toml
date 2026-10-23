@@ -6939,6 +6939,10 @@ selectors = [
   "next_hands_off_external_steps_with_exact_commands",
   "preparation_quiesces_transitional_receivers_and_may_write_its_export",
   "interrupted_import_reuses_its_staged_receipt_but_never_replaces_another",
+  "load_rejects_shared_overlapping_or_mutable_rollout_inputs",
+  "an_existing_shared_state_directory_is_refused_not_repermissioned",
+  "receivers_are_restored_when_a_later_receiver_cannot_be_stopped",
+  "preparation_refuses_an_unrecorded_import_slot",
 ]
 
 [[inventories]]
