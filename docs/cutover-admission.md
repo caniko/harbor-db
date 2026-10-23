@@ -218,10 +218,10 @@ unwound.
 
 Exclusion and recovery:
 
-- **Foreign fences.** Harbor resumes any prepared writer fence, so `fence` (and
-  the pre-fence completion inside `abort`) refuses a live fence or interrupted
-  fence selector whose token this journal does not own; finish it with the
-  coordinator that opened it.
+- **Foreign fences.** Harbor resumes any prepared writer fence, so `fence`
+  refuses (before touching any unit) a live fence or interrupted fence selector
+  whose token this journal does not own, as does the pre-fence completion
+  inside `abort`; finish it with the coordinator that opened it.
 - **Execution lock.** `executionLock` names an existing host lock file (for
   example `/run/lock/canix/switch.lock`). Every mutating step holds a
   non-blocking exclusive `flock` on it besides the journal's `rollout.lock`, and
@@ -242,10 +242,11 @@ Exclusion and recovery:
   (verify it with `inspect-fence --token`). `rollout abort --adopt-fence-token
   <token>` then unwinds that fence through the normal close. The lost journal's
   stopped clients are unknown, so re-activate the current generation afterwards.
-- **Retrying after abort.** A finished abort (reopen recorded, no Harbor fence
-  held) is archived to `rollout.<unix-seconds>.aborted.json` beside the journal
-  by the next `fence` or `next`, which then starts a fresh rollout; `status`
-  lists the archives.
+- **Starting again.** A finished rollout is archived beside the journal by the
+  next `fence` or `next`, under any manifest, which then starts afresh: a thawed
+  one to `rollout.<unix-seconds>.thawed.json`, an abort (only once its reopen is
+  recorded and no Harbor fence is held) to `rollout.<unix-seconds>.aborted.json`.
+  `status` lists the archives.
 - **Start limits.** Every coordinator start (primary, clients, receivers) runs
   `systemctl reset-failed` first, so repeated cycles never leave a unit down on
   its start limit.

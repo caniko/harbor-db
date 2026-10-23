@@ -6958,6 +6958,8 @@ selectors = [
   "a_lost_journal_is_aborted_only_by_explicitly_adopting_the_live_fence",
   "deliberate_starts_clear_the_systemd_start_limit",
   "a_finished_abort_is_archived_so_the_candidate_can_start_again",
+  "pre_fence_completion_never_adopts_another_coordinators_fence",
+  "a_thawed_journal_is_archived_so_a_new_generation_can_roll_out",
   "worker_and_executor_output_never_reaches_step_stdout",
   "an_unreadable_journal_is_an_error_not_an_idle_rollout",
 ]

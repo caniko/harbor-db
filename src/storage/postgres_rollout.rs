@@ -751,18 +751,26 @@ impl Rollout {
             .map(|token| String::from_utf8_lossy(token).into_owned()))
     }
 
+    /// Refuse a live fence this rollout did not open (another coordinator's),
+    /// unless it recorded opening one whose token it has yet to learn.
+    fn refuse_foreign_fence(&self, journal: &Journal) -> Result<()> {
+        if !journal.fence_opening
+            && let Some(token) = self.live_fence()?
+            && journal.fence_token.as_deref() != Some(token.as_str())
+        {
+            return Err(invalid(format!(
+                "Harbor holds writer fence {token}, which this rollout did not open; \
+                 finish it with the coordinator that opened it first"
+            )));
+        }
+        Ok(())
+    }
+
     /// Open (or resume) the writer fence. Harbor resumes any prepared fence, so
     /// first refuse one this rollout did not open (another coordinator's).
     fn open_fence(&self, journal: &mut Journal) -> Result<()> {
         if !journal.fence_opening {
-            if let Some(token) = self.live_fence()?
-                && journal.fence_token.as_deref() != Some(token.as_str())
-            {
-                return Err(invalid(format!(
-                    "Harbor holds writer fence {token}, which this rollout did not open; \
-                     finish it with the coordinator that opened it first"
-                )));
-            }
+            self.refuse_foreign_fence(journal)?;
             journal.fence_opening = true;
             self.save(journal)?;
         }
@@ -871,6 +879,8 @@ impl Rollout {
             self.stop_clients(journal)?;
             return self.inspect_fence(journal);
         }
+        // Before any side effect: a refusal must leave production untouched.
+        self.refuse_foreign_fence(journal)?;
         let authority = Path::new(super::string(&self.maintenance, "state_dir")?);
         self.provision(authority, "postgres", 0o700)?;
         self.inhibit(journal)?;
@@ -1407,7 +1417,9 @@ impl Rollout {
             Phase::Activated => {
                 json!("verify the deployment, then run `rollout thaw --acceptance <receipt>`")
             }
-            Phase::Thawed => json!("complete"),
+            Phase::Thawed => json!(
+                "thawed; `rollout fence` (or `next`) under any manifest archives this journal and starts a fresh rollout"
+            ),
             Phase::Aborted => json!(
                 "aborted; `rollout fence` (or `next`) archives this journal and starts a fresh rollout"
             ),
@@ -1441,7 +1453,7 @@ impl Rollout {
         Ok(value)
     }
 
-    /// Journals of finished aborts, archived beside the live journal.
+    /// Journals of finished rollouts, archived beside the live journal.
     fn archives(&self) -> Result<Vec<String>> {
         let entries = match fs::read_dir(&self.state) {
             Ok(entries) => entries,
@@ -1451,31 +1463,39 @@ impl Rollout {
         let mut names: Vec<String> = entries
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with("rollout.") && name.ends_with(".aborted.json"))
+            .filter(|name| {
+                name.starts_with("rollout.")
+                    && (name.ends_with(".aborted.json") || name.ends_with(".thawed.json"))
+            })
             .collect();
         names.sort();
         Ok(names)
     }
 
-    /// A finished abort is archived so the same (or a newer) candidate can start
-    /// a fresh rollout; an unwind that is unrecorded or under a held fence never is.
-    fn archive_aborted(&self) -> Result<()> {
+    /// A finished rollout (thawed, or aborted and fully unwound) is archived so
+    /// any candidate, under any manifest, can start afresh; an unwind that is
+    /// unrecorded or under a held fence never is.
+    fn archive_finished(&self) -> Result<()> {
         let Some(journal) = self.journal()? else {
             return Ok(());
         };
-        if journal.phase != Phase::Aborted {
-            return Ok(());
-        }
-        if let Some(token) = self.live_fence()? {
-            return Err(invalid(format!(
-                "the aborted rollout is not fully unwound: Harbor holds writer fence {token}"
-            )));
-        }
-        if !journal.reopened {
-            return Err(invalid(
-                "the aborted rollout is not fully unwound: its reopen is unrecorded",
-            ));
-        }
+        let kind = match journal.phase {
+            Phase::Thawed => "thawed",
+            Phase::Aborted => {
+                if let Some(token) = self.live_fence()? {
+                    return Err(invalid(format!(
+                        "the aborted rollout is not fully unwound: Harbor holds writer fence {token}"
+                    )));
+                }
+                if !journal.reopened {
+                    return Err(invalid(
+                        "the aborted rollout is not fully unwound: its reopen is unrecorded",
+                    ));
+                }
+                "aborted"
+            }
+            _ => return Ok(()),
+        };
         let seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| invalid("clock precedes the epoch"))?
@@ -1483,7 +1503,7 @@ impl Rollout {
         // A hard link never replaces an earlier archive.
         fs::hard_link(
             self.journal_path(),
-            self.state.join(format!("rollout.{seconds}.aborted.json")),
+            self.state.join(format!("rollout.{seconds}.{kind}.json")),
         )?;
         fs::remove_file(self.journal_path())?;
         durable::sync_directory(&self.state)
@@ -1568,7 +1588,7 @@ impl Rollout {
             return self.abort(adopt_fence_token);
         }
         if matches!(action, Action::Fence | Action::Next) {
-            self.archive_aborted()?;
+            self.archive_finished()?;
         }
         let mut journal = self.bound()?;
         let unwinding =
@@ -2244,6 +2264,23 @@ esac"#,
         fs::write(&marker, json!({ "token": other }).to_string()).unwrap();
         let error = f.rollout().run(Action::Fence).unwrap_err().to_string();
         assert!(error.contains("did not open"), "{error}");
+        // The refusal precedes every side effect, so production is untouched
+        // and nothing is left for `abort` to unwind.
+        let untouched = |f: &Fixture| {
+            let calls = fs::read_to_string(f.p("calls.log")).unwrap_or_default();
+            assert!(
+                !calls.contains("systemctl stop")
+                    && !calls.contains("inhibit-startup")
+                    && !calls.contains("daemon-reload")
+                    && !calls.contains("harbor fence-open"),
+                "{calls}"
+            );
+            for unit in ["postgresql.service", "a.service", "pub.service"] {
+                assert_eq!(f.unit(unit), "active", "{unit}");
+            }
+            assert!(f.rollout().journal().unwrap().is_none());
+        };
+        untouched(&f);
         // An interrupted acquisition's selector is someone's fence too.
         fs::remove_file(&marker).unwrap();
         fs::write(
@@ -2253,12 +2290,12 @@ esac"#,
         .unwrap();
         let error = f.rollout().run(Action::Fence).unwrap_err().to_string();
         assert!(error.contains(&other), "{error}");
-        assert!(!f.calls().contains("harbor fence-open"));
+        untouched(&f);
         // A fence this rollout recorded opening (then crashed before recording
         // its token) is resumed, not refused.
         fs::remove_file(f.p("data/postgresql.auto.conf")).unwrap();
         let rollout = f.rollout();
-        let mut journal = rollout.journal().unwrap().unwrap();
+        let mut journal = rollout.bound().unwrap();
         journal.fence_opening = true;
         rollout.save(&journal).unwrap();
         fs::write(&marker, json!({ "token": TOKEN }).to_string()).unwrap();
@@ -2511,6 +2548,46 @@ esac"#,
         let archived = durable::read_json(&f.p("state").join(&archives[0])).unwrap();
         assert_eq!(archived["phase"], "aborted");
         assert_eq!(rollout.status().unwrap()["archived"], json!(archives));
+    }
+
+    #[test]
+    fn pre_fence_completion_never_adopts_another_coordinators_fence() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        // Interrupted between inhibition and fence-open, then another
+        // coordinator opened its own fence.
+        let mut journal = rollout.bound().unwrap();
+        journal.startup_token = Some(TOKEN.into());
+        rollout.save(&journal).unwrap();
+        let marker = f.p("authority/writer-fence.json");
+        fs::write(&marker, json!({ "token": "f".repeat(32) }).to_string()).unwrap();
+        let error = rollout.run(NO_ADOPTION).unwrap_err().to_string();
+        assert!(error.contains("did not open"), "{error}");
+        assert!(!f.calls().contains("harbor fence-open"), "{}", f.calls());
+    }
+
+    #[test]
+    fn a_thawed_journal_is_archived_so_a_new_generation_can_roll_out() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(Action::Fence).unwrap();
+        // The thaw closed the fence and reopened under the old manifest.
+        let mut journal = rollout.journal().unwrap().unwrap();
+        journal.phase = Phase::Thawed;
+        journal.reopened = true;
+        rollout.save(&journal).unwrap();
+        fs::remove_file(f.p("authority/writer-fence.json")).unwrap();
+        let next = f.load(&f.manifest("next.json", 5)).unwrap();
+        let status = next.run(Action::Fence).unwrap();
+        assert_eq!(status["phase"], "fenced");
+        assert_eq!(status["manifest_sha256"], next.digest);
+        let archives = next.archives().unwrap();
+        assert!(
+            archives.len() == 1 && archives[0].ends_with(".thawed.json"),
+            "{archives:?}"
+        );
+        let archived = durable::read_json(&f.p("state").join(&archives[0])).unwrap();
+        assert_eq!(archived["manifest_sha256"], rollout.digest);
     }
 
     /// Steps print exactly one status document, so worker and executor output
