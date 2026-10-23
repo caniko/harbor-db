@@ -214,7 +214,9 @@ the executor runs the Harbor and certify argv that closure contains, as well as
 the export transfer. Every step is idempotent; rerun it after an interruption.
 Steps are bound to the manifest that opened the journal, but `abort` accepts
 another manifest of the same primary so a superseded candidate can always be
-unwound.
+unwound, provided its fence, startup-inhibition and data bindings are the ones
+the journal recorded; otherwise it refuses and names the opening manifest to
+rerun with (`--config`, or canix `--candidate`).
 
 Exclusion and recovery:
 
@@ -261,10 +263,18 @@ Exclusion and recovery:
   next `fence` or `next`, under any manifest, which then starts afresh: a thawed
   one to `rollout.<unix-seconds>.thawed.json`, an abort (only once its reopen is
   recorded and no Harbor fence is held) to `rollout.<unix-seconds>.aborted.json`.
-  `status` lists the archives.
+  A staged receipt left in the import slot moves first to
+  `rollout.<unix-seconds>.receipt.json` (root-only), so the next rollout's
+  `prepare` never meets it as unrecorded. `status` lists the archives.
+
 - **Start limits.** Every coordinator start (primary, clients, receivers,
   publishers) runs `systemctl reset-failed` first, so repeated cycles never
   leave a unit down on its start limit.
+- **Reported export.** The `backup_id` the (postgres-written) preparation
+  evidence names must be a repository identifier directly below the export
+  root; the export is reached and its plan hashed without following symlinks.
+- **Receivers.** Every receiver preparation stops, including one already
+  `deactivating` (possibly a restart), is recorded and restarted.
 - **Output.** Each step prints exactly one JSON status document on stdout; the
   preparation worker's and the executor command's own output goes to stderr.
 - **Publishers.** Publishers that were running when the pause began are

@@ -132,6 +132,13 @@ pub struct Journal {
     /// only returns clients, receivers and publishers.
     #[serde(default)]
     pub reopened: bool,
+    /// The manifest that opened the journal and the fingerprint of its fence,
+    /// startup and data bindings: another manifest may unwind the rollout only
+    /// through the same ones.
+    #[serde(default)]
+    pub opening_config: Option<PathBuf>,
+    #[serde(default)]
+    pub maintenance_sha256: Option<String>,
 }
 
 pub enum Action {
@@ -178,6 +185,8 @@ pub struct Rollout {
     /// Owner of provisioned directories (`postgres` and each declared group on
     /// hosts; tests cannot chown to them).
     service_owner: Option<(u32, u32)>,
+    /// Fingerprint of the maintenance bindings an open window lives under.
+    binding: String,
 }
 
 fn root() -> bool {
@@ -472,7 +481,23 @@ impl Rollout {
                 }
             }
         }
+        // Where the writer fence, startup inhibition and data live: a window
+        // opened under one set can only be closed through the same.
+        let startup = &maintenance["startup_inhibition"];
+        let binding = codec::digest(&codec::encode(
+            &json!({
+                "data_dir": maintenance["data_dir"],
+                "state_dir": maintenance["state_dir"],
+                "startup_inhibition": {
+                    "state_dir": startup["state_dir"],
+                    "drop_in_root": startup["drop_in_root"],
+                    "unit": startup["unit"],
+                },
+            }),
+            false,
+        )?);
         Ok(Self {
+            binding,
             digest: codec::file_digest(config)?,
             maintenance,
             manifest,
@@ -522,11 +547,34 @@ impl Rollout {
             stopped_publishers: Vec::new(),
             fence_opening: false,
             reopened: false,
+            opening_config: Some(self.config.clone()),
+            maintenance_sha256: Some(self.binding.clone()),
         }
     }
 
     /// Steps are bound to the exact manifest; only `abort` may unwind a journal
     /// opened by another manifest of the same primary.
+    /// Another manifest may unwind a journal only under the same fence, startup
+    /// and data bindings; otherwise the window lives where this one cannot
+    /// reach it, so name the manifest that opened it (it may be collected, so
+    /// it is never loaded implicitly). An unrecorded binding matches only the
+    /// opening manifest itself.
+    fn require_binding(&self, journal: &Journal) -> Result<()> {
+        if journal.manifest_sha256 == self.digest
+            || journal.maintenance_sha256.as_deref() == Some(self.binding.as_str())
+        {
+            return Ok(());
+        }
+        Err(invalid(format!(
+            "the rollout journal was opened under other fence, startup or data bindings; rerun \
+             with `--config {}` (canix: `--candidate` of that generation)",
+            journal.opening_config.as_deref().map_or_else(
+                || "<the opening manifest>".into(),
+                |path| path.display().to_string()
+            )
+        )))
+    }
+
     fn bound(&self) -> Result<Journal> {
         let journal = self.journal()?.unwrap_or_else(|| self.fresh_journal());
         if journal.manifest_sha256 != self.digest {
@@ -1261,10 +1309,11 @@ impl Rollout {
         let quiesced = (|| {
             for unit in &self.manifest.receiver_units {
                 // A transitional receiver can still be writing WAL; quiesce every
-                // non-terminal state, and resume those that were (going) up.
+                // non-terminal state (deactivating may be a restart), and resume
+                // every one it stopped.
                 let state = self.show(unit, "ActiveState")?;
                 if !matches!(state.as_str(), "inactive" | "failed") {
-                    if state != "deactivating" && !journal.pending_receivers.contains(unit) {
+                    if !journal.pending_receivers.contains(unit) {
                         journal.pending_receivers.push(unit.clone());
                         self.save(journal)?;
                     }
@@ -1282,6 +1331,48 @@ impl Rollout {
         ready
     }
 
+    /// The hand-off export the postgres-written evidence names: one repository
+    /// identifier directly below the export root, reached and read without
+    /// following a symlink, so no postgres-side writer can point the journal
+    /// or the hand-off at another directory.
+    fn reported_export(&self, preparation: &Value) -> Result<(PathBuf, String)> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let root = &self.manifest.prepare.export_root;
+        let backup = super::string(preparation, "backup_id")?;
+        let export = root.join(backup);
+        if !super::recovery_repository::valid_identifier(backup)
+            || export.parent() != Some(root.as_path())
+        {
+            return Err(invalid(
+                "preparation reported an export outside the configured export root",
+            ));
+        }
+        let unavailable = || {
+            invalid("recovery preparation failed; retain the writer window and inspect its unit")
+        };
+        self.walk(&export, &[root.as_path()], false)?
+            .ok_or_else(unavailable)?;
+        let directory = open_directory(&export)?;
+        let name = std::ffi::CString::new("recovery-export.json").expect("static name");
+        // SAFETY: openat reads a live descriptor and NUL-terminated name; a
+        // returned descriptor is owned exactly once by the File below.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(unavailable());
+        }
+        let mut plan = unsafe { fs::File::from_raw_fd(fd) };
+        if !plan.metadata()?.is_file() {
+            return Err(unavailable());
+        }
+        Ok((export, codec::hash_reader(&mut plan)?))
+    }
+
     fn prepare(&self, journal: &mut Journal) -> Result<()> {
         self.inspect_fence(journal)?;
         let import = self.import_slot(journal)?;
@@ -1292,18 +1383,13 @@ impl Rollout {
         // Harbor stops before admission until the independent receipt exists;
         // the retained export is then the hand-off to the executor.
         let preparation = durable::read_json(&self.evidence_dir()?.join("preparation.json"))?;
-        let export = self
-            .manifest
-            .prepare
-            .export_root
-            .join(super::string(&preparation, "backup_id")?);
-        let plan = export.join("recovery-export.json");
-        if import || !plan.is_file() {
+        if import {
             return Err(invalid(
                 "recovery preparation failed; retain the writer window and inspect its unit",
             ));
         }
-        journal.export_sha256 = Some(codec::file_digest(&plan)?);
+        let (export, digest) = self.reported_export(&preparation)?;
+        journal.export_sha256 = Some(digest);
         journal.export = Some(export);
         journal.phase = Phase::Prepared;
         self.save(journal)
@@ -1704,7 +1790,9 @@ impl Rollout {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .filter(|name| {
                 name.starts_with("rollout.")
-                    && (name.ends_with(".aborted.json") || name.ends_with(".thawed.json"))
+                    && [".aborted.json", ".thawed.json", ".receipt.json"]
+                        .iter()
+                        .any(|kind| name.ends_with(kind))
             })
             .collect();
         names.sort();
@@ -1721,6 +1809,8 @@ impl Rollout {
         let kind = match journal.phase {
             Phase::Thawed => "thawed",
             Phase::Aborted => {
+                // "No live fence" only means something under the same bindings.
+                self.require_binding(&journal)?;
                 if let Some(token) = self.live_fence()? {
                     return Err(invalid(format!(
                         "the aborted rollout is not fully unwound: Harbor holds writer fence {token}"
@@ -1739,6 +1829,31 @@ impl Rollout {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| invalid("clock precedes the epoch"))?
             .as_secs();
+        // The fixed import slot would read as an unrecorded receipt to the next
+        // rollout: keep its bytes beside the archive first, so a retry after a
+        // crash finds the slot already gone and archives only the journal.
+        let slot = &self.manifest.import_slot;
+        match fs::symlink_metadata(slot) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(metadata) => {
+                trusted_file(&metadata, slot, euid())?;
+                let mut bytes = Vec::new();
+                durable::open_regular(slot, false)?
+                    .take(MAX_RECEIPT_BYTES + 1)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() as u64 > MAX_RECEIPT_BYTES {
+                    return Err(invalid("staged receipt exceeds its size limit"));
+                }
+                durable::atomic_write_mode(
+                    &self.state.join(format!("rollout.{seconds}.receipt.json")),
+                    &bytes,
+                    0o600,
+                )?;
+                fs::remove_file(slot)?;
+                durable::sync_directory(slot.parent().unwrap_or(Path::new("/")))?;
+            }
+        }
         // A hard link never replaces an earlier archive.
         fs::hard_link(
             self.journal_path(),
@@ -1766,7 +1881,11 @@ impl Rollout {
     fn abort(&self, adopt_fence_token: Option<String>) -> Result<Value> {
         let mut adopted = false;
         let mut opening = None;
-        let mut journal = match (self.journal()?, adopt_fence_token) {
+        let retained = self.journal()?;
+        if let Some(journal) = &retained {
+            self.require_binding(journal)?;
+        }
+        let mut journal = match (retained, adopt_fence_token) {
             (Some(journal), None) => journal,
             (Some(journal), Some(token)) => {
                 Self::adoptable(&journal, Some(&token)).map_err(|_| {
@@ -2223,9 +2342,11 @@ esac"#,
         let f = Fixture::new(0);
         let path = f.p("rollout.json");
         let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        manifest["receiver_units"] = json!(["r.service"]);
+        manifest["receiver_units"] = json!(["r.service", "d.service"]);
         fs::write(&path, manifest.to_string()).unwrap();
         fs::write(f.p("units/r.service"), "activating").unwrap();
+        // Deactivating may be a restart in flight: it is stopped, so it resumes.
+        fs::write(f.p("units/d.service"), "deactivating").unwrap();
         let rollout = f.rollout();
         let export = format!("{}", f.p("export").display());
         let writable = rollout
@@ -2242,6 +2363,7 @@ esac"#,
         let calls = f.calls();
         assert!(calls.contains("systemctl stop -- r.service"), "{calls}");
         assert!(calls.contains("systemctl start -- r.service"), "{calls}");
+        assert_eq!(f.unit("d.service"), "active");
     }
 
     #[test]
@@ -2648,6 +2770,121 @@ esac"#,
             let error = refused(adopting(TOKEN, abort));
             assert!(error.contains("adopt-fence-token"), "{error}");
         }
+    }
+
+    #[test]
+    fn another_manifest_unwinds_only_under_the_opening_bindings() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        // A superseding manifest whose authority (fence) state moved elsewhere.
+        let mut maintenance: Value =
+            serde_json::from_slice(&fs::read(f.p("maintenance.json")).unwrap()).unwrap();
+        maintenance["state_dir"] = json!(f.p("authority-moved"));
+        fs::write(f.p("maintenance-moved.json"), maintenance.to_string()).unwrap();
+        let moved = f.manifest("moved.json", 2);
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&moved).unwrap()).unwrap();
+        manifest["maintenance"] = json!(f.p("maintenance-moved.json"));
+        fs::write(&moved, manifest.to_string()).unwrap();
+        let error = f
+            .load(&moved)
+            .unwrap()
+            .run(NO_ADOPTION)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("--config {}", f.p("rollout.json").display())),
+            "{error}"
+        );
+        assert!(!f.calls().contains("fence-close"));
+        // The same bindings under another manifest still unwind it.
+        let other = f.load(&f.manifest("other.json", 5)).unwrap();
+        assert_eq!(other.run(NO_ADOPTION).unwrap()["phase"], "aborted");
+        // "No live fence" under moved bindings says nothing: never archive.
+        let error = f.load(&moved).unwrap().run(FENCE).unwrap_err().to_string();
+        assert!(error.contains("--config"), "{error}");
+        assert!(rollout.archives().unwrap().is_empty());
+        // A journal without a recorded binding is the opening manifest's alone.
+        let mut journal = rollout.journal().unwrap().unwrap();
+        journal.phase = Phase::Fenced;
+        journal.reopened = false;
+        journal.maintenance_sha256 = None;
+        rollout.save(&journal).unwrap();
+        assert!(other.run(NO_ADOPTION).is_err());
+        assert_eq!(rollout.run(NO_ADOPTION).unwrap()["phase"], "aborted");
+    }
+
+    /// Fake a ready hand-off export that preparation reported as `backup_id`.
+    fn reported(f: &Fixture, backup_id: &str) {
+        fs::write(
+            f.p("evidence/preparation.json"),
+            json!({ "backup_id": backup_id }).to_string(),
+        )
+        .unwrap();
+        fs::create_dir_all(f.p("export/backup-1")).unwrap();
+        fs::write(f.p("export/backup-1/recovery-export.json"), "{}").unwrap();
+    }
+
+    #[test]
+    fn a_reported_export_is_one_identifier_below_the_export_root() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        // A postgres-side writer pointed the evidence elsewhere.
+        fs::create_dir_all(f.p("elsewhere")).unwrap();
+        fs::write(f.p("elsewhere/recovery-export.json"), "{}").unwrap();
+        // `export/..` resolves to a real directory holding a plan, too.
+        fs::write(f.p("recovery-export.json"), "{}").unwrap();
+        for backup_id in ["../elsewhere", "..", "a/../../elsewhere", "link"] {
+            reported(&f, backup_id);
+            if backup_id == "link" {
+                std::os::unix::fs::symlink(f.p("elsewhere"), f.p("export/link")).ok();
+            }
+            let error = rollout.run(Action::Prepare).unwrap_err().to_string();
+            assert!(
+                error.contains("outside the configured") || error.contains("untrusted ancestry"),
+                "{backup_id}: {error}"
+            );
+            let journal = rollout.journal().unwrap().unwrap();
+            assert!(journal.phase == Phase::Fenced && journal.export.is_none());
+        }
+        reported(&f, "backup-1");
+        let status = rollout.run(Action::Prepare).unwrap();
+        assert_eq!(status["phase"], "prepared");
+        assert_eq!(status["export_sha256"], codec::digest(b"{}"));
+    }
+
+    #[test]
+    fn a_finished_rollouts_staged_receipt_is_archived_not_left_in_the_slot() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        // `import` staged and recorded a receipt, then the rollout was aborted.
+        let bytes = br#"{"status":"ready"}"#;
+        fs::create_dir_all(f.p("import")).unwrap();
+        fs::write(f.p("import/receipt.json"), bytes).unwrap();
+        fs::set_permissions(
+            f.p("import/receipt.json"),
+            fs::Permissions::from_mode(0o400),
+        )
+        .unwrap();
+        let mut journal = rollout.journal().unwrap().unwrap();
+        journal.phase = Phase::Prepared;
+        journal.receipt_sha256 = Some(codec::digest(bytes));
+        rollout.save(&journal).unwrap();
+        rollout.run(NO_ADOPTION).unwrap();
+        // The next rollout starts fresh and prepares past the import slot.
+        assert_eq!(rollout.run(FENCE).unwrap()["phase"], "fenced");
+        assert!(!f.p("import/receipt.json").exists());
+        let receipts: Vec<_> = (rollout.archives().unwrap().into_iter())
+            .filter(|name| name.ends_with(".receipt.json"))
+            .collect();
+        assert_eq!(receipts.len(), 1, "{receipts:?}");
+        let archived = f.p("state").join(&receipts[0]);
+        assert_eq!(fs::read(&archived).unwrap(), bytes);
+        assert_eq!(fs::metadata(&archived).unwrap().mode() & 0o777, 0o600);
+        reported(&f, "backup-1");
+        assert_eq!(rollout.run(Action::Prepare).unwrap()["phase"], "prepared");
     }
 
     #[test]
