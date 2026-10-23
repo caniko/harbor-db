@@ -143,6 +143,10 @@ enum Operation {
         #[command(subcommand)]
         step: RolloutStep,
     },
+    /// Pre-switch guard of a generation without the rollout coordinator: reads
+    /// only the fixed rollout journal (`--config` is not consulted).
+    #[command(hide = true)]
+    RolloutGuard,
 }
 #[derive(Subcommand)]
 enum RolloutStep {
@@ -202,6 +206,9 @@ enum RolloutStep {
     },
 }
 fn operate(args: Args) -> Result<Option<Value>> {
+    if let Operation::RolloutGuard = args.command {
+        return Ok(Some(storage::postgres_rollout::activation_guard()?));
+    }
     if let Operation::Rollout { step } = args.command {
         use storage::postgres_rollout::Action;
         let action = match step {
@@ -345,7 +352,9 @@ fn operate(args: Args) -> Result<Option<Value>> {
             socket_dir,
             port,
         } => storage::recovery::certify(&config, &data_dir, &socket_dir, port, None, None)?,
-        Operation::Rollout { .. } => unreachable!("handled before policy loading"),
+        Operation::Rollout { .. } | Operation::RolloutGuard => {
+            unreachable!("handled before policy loading")
+        }
     };
     Ok(Some(result))
 }

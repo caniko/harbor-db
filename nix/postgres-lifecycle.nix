@@ -134,6 +134,11 @@
     executor = {inherit (rollout.executor) host user command;};
     inherit (rollout) cutover;
   });
+  # Refuses activating a generation that would strand an open rollout.
+  activationGuard =
+    if rollout != null
+    then "${lib.getExe cfg.package} --config ${rolloutManifest} rollout activation-check"
+    else "${lib.getExe cfg.package} --config ${manifest} rollout-guard";
 in {
   imports = [./postgres-writer-clients.nix ./storage-package-argument.nix];
   options.services.harbor-db.postgresql = {
@@ -573,19 +578,21 @@ in {
     environment.etc."harbor-db/postgresql-rollout.json" = mkIf (rollout != null) {source = rolloutManifest;};
     systemd.tmpfiles.rules = ["d ${cfg.stateDir} 0700 postgres postgres -"];
     system.preSwitchChecks = lib.mkMerge [
-      # With a rollout the coordinator prepares, imports and adopts under the
-      # fence; re-running preparation (and the exporter) at activation would
-      # bypass its locks and receiver quiescence and could mutate the certified
-      # hand-off. Its guard refuses activation mid-rollout instead.
-      (lib.mkIf (rollout != null) {
-        "00-0-harbor-db-postgresql-rollout" = ''
+      # Every generation refuses activation while a rollout it would strand is
+      # open, sorted before any preparation. With a rollout, the coordinator
+      # prepares, imports and adopts under the fence (re-running preparation and
+      # the exporter at activation would bypass its locks and receiver
+      # quiescence and could mutate the certified hand-off); without one, only
+      # the fixed journal is read, so removing `rollout` cannot strand one.
+      {
+        "00-0-0-harbor-db-postgresql-rollout-guard" = ''
           case "''${2-}" in
             switch|test)
-              ${lib.getExe cfg.package} --config ${rolloutManifest} rollout activation-check >/dev/null || exit $?
+              ${activationGuard} >/dev/null || exit $?
               ;;
           esac
         '';
-      })
+      }
       (lib.mkIf (preparation != null && rollout == null) {
         "00-0-harbor-db-postgresql-prepare" = ''
           case "''${2-}" in

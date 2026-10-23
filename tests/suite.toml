@@ -6972,6 +6972,8 @@ selectors = [
   "a_finished_rollouts_staged_receipt_is_archived_not_left_in_the_slot",
   "another_manifest_unwinds_what_the_opening_run_wrote",
   "a_newer_coordinators_journal_still_loads_and_aborts",
+  "a_generation_without_the_coordinator_never_strands_an_open_rollout",
+  "certify_reports_the_receipt_digest_import_checks",
   "a_tampered_journal_never_steers_removal_or_archival",
   "a_thawed_journal_is_archived_so_a_new_generation_can_roll_out",
   "worker_and_executor_output_never_reaches_step_stdout",

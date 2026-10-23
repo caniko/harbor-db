@@ -304,10 +304,17 @@ Exclusion and recovery:
   first, so a declared parent always gets its own owner and mode.
 - **Activation.** A rollout-enabled generation does not install the legacy
   `00-0-harbor-db-postgresql-prepare` pre-switch hook: the coordinator already
-  prepared, imported and adopted under the fence. Its
-  `00-0-harbor-db-postgresql-rollout` hook (`rollout activation-check`) refuses
-  activation while a rollout sits between fence and adoption, or was adopted
-  under another manifest; `00-harbor-db-postgresql-recovery` still requires
-  accepted recovery evidence.
+  prepared, imported and adopted under the fence. Every generation of the
+  module installs `00-0-0-harbor-db-postgresql-rollout-guard`, sorted before
+  any preparation, which refuses activation that would strand an open rollout:
+  one between fence and adoption, with an interrupted fence or unfinished
+  abort, or adopted or activated under another manifest. With `rollout` it runs
+  `rollout activation-check`; without it (for example after the rollout is
+  retired) it runs the manifest-free `rollout-guard`, which reads only the fixed
+  journal and lets in only a thawed, fully aborted or never-started rollout.
+  `00-harbor-db-postgresql-recovery` still requires accepted recovery evidence.
+- **Digests.** `certify` prints `receipt_sha256`, the digest of the receipt it
+  produced, computed on the executor; that (not the export's SHA-256, which
+  `certify` itself takes) is what `rollout import --sha256` expects.
 - **Status.** `rollout status` needs read access to the root-owned journal; an
   unreadable journal is an error, never an idle rollout.

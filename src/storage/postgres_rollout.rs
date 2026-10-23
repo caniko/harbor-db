@@ -244,6 +244,71 @@ pub fn operate(config: &Path, action: Action) -> Result<Value> {
     }
 }
 
+/// Refuse activating a generation that would strand an open rollout: one
+/// between fence and adoption, with an interrupted fence or unfinished abort,
+/// or adopted or activated under a manifest other than `digest` (with no
+/// manifest, as for a generation without the coordinator, any). Only a thawed,
+/// fully aborted or never-started rollout lets another generation in.
+fn stranding(journal: &Journal, digest: Option<&str>) -> Result<()> {
+    let started = journal.startup_token.is_some() || journal.fence_token.is_some();
+    let opener = journal.opening_config.as_deref().map_or_else(
+        || "its opening manifest".into(),
+        |path| path.display().to_string(),
+    );
+    let reason = match journal.phase {
+        Phase::Fenced | Phase::Prepared | Phase::Imported => {
+            "the rollout is between fence and adoption; finish it or `rollout abort`".to_owned()
+        }
+        Phase::Idle if started => {
+            "an interrupted rollout fence is pending; rerun `rollout fence` or `rollout abort`"
+                .into()
+        }
+        Phase::Aborted if !journal.reopened => {
+            "an abort is still unwinding; rerun `rollout abort`".into()
+        }
+        Phase::Adopted | Phase::Activated if digest != Some(journal.manifest_sha256.as_str()) => {
+            format!(
+                "the rollout was adopted under {opener}; activate that candidate and thaw it (or, \
+                 before activation, abort) first"
+            )
+        }
+        _ => return Ok(()),
+    };
+    Err(invalid(format!(
+        "{reason} before activating another generation"
+    )))
+}
+
+/// Pre-switch guard of a generation without the rollout coordinator: it reads
+/// only the fixed journal, since no rollout manifest is installed.
+pub fn activation_guard() -> Result<Value> {
+    guard_at(Path::new(STATE_ROOT))
+}
+
+fn guard_at(state: &Path) -> Result<Value> {
+    match load_journal(&state.join("rollout.json"))? {
+        Some(journal) => {
+            stranding(&journal, None)?;
+            Ok(json!({"status": "clear", "phase": journal.phase}))
+        }
+        None => Ok(json!({"status": "clear", "phase": "idle"})),
+    }
+}
+
+/// The journal at `path`, if present; an unreadable one is an error.
+fn load_journal(path: &Path) -> Result<Option<Journal>> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    let journal: Journal = serde_json::from_value(durable::read_json(path)?)?;
+    if journal.version != 1 {
+        return Err(invalid("unsupported rollout journal version"));
+    }
+    Ok(Some(journal))
+}
+
 fn valid_unit(unit: &str) -> bool {
     unit.ends_with(".service")
         && unit
@@ -545,20 +610,17 @@ impl Rollout {
     }
 
     fn journal(&self) -> Result<Option<Journal>> {
-        let path = self.journal_path();
         // An unreadable journal is an error, never an idle rollout.
-        match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-            Ok(_) => {}
-        }
-        let journal: Journal = serde_json::from_value(durable::read_json(&path)?)?;
-        if journal.version != 1 || journal.system_identifier != self.manifest.system_identifier {
+        let journal = load_journal(&self.journal_path())?;
+        if journal
+            .as_ref()
+            .is_some_and(|journal| journal.system_identifier != self.manifest.system_identifier)
+        {
             return Err(invalid(
                 "retained rollout journal belongs to another primary",
             ));
         }
-        Ok(Some(journal))
+        Ok(journal)
     }
 
     fn fresh_journal(&self) -> Journal {
@@ -1743,10 +1805,18 @@ impl Rollout {
         if !status.success() {
             return Err(invalid("independent certification failed; import nothing"));
         }
-        Ok(
-            json!({"status":"certified","receipt":workspace.join("off-host-recovery.json"),
-            "next":"transport the receipt and its SHA-256 to the primary, then run `rollout import`"}),
-        )
+        // Digested here, on the executor, so `import` checks the transport.
+        let receipt = workspace.join("off-host-recovery.json");
+        let receipt_sha256 = codec::file_digest(&receipt)?;
+        Ok(json!({
+            "status": "certified",
+            "receipt": receipt,
+            "receipt_sha256": receipt_sha256,
+            "next": format!(
+                "transport the receipt to the primary as a private file, then run \
+                 `rollout import --receipt <transported receipt> --sha256 {receipt_sha256}`"
+            ),
+        }))
     }
 
     fn next_hint(&self, journal: &Journal) -> Value {
@@ -1759,7 +1829,8 @@ impl Rollout {
                 "copy the manifest closure to {host}: `nix copy --to ssh-ng://{host} {config}`; \
                  transfer {export} to {host} as a directory only {user} can read; then on {host} as {user}: \
                  {harbor} --config {config} rollout certify --export <copied export> --export-sha256 {sha} \
-                 --workspace <fresh dir>; then here: `rollout import --receipt <receipt> --sha256 <sha>`",
+                 --workspace <fresh dir> (the export's SHA-256); then here: `rollout import --receipt \
+                 <transported receipt> --sha256 <receipt_sha256 printed by certify>`",
                 host = executor.host,
                 user = executor.user,
                 harbor = self.manifest.harbor.display(),
@@ -1820,25 +1891,7 @@ impl Rollout {
     /// (`inspect-recovery`) still gates the switch separately.
     fn activation_check(&self) -> Result<Value> {
         if let Some(journal) = self.journal()? {
-            let started = journal.startup_token.is_some() || journal.fence_token.is_some();
-            match journal.phase {
-                Phase::Fenced | Phase::Prepared | Phase::Imported => {
-                    return Err(invalid(
-                        "the rollout is between fence and adoption; finish it or `rollout abort` before activating",
-                    ));
-                }
-                Phase::Idle if started => {
-                    return Err(invalid(
-                        "an interrupted rollout fence is pending; rerun `rollout fence` or `rollout abort` before activating",
-                    ));
-                }
-                Phase::Adopted if journal.manifest_sha256 != self.digest => {
-                    return Err(invalid(
-                        "the rollout was adopted under another manifest; activate that candidate",
-                    ));
-                }
-                _ => {}
-            }
+            stranding(&journal, Some(&self.digest))?;
         }
         self.status()
     }
@@ -2698,8 +2751,12 @@ esac"#,
         let status = rollout.run(NEXT).unwrap();
         assert_eq!(status["phase"], "prepared");
         let next = status["next"].as_str().unwrap();
+        // The export digest goes to certify; import takes the receipt's own.
         assert!(
-            next.contains("rollout certify") && next.contains(&"a".repeat(64)),
+            next.contains("rollout certify")
+                && next.contains(&format!("--export-sha256 {}", "a".repeat(64)))
+                && next.matches(&"a".repeat(64)).count() == 1
+                && next.contains("--sha256 <receipt_sha256 printed by certify>"),
             "{next}"
         );
         assert!(next.contains("on executor as can"), "{next}");
@@ -3482,13 +3539,57 @@ esac"#,
         rollout.save(&journal).unwrap();
         assert!(rollout.activation_check().is_ok());
         let other = f.load(&f.manifest("other.json", 5)).unwrap();
-        let error = other.activation_check().unwrap_err().to_string();
-        assert!(error.contains("another manifest"), "{error}");
-        for phase in [Phase::Activated, Phase::Thawed, Phase::Aborted] {
+        // Adopted or activated, the rollout can only be thawed by its own
+        // manifest: switching to another generation strands it.
+        for phase in [Phase::Adopted, Phase::Activated] {
+            journal.phase = phase;
+            rollout.save(&journal).unwrap();
+            assert!(rollout.activation_check().is_ok(), "{phase:?}");
+            let error = other.activation_check().unwrap_err().to_string();
+            assert!(error.contains("adopted under"), "{phase:?}: {error}");
+        }
+        journal.phase = Phase::Aborted;
+        rollout.save(&journal).unwrap();
+        assert!(other.activation_check().is_err(), "an unwinding abort");
+        journal.reopened = true;
+        for phase in [Phase::Thawed, Phase::Aborted] {
             journal.phase = phase;
             rollout.save(&journal).unwrap();
             assert!(other.activation_check().is_ok(), "{phase:?}");
         }
+    }
+
+    #[test]
+    fn a_generation_without_the_coordinator_never_strands_an_open_rollout() {
+        let f = Fixture::new(0);
+        let state = f.p("state");
+        assert_eq!(guard_at(&state).unwrap()["status"], "clear", "no journal");
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        let mut journal = rollout.journal().unwrap().unwrap();
+        let mut refused = |phase: Phase, reopened: bool| {
+            journal.phase = phase;
+            journal.reopened = reopened;
+            rollout.save(&journal).unwrap();
+            guard_at(&state).is_err()
+        };
+        for phase in [
+            Phase::Idle,
+            Phase::Fenced,
+            Phase::Prepared,
+            Phase::Imported,
+            Phase::Adopted,
+            Phase::Activated,
+        ] {
+            assert!(refused(phase, false), "{phase:?}");
+        }
+        assert!(refused(Phase::Aborted, false), "an unwinding abort");
+        assert!(!refused(Phase::Aborted, true));
+        assert!(!refused(Phase::Thawed, true));
+        // A never-started journal lets any generation in.
+        let fresh = rollout.fresh_journal();
+        rollout.save(&fresh).unwrap();
+        assert_eq!(guard_at(&state).unwrap()["phase"], "idle");
     }
 
     #[test]
@@ -3553,6 +3654,41 @@ esac"#,
         assert_eq!(archived["manifest_sha256"], rollout.digest);
     }
 
+    /// A manifest whose executor is this process, with a fake certify that
+    /// chatters on stdout and writes `{}` as its receipt.
+    fn executor_rollout(f: &Fixture) -> Rollout {
+        executable(
+            &f.p("certify"),
+            "echo EXECUTOR-CHATTER\nwhile [ $# -gt 0 ]; do [ \"$1\" = --workspace ] && w=$2; shift; done\nmkdir -p \"$w\"; printf '{}' > \"$w/off-host-recovery.json\"",
+        );
+        let host = fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+        let user = process::current_username().unwrap();
+        edit_manifest(
+            f,
+            |m| {
+                m["executor"] =
+                    json!({"host": host.trim(), "user": user, "command": [f.p("certify")]})
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn certify_reports_the_receipt_digest_import_checks() {
+        if root() {
+            return;
+        }
+        let f = Fixture::new(0);
+        let rollout = executor_rollout(&f);
+        let certified = rollout
+            .certify(&f.p("export"), &"a".repeat(64), &f.p("workspace"))
+            .unwrap();
+        let receipt = codec::digest(b"{}");
+        assert_eq!(certified["receipt_sha256"], receipt);
+        let next = certified["next"].as_str().unwrap();
+        assert!(next.contains(&format!("--sha256 {receipt}")), "{next}");
+    }
+
     /// Steps print exactly one status document, so worker and executor output
     /// must reach stderr. Re-executes this test to observe the real descriptors.
     #[test]
@@ -3561,18 +3697,7 @@ esac"#,
         if std::env::var_os(CHILD).is_some() {
             let f = Fixture::new(0);
             executable(&f.p("systemd-run"), "echo WORKER-CHATTER; exit 1");
-            executable(&f.p("certify"), "echo EXECUTOR-CHATTER");
-            let host = fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
-            let user = process::current_username().unwrap();
-            let rollout =
-                edit_manifest(
-                    &f,
-                    |m| {
-                        m["executor"] =
-                            json!({"host": host.trim(), "user": user, "command": [f.p("certify")]})
-                    },
-                )
-                .unwrap();
+            let rollout = executor_rollout(&f);
             assert!(
                 !rollout
                     .run_preparation(&mut rollout.bound().unwrap(), false)

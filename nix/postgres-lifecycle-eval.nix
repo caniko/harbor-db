@@ -374,8 +374,9 @@ in
           preparation = name: value: {services.harbor-db.postgresql.recoveryPreparation.${name} = lib.mkForce value;};
         in
           !(checks ? "00-0-harbor-db-postgresql-prepare")
-          && lib.hasInfix "rollout activation-check" checks."00-0-harbor-db-postgresql-rollout"
-          && !(withPreparation.config.system.preSwitchChecks ? "00-0-harbor-db-postgresql-rollout")
+          && lib.hasInfix "rollout activation-check" checks."00-0-0-harbor-db-postgresql-rollout-guard"
+          # Without a rollout, a manifest-free guard still protects an open one.
+          && lib.all (selected: lib.hasInfix " rollout-guard" selected.config.system.preSwitchChecks."00-0-0-harbor-db-postgresql-rollout-guard") [eval withPreparation]
           && accepted {}
           && lib.all (path: !accepted (rollout path)) ["/srv/harbor-db/ex port" "/srv/harbor-db/ex\tport" "/srv/harbor-db/ex%h" "/srv/harbor-db/ex\\port" "/srv/harbor-db/ex'port"]
           && !accepted (preparation "readWritePaths" ["/srv/backups /srv/postgres/18" "/srv/disposable"])
@@ -390,7 +391,7 @@ in
           hook = checks."00-0-harbor-db-postgresql-prepare";
         in
           !(eval.config.system.preSwitchChecks ? "00-0-harbor-db-postgresql-prepare")
-          && builtins.head (builtins.attrNames checks) == "00-0-harbor-db-postgresql-prepare"
+          && lib.take 2 (builtins.attrNames checks) == ["00-0-0-harbor-db-postgresql-rollout-guard" "00-0-harbor-db-postgresql-prepare"]
           && lib.hasInfix "prepare-recovery --preparation-config" hook
           && lib.hasInfix "--property=User=postgres" hook
           && lib.hasInfix "--property=LoadCredential=recovery-off-host:" hook
