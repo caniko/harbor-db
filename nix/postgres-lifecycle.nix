@@ -609,10 +609,13 @@ in {
             && lib.all validUnit units
             && rollout.executor.command != []
             # The executor command runs on another host: checked lexically.
-            && lib.hasPrefix "/" (lib.head rollout.executor.command);
+            && lib.hasPrefix "/" (lib.head rollout.executor.command)
+            # Certification is independent only on another host, never as root.
+            && rollout.executor.host != config.networking.hostName
+            && rollout.executor.user != "root";
         in
           rollout == null || cfg.recovery == null || valid;
-        message = "Rollout coordinator: recovery must require the writer fence over the legacy repository protocol, units must be `.service` names and the executor command an absolute program with arguments.";
+        message = "Rollout coordinator: recovery must require the writer fence over the legacy repository protocol, units must be `.service` names, and the executor must be another host, a non-root user and an absolute program with arguments.";
       }
       {
         # Mirrors the coordinator's load: the roots post-fence steps write are

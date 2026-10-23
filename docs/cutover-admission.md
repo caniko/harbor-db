@@ -327,8 +327,9 @@ Exclusion and recovery:
   `systemctl`, `systemd-run` and thaw's cutover checker) must be an executable
   regular store file reached without a mutable alias, and the worker's
   preparation config must be a store file. The executor command runs on the
-  executor host, so it is checked only lexically: a host, a user, an absolute
-  program and non-empty arguments.
+  executor host, so it is checked only lexically: a host other than the primary
+  (certification is independent only elsewhere), a user other than root
+  (`certify` refuses root), an absolute program and non-empty arguments.
 - **One maintenance manifest.** With a rollout, every guard and service of the
   generation that inspects recovery, fence or startup state renders from
   `rollout.maintenance`, the manifest the coordinator fences, prepares and

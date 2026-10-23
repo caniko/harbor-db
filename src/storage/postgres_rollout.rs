@@ -820,8 +820,12 @@ impl Rollout {
             ));
         }
         let executor = &manifest.executor;
+        // Certification is independent only on another host, and `certify`
+        // refuses root there: both are refused before the fence.
         if executor.host.is_empty()
+            || executor.host == manifest.host
             || executor.user.is_empty()
+            || executor.user == "root"
             || !executor
                 .command
                 .first()
@@ -832,7 +836,7 @@ impl Rollout {
                 .any(|arg| arg.is_empty() || arg.contains('\0'))
         {
             return Err(invalid(
-                "rollout executor needs a host, a user and an absolute command of non-empty arguments",
+                "rollout executor needs a host other than the primary, a non-root user and an absolute command of non-empty arguments",
             ));
         }
         Ok(Self {
@@ -5422,6 +5426,8 @@ exit 1"#,
             ("executor", "can", json!(["true"])),
             ("executor", "can", json!(["/bin/true", ""])),
             ("executor", "can", json!([])),
+            ("primary", "can", json!(["/bin/true"])),
+            ("executor", "root", json!(["/bin/true"])),
         ] {
             let error =
                 error(&|m| m["executor"] = json!({"host": host, "user": user, "command": command}));

@@ -407,6 +407,11 @@ in
             {services.harbor-db.postgresql.rollout.pausedPublishers = lib.mkForce ["fixture-backup.timer"];}
             {services.harbor-db.postgresql.rollout.executor.command = lib.mkForce [];}
             {services.harbor-db.postgresql.rollout.executor.command = lib.mkForce ["certify"];}
+            {
+              networking.hostName = "primary";
+              services.harbor-db.postgresql.rollout.executor.host = lib.mkForce "primary";
+            }
+            {services.harbor-db.postgresql.rollout.executor.user = lib.mkForce "root";}
           ]
           # The roots post-fence steps write are disjoint but for the intended nestings.
           && lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout roots:" entry.message)) withRollout.config.assertions
