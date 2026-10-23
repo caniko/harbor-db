@@ -361,16 +361,20 @@ Exclusion and recovery:
   started without waiting for them to finish (`--no-block`; a oneshot backup
   can run for an hour): the unit must then be running or have ended without
   failing. Only the primary's start waits, for readiness and its setup units.
-- **Hard dependents.** Before every primary stop, the active services in its
-  reverse Requires/BindsTo closure (through targets such as
+- **Hard dependents.** Before every primary stop, the unsettled services in
+  its reverse Requires/BindsTo closure (through targets such as
   `postgresql.target`) are recorded, as clients or as pending receivers, so the
   stop's propagation is undone; retired clients, setup units and paused
   publishers keep their own handling.
+- **What is restored.** One rule decides which units are recorded before
+  being stopped and restored afterwards: clients, receivers, publishers and
+  hard dependents alike. Any unit that is not settled (`inactive` or `failed`)
+  counts, including one still `deactivating` (perhaps restarting), whose stop
+  the rollout would otherwise complete without restoring it.
 - **Reported export.** The `backup_id` the (postgres-written) preparation
   evidence names must be a repository identifier directly below the export
   root; the export is reached and its plan hashed without following symlinks.
-- **Receivers.** Every receiver preparation stops, including one already
-  `deactivating` (possibly a restart), is recorded and restarted.
+- **Receivers.** Every receiver preparation stops is recorded and restarted.
 - **Output.** Each step prints exactly one JSON status document on stdout; the
   preparation worker's and the executor command's own output goes to stderr.
 - **Publishers.** Publishers that were running when the pause began are

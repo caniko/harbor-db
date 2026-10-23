@@ -316,6 +316,16 @@ fn valid_unit(unit: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_@.:-".contains(&b))
 }
 
+/// Whether a unit in ActiveState `state` is running or on its way somewhere
+/// (active, activating, reloading, deactivating, or a state a newer systemd
+/// adds): one the rollout records before stopping it, or before the primary's
+/// stop takes it down, and restores afterwards. Only a settled unit (inactive
+/// or failed) is not; the one rule for clients, receivers, publishers, hard
+/// dependents and the worker.
+fn restorable(state: &str) -> bool {
+    !matches!(state, "inactive" | "failed")
+}
+
 fn unit_matches(pattern: &str, unit: &str) -> bool {
     match pattern.strip_suffix("@.service") {
         Some(prefix) => unit
@@ -1004,7 +1014,7 @@ impl Rollout {
     /// (systemctl still exits 0) and is idle; any other unknown state is busy.
     fn preparing(&self) -> Result<bool> {
         let (loaded, state) = self.unit_state(PREPARE_UNIT)?;
-        Ok(loaded && !matches!(state.as_str(), "inactive" | "failed"))
+        Ok(loaded && restorable(&state))
     }
 
     /// Whether `unit` is loaded (not `not-found`, which systemctl reports with
@@ -1022,17 +1032,21 @@ impl Rollout {
     }
 
     fn active_clients(&self) -> Result<Vec<String>> {
+        // Every unit that is active, has a job or failed: UNIT LOAD ACTIVE ...
         let output = self.systemctl(&[
             "list-units",
             "--type=service",
-            "--state=active,activating,reloading,deactivating",
             "--plain",
             "--no-legend",
             "--no-pager",
         ])?;
         let mut clients: Vec<String> = String::from_utf8_lossy(&output.stdout)
             .lines()
-            .filter_map(|line| line.split_whitespace().next())
+            .filter_map(|line| {
+                let mut columns = line.split_whitespace();
+                let unit = columns.next()?;
+                restorable(columns.nth(1)?).then_some(unit)
+            })
             .filter(|unit| {
                 self.manifest
                     .clients
@@ -1080,9 +1094,9 @@ impl Rollout {
 
     fn stop(&self, unit: &str) -> Result<()> {
         self.systemctl(&["stop", "--", unit])?;
-        match self.show(unit, "ActiveState")?.as_str() {
-            "inactive" | "failed" => Ok(()),
-            state => Err(invalid(format!("{unit} did not stop ({state})"))),
+        match self.show(unit, "ActiveState")? {
+            state if restorable(&state) => Err(invalid(format!("{unit} did not stop ({state})"))),
+            _ => Ok(()),
         }
     }
 
@@ -1126,7 +1140,7 @@ impl Rollout {
                     continue;
                 }
                 let (loaded, state) = self.unit_state(&dependent)?;
-                if !loaded || !matches!(state.as_str(), "active" | "activating" | "reloading") {
+                if !loaded || !restorable(&state) {
                     continue;
                 }
                 let list = if self.manifest.receiver_units.contains(&dependent) {
@@ -1396,7 +1410,7 @@ impl Rollout {
             // A publisher the running generation lacks (the candidate brings
             // it) is not loaded: nothing to stop, and `stop` would exit 5.
             let (loaded, state) = self.unit_state(unit)?;
-            if !loaded || matches!(state.as_str(), "inactive" | "failed") {
+            if !loaded || !restorable(&state) {
                 continue;
             }
             // Recorded before stopping, so abort or thaw restarts it.
@@ -1903,8 +1917,7 @@ impl Rollout {
                 // A transitional receiver can still be writing WAL; quiesce every
                 // non-terminal state (deactivating may be a restart), and resume
                 // every one it stopped.
-                let state = self.show(unit, "ActiveState")?;
-                if !matches!(state.as_str(), "inactive" | "failed") {
+                if restorable(&self.show(unit, "ActiveState")?) {
                     if !journal.pending_receivers.contains(unit) {
                         journal.pending_receivers.push(unit.clone());
                         self.save(journal)?;
@@ -2889,7 +2902,7 @@ mod tests {
 echo "systemctl $*" >> "$log"
 [ "$1" = --no-block ] && shift
 case "$1" in
-  list-units) for f in "$u"/*; do [ "$(cat "$f")" = active ] && echo "$(basename "$f") loaded active running x"; done ;;
+  list-units) for f in "$u"/*; do s=$(cat "$f"); [ "$s" = inactive ] || echo "$(basename "$f") loaded $s x x"; done ;;
   stop) echo inactive > "$u/$3" ;;
   reset-failed) rm -f "$u/.starts-$3" ;;
   start) n=$(($(cat "$u/.starts-$3" 2>/dev/null || echo 0) + 1)); echo $n > "$u/.starts-$3"
@@ -3897,6 +3910,39 @@ esac"#,
         rollout.run(NO_ADOPTION).unwrap();
         assert_eq!(f.unit("ml.service"), "active");
         assert_eq!(f.unit("r.service"), "active");
+    }
+
+    #[test]
+    fn units_still_deactivating_when_stopped_are_recorded_and_restored() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| m["receiver_units"] = json!(["r.service"])).unwrap();
+        let deactivating = |units: &[&str]| {
+            for unit in units {
+                fs::write(f.p("units").join(unit), "deactivating").unwrap();
+            }
+        };
+        // A receiver caught mid-restart is quiesced for preparation and resumed.
+        deactivating(&["r.service"]);
+        assert!(worker_ready(&rollout, &mut rollout.bound().unwrap()).is_ok());
+        assert!(f.calls().contains("stop -- r.service"), "{}", f.calls());
+        assert_eq!(f.unit("r.service"), "active");
+        // A hard dependent, receiver, client and publisher still deactivating
+        // when the fence starts: the stops complete theirs, so each is recorded.
+        fs::write(
+            f.p("units/.deps-postgresql.service"),
+            "dep.service r.service",
+        )
+        .unwrap();
+        deactivating(&["dep.service", "r.service", "a.service", "pub.service"]);
+        rollout.run(FENCE).unwrap();
+        let journal = rollout.journal().unwrap().unwrap();
+        assert_eq!(journal.clients, ["a.service", "b.service", "dep.service"]);
+        assert_eq!(journal.pending_receivers, ["r.service"]);
+        assert_eq!(journal.stopped_publishers, ["pub.service"]);
+        rollout.run(NO_ADOPTION).unwrap();
+        for unit in ["dep.service", "r.service", "a.service", "pub.service"] {
+            assert_eq!(f.unit(unit), "active", "{unit}");
+        }
     }
 
     /// A worker that logs each run and leaves what Harbor would: admission
