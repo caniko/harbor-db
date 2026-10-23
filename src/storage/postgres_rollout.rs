@@ -101,6 +101,10 @@ pub struct Journal {
     pub export_sha256: Option<String>,
     pub receipt_sha256: Option<String>,
     pub acceptance_sha256: Option<String>,
+    /// Receivers quiesced for preparation that still need a restart; retained
+    /// so a failed or interrupted cleanup is retried, never forgotten.
+    #[serde(default)]
+    pub pending_receivers: Vec<String>,
 }
 
 pub enum Action {
@@ -282,7 +286,10 @@ impl Rollout {
         // Thaw runs the checker as root: only immutable store inputs qualify.
         if let Some(cutover) = &manifest.cutover {
             for path in [&cutover.checker, &cutover.contract] {
-                if !path.starts_with("/nix/store") || !dedicated(path) {
+                if !path.starts_with("/nix/store")
+                    || !dedicated(path)
+                    || durable::immutable_store_reference(path).is_err()
+                {
                     return Err(invalid("cutover checker and contract must be store paths"));
                 }
             }
@@ -328,6 +335,7 @@ impl Rollout {
             export_sha256: None,
             receipt_sha256: None,
             acceptance_sha256: None,
+            pending_receivers: Vec::new(),
         });
         if journal.manifest_sha256 != self.digest {
             return Err(invalid(
@@ -341,6 +349,13 @@ impl Rollout {
     /// existing one: it must already be a private directory this process owns.
     fn state_dir(&self) -> Result<()> {
         let state = &self.manifest.state_dir;
+        // Never create the journal on the root filesystem below an absent mount.
+        let covering: Vec<_> = (self.manifest.prepare.required_mounts.iter())
+            .filter(|mount| state.starts_with(mount))
+            .collect();
+        if !covering.is_empty() {
+            super::pg_core::require_mounts(&json!({ "required_mounts": covering }))?;
+        }
         // Every existing ancestor must be a real directory that only root or
         // the coordinator can modify (a root-owned sticky directory such as
         // /tmp lets only an entry's owner rename it), so the checked leaf
@@ -703,19 +718,38 @@ impl Rollout {
 
     /// Run Harbor's preparation with the installed receivers stopped; they are
     /// restored whatever the outcome. Returns whether preparation reported ready.
-    fn run_preparation(&self, import: bool) -> Result<bool> {
+    /// Restart the retained receivers; those that fail stay pending for retry.
+    fn restart_receivers(&self, journal: &mut Journal) -> Result<()> {
+        let mut first = None;
+        journal.pending_receivers.retain(|unit| {
+            match checked(self.systemctl().args(["start", "--", unit])) {
+                Ok(_) => false,
+                Err(error) => {
+                    first.get_or_insert(error);
+                    true
+                }
+            }
+        });
+        self.save(journal)?;
+        first.map_or(Ok(()), Err)
+    }
+
+    /// Run Harbor's preparation with the installed receivers stopped. Every
+    /// receiver quiesced here is recorded before it is stopped and restarted
+    /// whatever the outcome; a failed restart stays recorded for the next run.
+    fn run_preparation(&self, journal: &mut Journal, import: bool) -> Result<bool> {
         for directory in &self.manifest.prepare.provision_directories {
             self.provision(&directory.path, &directory.group, directory.mode)?;
         }
-        let mut resume = Vec::new();
         let quiesced = (|| {
             for unit in &self.manifest.receiver_units {
                 // A transitional receiver can still be writing WAL; quiesce every
                 // non-terminal state, and resume those that were (going) up.
                 let state = self.show(unit, "ActiveState")?;
                 if !matches!(state.as_str(), "inactive" | "failed") {
-                    if state != "deactivating" {
-                        resume.push(unit);
+                    if state != "deactivating" && !journal.pending_receivers.contains(unit) {
+                        journal.pending_receivers.push(unit.clone());
+                        self.save(journal)?;
                     }
                     self.stop(unit)?;
                 }
@@ -723,9 +757,7 @@ impl Rollout {
             Ok(())
         })();
         if let Err(error) = quiesced {
-            for unit in &resume {
-                let _ = self.systemctl().args(["start", "--", unit]).output();
-            }
+            let _ = self.restart_receivers(journal);
             return Err(error);
         }
         let unit = format!("harbor-db-rollout-prepare-{}", std::process::id());
@@ -734,21 +766,14 @@ impl Rollout {
             .systemctl()
             .args(["stop", &format!("{unit}.service")])
             .output();
-        // Attempt every restart: a retry would no longer see these as active.
-        let mut restarted = Ok(());
-        for unit in resume {
-            if let Err(error) = checked(self.systemctl().args(["start", "--", unit])) {
-                restarted = restarted.and(Err(error));
-            }
-        }
-        restarted?;
+        self.restart_receivers(journal)?;
         Ok(status?.success())
     }
 
     fn prepare(&self, journal: &mut Journal) -> Result<()> {
         self.inspect_fence(journal)?;
         let import = self.import_slot(journal)?;
-        if self.run_preparation(import)? {
+        if self.run_preparation(journal, import)? {
             journal.phase = Phase::Imported;
             return self.save(journal);
         }
@@ -829,7 +854,7 @@ impl Rollout {
         journal.receipt_sha256 = Some(expected);
         self.save(journal)?;
         self.inspect_fence(journal)?;
-        if !self.run_preparation(true)? {
+        if !self.run_preparation(journal, true)? {
             return Err(invalid(
                 "independent receipt was not admitted; retain the writer window",
             ));
@@ -864,6 +889,23 @@ impl Rollout {
     /// Unwind to the normal primary: close (or confirm closed) the fence under
     /// startup exclusion, restart, verify, then return recorded clients.
     fn reopen(&self, journal: &mut Journal) -> Result<()> {
+        if journal.fence_token.is_none() && journal.startup_token.is_some() {
+            // Interrupted between inhibition and fence-open. Harbor binds the
+            // startup release to a fence boundary, so complete the offline
+            // acquisition first and then unwind it through the normal close.
+            self.stop(self.primary_unit())?;
+            let value = response(
+                self.harbor(true).args([
+                    "fence-open",
+                    "--system-identifier",
+                    &self.manifest.system_identifier,
+                ]),
+                "prepared-offline",
+            )?;
+            journal.fence_token = Some(super::string(&value, "token")?.to_owned());
+            self.save(journal)?;
+            self.release_startup(journal, "prepared")?;
+        }
         if journal.fence_token.is_some() {
             self.inhibit(journal)?;
             self.stop(self.primary_unit())?;
@@ -904,12 +946,6 @@ impl Rollout {
             if live["system_identifier"] != self.manifest.system_identifier.as_str() {
                 return Err(invalid("normal primary readback differs"));
             }
-        } else if journal.startup_token.is_some() {
-            // ponytail: an acquisition interrupted between inhibition and
-            // fence-open needs manual release; Harbor binds release to a fence.
-            return Err(invalid(
-                "startup is inhibited without an open fence; release it manually",
-            ));
         }
         for unit in &journal.clients {
             if self
@@ -922,6 +958,7 @@ impl Rollout {
             }
             checked(self.systemctl().args(["start", "--", unit]))?;
         }
+        self.restart_receivers(journal)?;
         self.lift_pause()
     }
 
@@ -1421,7 +1458,11 @@ esac"#,
             .map(|arg| arg.to_string_lossy().into_owned())
             .any(|arg| arg.starts_with("--property=ReadWritePaths=") && arg.contains(&export));
         assert!(writable, "export root must be writable by the worker");
-        assert!(!rollout.run_preparation(false).unwrap());
+        assert!(
+            !rollout
+                .run_preparation(&mut rollout.bound().unwrap(), false)
+                .unwrap()
+        );
         let calls = f.calls();
         assert!(calls.contains("systemctl stop -- r.service"), "{calls}");
         assert!(calls.contains("systemctl start -- r.service"), "{calls}");
@@ -1532,7 +1573,11 @@ esac"#,
         fs::write(f.p("units/r1.service"), "active").unwrap();
         // A directory makes the fake systemctl's stop and show fail for r2.
         fs::create_dir(f.p("units/r2.service")).unwrap();
-        assert!(rollout.run_preparation(false).is_err());
+        assert!(
+            rollout
+                .run_preparation(&mut rollout.bound().unwrap(), false)
+                .is_err()
+        );
         assert!(
             f.calls().contains("systemctl start -- r1.service"),
             "{}",
@@ -1592,8 +1637,45 @@ esac"#,
             ),
         )
         .unwrap();
-        assert!(rollout.run_preparation(false).is_err());
+        let mut journal = rollout.bound().unwrap();
+        assert!(rollout.run_preparation(&mut journal, false).is_err());
         assert_eq!(f.unit("r2.service"), "active");
+        // The failed restart stays recorded and is retried by the next run.
+        assert_eq!(journal.pending_receivers, ["r1.service"]);
+        fs::write(f.p("systemctl"), systemctl).unwrap();
+        rollout.restart_receivers(&mut journal).unwrap();
+        assert!(journal.pending_receivers.is_empty());
+        assert_eq!(f.unit("r1.service"), "active");
+    }
+
+    #[test]
+    fn abort_unwinds_an_acquisition_interrupted_before_fence_open() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        let mut journal = rollout.bound().unwrap();
+        journal.startup_token = Some(TOKEN.into());
+        journal.clients = vec!["a.service".into()];
+        rollout.save(&journal).unwrap();
+        fs::write(f.p("units/a.service"), "inactive").unwrap();
+        rollout.run(Action::Abort).unwrap();
+        let calls = f.calls();
+        assert!(calls.contains("harbor fence-open"), "{calls}");
+        assert!(calls.contains("harbor fence-close"), "{calls}");
+        assert_eq!(f.unit("a.service"), "active");
+    }
+
+    #[test]
+    fn the_state_directory_is_never_created_below_an_absent_mount() {
+        let f = Fixture::new(0);
+        fs::create_dir(f.p("mnt")).unwrap();
+        let rollout = edit_manifest(&f, |m| {
+            m["prepare"]["required_mounts"] = json!([f.p("mnt")]);
+            m["state_dir"] = json!(f.p("mnt").join("rollout"));
+        })
+        .unwrap();
+        let error = rollout.run(Action::Fence).unwrap_err().to_string();
+        assert!(error.contains("required mount"), "{error}");
+        assert!(!f.p("mnt/rollout").exists());
     }
 
     #[test]

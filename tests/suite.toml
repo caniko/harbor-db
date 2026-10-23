@@ -6945,6 +6945,8 @@ selectors = [
   "preparation_refuses_an_unrecorded_import_slot",
   "untrusted_state_directory_ancestry_is_refused",
   "every_quiesced_receiver_is_restarted_even_if_one_restart_fails",
+  "abort_unwinds_an_acquisition_interrupted_before_fence_open",
+  "the_state_directory_is_never_created_below_an_absent_mount",
 ]
 
 [[inventories]]

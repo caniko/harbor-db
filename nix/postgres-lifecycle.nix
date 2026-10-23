@@ -543,8 +543,8 @@ in {
         message = "Managed recovery preparation requires normalized absolute writable, provisioned and protected paths before containment checks.";
       }
       {
-        assertion = rollout == null || (cfg.recovery != null && preparation != null && preparation.offHostReceiptImportFile != null && rollout.clients != []);
-        message = "The rollout coordinator needs recovery, recoveryPreparation with an off-host receipt import file, and an explicit client inventory.";
+        assertion = rollout == null || (cfg.recovery != null && preparation != null && preparation.offHostReceiptImportFile != null && preparation.exportCommand != [] && rollout.clients != []);
+        message = "The rollout coordinator needs recovery, recoveryPreparation with an off-host receipt import file and an export command (the executor hand-off), and an explicit client inventory.";
       }
       {
         assertion = preparation == null || lib.all (path: lib.any (writable: path == writable || lib.hasPrefix "${writable}/" path) preparation.readWritePaths) preparation.provisionDirectories;

@@ -74,6 +74,8 @@
   withRollout = withPreparation.extendModules {
     modules = [
       {
+        # The rollout hands the executor this export; it is required.
+        services.harbor-db.postgresql.recoveryPreparation.exportCommand = ["/fixture/export"];
         services.harbor-db.postgresql.rollout = {
           exportRoot = "/srv/harbor-db/export";
           pausedPublishers = ["fixture-backup.service"];
