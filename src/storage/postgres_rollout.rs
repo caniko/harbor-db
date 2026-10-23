@@ -103,42 +103,71 @@ pub enum Phase {
     Aborted,
 }
 
+/// The journal's schema rule: new fields must be optional and additive and are
+/// not written while empty, and unknown fields are ignored, so a rollback
+/// generation can still read (and abort) a newer coordinator's journal. Only an
+/// incompatible change bumps `version`; `version`, `system_identifier` and
+/// `manifest_sha256` bind a journal, not field strictness (it is root-only).
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct Journal {
     pub version: u32,
     pub manifest_sha256: String,
     pub system_identifier: String,
     pub phase: Phase,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clients: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fence_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance_sha256: Option<String>,
     /// Receivers quiesced for preparation that still need a restart; retained
     /// so a failed or interrupted cleanup is retried, never forgotten.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_receivers: Vec<String>,
     /// Publishers that were running when paused; restarted after the pause.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stopped_publishers: Vec<String>,
-    /// Recorded once no foreign fence was found and before `fence-open`, so a
-    /// fence this rollout opened but never recorded is resumed, not refused.
-    #[serde(default)]
+    /// Recorded once no foreign fence was found and before `fence-open`; with
+    /// no token yet, a live fence is adopted only explicitly.
+    #[serde(default, skip_serializing_if = "is_false")]
     pub fence_opening: bool,
     /// The fence is closed and the normal primary verified; an unwinding retry
     /// only returns clients, receivers and publishers.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub reopened: bool,
     /// The manifest that opened the journal and the fingerprint of its fence,
     /// startup and data bindings: another manifest may unwind the rollout only
     /// through the same ones.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening_config: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance_sha256: Option<String>,
+    /// What this rollout wrote outside its journal, recorded before each
+    /// write, so any manifest unwinds exactly that. Absent in older journals,
+    /// which fall back to the current manifest's declarations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written: Option<Written>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+/// Under the journal's schema rule too.
+#[derive(Default, Deserialize, Serialize)]
+pub struct Written {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pause_drop_ins: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_slot: Option<PathBuf>,
 }
 
 pub enum Action {
@@ -213,6 +242,13 @@ pub fn operate(config: &Path, action: Action) -> Result<Value> {
             rollout.run(action)
         }
     }
+}
+
+fn valid_unit(unit: &str) -> bool {
+    unit.ends_with(".service")
+        && unit
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_@.:-".contains(&b))
 }
 
 fn unit_matches(pattern: &str, unit: &str) -> bool {
@@ -400,12 +436,7 @@ impl Rollout {
     pub fn load(config: &Path) -> Result<Self> {
         let manifest: Manifest = serde_json::from_value(durable::read_config_json(config)?)?;
         let maintenance = durable::read_config_json(&manifest.maintenance)?;
-        let valid_unit = |unit: &String| {
-            unit.ends_with(".service")
-                && unit
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_@.:-".contains(&b))
-        };
+        let valid_unit = |unit: &String| valid_unit(unit);
         let units = manifest
             .clients
             .iter()
@@ -549,6 +580,7 @@ impl Rollout {
             reopened: false,
             opening_config: Some(self.config.clone()),
             maintenance_sha256: Some(self.binding.clone()),
+            written: Some(Written::default()),
         }
     }
 
@@ -1026,12 +1058,15 @@ impl Rollout {
         durable::atomic_write_mode(&self.pause_marker(), b"", 0o600)?;
         for unit in &self.manifest.paused_publishers {
             let directory = root.join(format!("{unit}.d"));
+            let file = directory.join(PAUSE_DROP_IN);
+            if let Some(written) = &mut journal.written
+                && !written.pause_drop_ins.contains(&file)
+            {
+                written.pause_drop_ins.push(file.clone());
+                self.save(journal)?;
+            }
             fs::create_dir_all(&directory)?;
-            durable::atomic_write_mode(
-                &directory.join(PAUSE_DROP_IN),
-                condition.as_bytes(),
-                0o644,
-            )?;
+            durable::atomic_write_mode(&file, condition.as_bytes(), 0o644)?;
         }
         self.systemctl(&["daemon-reload"])?;
         for unit in &self.manifest.paused_publishers {
@@ -1048,20 +1083,44 @@ impl Rollout {
         Ok(())
     }
 
+    /// Where the pause drop-in of `unit` lives (one directory per unit under the
+    /// bound drop-in root).
+    fn pause_drop_in(&self, unit: &str) -> Result<PathBuf> {
+        Ok(self
+            .drop_in_root()?
+            .join(format!("{unit}.d"))
+            .join(PAUSE_DROP_IN))
+    }
+
     fn lift_pause(&self, journal: &mut Journal) -> Result<()> {
         // Publishers must not snapshot a cluster a preparation is still copying.
         if self.preparing()? {
             return Err(invalid(BUSY));
         }
         let mut lifted = false;
-        if !self.manifest.paused_publishers.is_empty() {
-            let root = self.drop_in_root()?;
-            for unit in &self.manifest.paused_publishers {
-                let file = root.join(format!("{unit}.d")).join(PAUSE_DROP_IN);
-                if file.exists() {
-                    fs::remove_file(file)?;
-                    lifted = true;
-                }
+        // The drop-ins the opening run wrote, whichever manifest unwinds it.
+        let files = match &journal.written {
+            Some(written) => written.pause_drop_ins.clone(),
+            None => (self.manifest.paused_publishers.iter())
+                .map(|unit| self.pause_drop_in(unit))
+                .collect::<Result<_>>()?,
+        };
+        for file in files {
+            // A tampered journal must never steer root into removing another path.
+            let unit = (file.parent())
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".d"))
+                .filter(|unit| valid_unit(unit));
+            if unit.map(|unit| self.pause_drop_in(unit)).transpose()? != Some(file.clone()) {
+                return Err(invalid(format!(
+                    "the journal names {} as a publisher pause drop-in",
+                    file.display()
+                )));
+            }
+            if fs::symlink_metadata(&file).is_ok() {
+                fs::remove_file(&file)?;
+                lifted = true;
             }
         }
         // The marker gates every manifest's drop-ins (a cross-manifest abort may
@@ -1444,13 +1503,19 @@ impl Rollout {
                     "import slot holds a different receipt; retain the writer window",
                 ));
             }
-        } else {
+        }
+        // Recorded before staging, so whichever manifest finishes the rollout
+        // archives exactly this slot.
+        journal.receipt_sha256 = Some(expected);
+        if let Some(written) = &mut journal.written {
+            written.staged_slot = Some(slot.clone());
+        }
+        self.save(journal)?;
+        if fs::symlink_metadata(slot).is_err() {
             let verified = self.state.join("receipt.verified.json");
             durable::atomic_write_mode(&verified, &bytes, 0o600)?;
             super::recovery::stage_off_host_import(&verified, slot)?;
         }
-        journal.receipt_sha256 = Some(expected);
-        self.save(journal)?;
         self.inspect_fence(journal)?;
         if !self.run_preparation(journal, true)? {
             return Err(invalid(
@@ -1829,30 +1894,42 @@ impl Rollout {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| invalid("clock precedes the epoch"))?
             .as_secs();
-        // The fixed import slot would read as an unrecorded receipt to the next
-        // rollout: keep its bytes beside the archive first, so a retry after a
-        // crash finds the slot already gone and archives only the journal.
-        let slot = &self.manifest.import_slot;
-        match fs::symlink_metadata(slot) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-            Ok(metadata) => {
-                trusted_file(&metadata, slot, euid())?;
-                let mut bytes = Vec::new();
-                durable::open_regular(slot, false)?
-                    .take(MAX_RECEIPT_BYTES + 1)
-                    .read_to_end(&mut bytes)?;
-                if bytes.len() as u64 > MAX_RECEIPT_BYTES {
-                    return Err(invalid("staged receipt exceeds its size limit"));
-                }
-                durable::atomic_write_mode(
-                    &self.state.join(format!("rollout.{seconds}.receipt.json")),
-                    &bytes,
-                    0o600,
-                )?;
-                fs::remove_file(slot)?;
-                durable::sync_directory(slot.parent().unwrap_or(Path::new("/")))?;
+        // The import slot the rollout staged into would read as an unrecorded
+        // receipt to the next rollout: keep its bytes beside the archive first,
+        // so a retry after a crash finds the slot already gone and archives
+        // only the journal. Only a private root file holding exactly the
+        // recorded receipt moves, so a tampered journal cannot steer this.
+        let slot = match &journal.written {
+            Some(written) => written.staged_slot.clone(),
+            None => Some(self.manifest.import_slot.clone()),
+        };
+        let metadata = match slot.as_deref().map(fs::symlink_metadata) {
+            None => None,
+            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Some(Err(error)) => return Err(error.into()),
+            Some(Ok(metadata)) => Some(metadata),
+        };
+        if let (Some(slot), Some(metadata), Some(recorded)) =
+            (slot.as_deref(), metadata, journal.receipt_sha256.as_deref())
+        {
+            trusted_file(&metadata, slot, euid())?;
+            let mut bytes = Vec::new();
+            durable::open_regular(slot, false)?
+                .take(MAX_RECEIPT_BYTES + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > MAX_RECEIPT_BYTES || codec::digest(&bytes) != recorded {
+                return Err(invalid(format!(
+                    "{} does not hold the receipt this rollout staged",
+                    slot.display()
+                )));
             }
+            durable::atomic_write_mode(
+                &self.state.join(format!("rollout.{seconds}.receipt.json")),
+                &bytes,
+                0o600,
+            )?;
+            fs::remove_file(slot)?;
+            durable::sync_directory(slot.parent().unwrap_or(Path::new("/")))?;
         }
         // A hard link never replaces an earlier archive.
         fs::hard_link(
@@ -2397,6 +2474,9 @@ esac"#,
         // The staged copy is reused, so the retry reaches admission.
         let error = import();
         assert!(error.contains("not admitted"), "{error}");
+        // The slot is journaled, so any manifest finishing the rollout archives it.
+        let written = rollout.journal().unwrap().unwrap().written.unwrap();
+        assert_eq!(written.staged_slot, Some(f.p("import/receipt.json")));
         fs::set_permissions(
             f.p("import/receipt.json"),
             fs::Permissions::from_mode(0o600),
@@ -2854,6 +2934,98 @@ esac"#,
         assert_eq!(status["export_sha256"], codec::digest(b"{}"));
     }
 
+    /// What `import` leaves: a private staged slot and its recorded receipt.
+    fn staged(f: &Fixture, rollout: &Rollout, slot: &str, bytes: &[u8]) {
+        let slot = f.p(slot);
+        fs::create_dir_all(slot.parent().unwrap()).unwrap();
+        fs::write(&slot, bytes).unwrap();
+        fs::set_permissions(&slot, fs::Permissions::from_mode(0o400)).unwrap();
+        let mut journal = rollout.journal().unwrap().unwrap();
+        journal.phase = Phase::Prepared;
+        journal.receipt_sha256 = Some(codec::digest(bytes));
+        journal.written.as_mut().unwrap().staged_slot = Some(slot);
+        rollout.save(&journal).unwrap();
+    }
+
+    #[test]
+    fn another_manifest_unwinds_what_the_opening_run_wrote() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        let drop_in = f.p("control/pub.service.d").join(PAUSE_DROP_IN);
+        assert!(drop_in.exists());
+        let bytes = br#"{"status":"ready"}"#;
+        staged(&f, &rollout, "import/receipt.json", bytes);
+        // B: same bindings, but it no longer pauses pub.service and stages elsewhere.
+        let path = f.manifest("b.json", 2);
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest["paused_publishers"] = json!([]);
+        manifest["import_slot"] = json!(f.p("import-b/receipt.json"));
+        fs::write(&path, manifest.to_string()).unwrap();
+        let b = f.load(&path).unwrap();
+        assert_eq!(b.run(NO_ADOPTION).unwrap()["phase"], "aborted");
+        assert!(!drop_in.exists(), "A's pause drop-in stays behind");
+        assert_eq!(f.unit("pub.service"), "active");
+        assert_eq!(b.run(FENCE).unwrap()["phase"], "fenced");
+        assert!(
+            !f.p("import/receipt.json").exists(),
+            "A's receipt stays behind"
+        );
+        let receipt = (b.archives().unwrap().into_iter())
+            .find(|name| name.ends_with(".receipt.json"))
+            .unwrap();
+        assert_eq!(fs::read(f.p("state").join(receipt)).unwrap(), bytes);
+    }
+
+    #[test]
+    fn a_newer_coordinators_journal_still_loads_and_aborts() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        let path = f.p("state/rollout.json");
+        let mut journal = durable::read_json(&path).unwrap();
+        // Empty and absent values are not written.
+        for key in ["export", "receipt_sha256", "pending_receivers", "reopened"] {
+            assert!(journal.get(key).is_none(), "{key}: {journal}");
+        }
+        // A later generation's additive fields, unknown to this one.
+        journal["transported"] = json!({"receipt": "/srv/x", "sha256": "0".repeat(64)});
+        journal["written"]["future"] = json!(["/run/x"]);
+        durable::write_json(&path, &journal).unwrap();
+        assert_eq!(rollout.status().unwrap()["phase"], "fenced");
+        assert_eq!(rollout.run(NO_ADOPTION).unwrap()["phase"], "aborted");
+        assert_eq!(f.unit("postgresql.service"), "active");
+    }
+
+    #[test]
+    fn a_tampered_journal_never_steers_removal_or_archival() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        // A root-private file the journal could be made to name.
+        let victim = f.p("data/victim.json");
+        fs::write(&victim, b"{}").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut journal = rollout.journal().unwrap().unwrap();
+        let written = journal.written.as_mut().unwrap();
+        written.pause_drop_ins.push(victim.clone());
+        rollout.save(&journal).unwrap();
+        let error = rollout.run(NO_ADOPTION).unwrap_err().to_string();
+        assert!(error.contains("pause drop-in"), "{error}");
+        assert!(victim.exists());
+        // Unwound, but naming a slot that does not hold the recorded receipt.
+        let mut journal = rollout.journal().unwrap().unwrap();
+        let written = journal.written.as_mut().unwrap();
+        written.pause_drop_ins.retain(|file| *file != victim);
+        written.staged_slot = Some(victim.clone());
+        journal.receipt_sha256 = Some(codec::digest(b"other"));
+        rollout.save(&journal).unwrap();
+        rollout.run(NO_ADOPTION).unwrap();
+        let error = rollout.run(FENCE).unwrap_err().to_string();
+        assert!(error.contains("does not hold the receipt"), "{error}");
+        assert_eq!(fs::read(&victim).unwrap(), b"{}");
+    }
+
     #[test]
     fn a_finished_rollouts_staged_receipt_is_archived_not_left_in_the_slot() {
         let f = Fixture::new(0);
@@ -2861,17 +3033,7 @@ esac"#,
         rollout.run(FENCE).unwrap();
         // `import` staged and recorded a receipt, then the rollout was aborted.
         let bytes = br#"{"status":"ready"}"#;
-        fs::create_dir_all(f.p("import")).unwrap();
-        fs::write(f.p("import/receipt.json"), bytes).unwrap();
-        fs::set_permissions(
-            f.p("import/receipt.json"),
-            fs::Permissions::from_mode(0o400),
-        )
-        .unwrap();
-        let mut journal = rollout.journal().unwrap().unwrap();
-        journal.phase = Phase::Prepared;
-        journal.receipt_sha256 = Some(codec::digest(bytes));
-        rollout.save(&journal).unwrap();
+        staged(&f, &rollout, "import/receipt.json", bytes);
         rollout.run(NO_ADOPTION).unwrap();
         // The next rollout starts fresh and prepares past the import slot.
         assert_eq!(rollout.run(FENCE).unwrap()["phase"], "fenced");

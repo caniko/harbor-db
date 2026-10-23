@@ -217,6 +217,14 @@ another manifest of the same primary so a superseded candidate can always be
 unwound, provided its fence, startup-inhibition and data bindings are the ones
 the journal recorded; otherwise it refuses and names the opening manifest to
 rerun with (`--config`, or canix `--candidate`).
+Whichever manifest unwinds it, the rollout undoes what it wrote, as journaled
+before each write: the publisher-pause drop-ins (each must name
+`<drop-in root>/<unit>.d/zz-harbor-db-rollout-pause.conf`) and the import slot
+it staged into (moved only while it is a private root file holding the
+recorded receipt). Journals predating this fall back to the current manifest.
+The journal ignores unknown fields and omits empty ones, and new fields are
+optional and additive (only an incompatible change bumps its `version`), so a
+rollback generation can still read and abort a newer coordinator's journal.
 
 Exclusion and recovery:
 
