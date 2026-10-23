@@ -552,6 +552,18 @@ in {
         message = "The rollout coordinator needs recovery, recoveryPreparation with an off-host receipt import file and an export command (the executor hand-off), and an explicit client inventory.";
       }
       {
+        # Mirrors the coordinator: systemd splits these property values on
+        # whitespace (LoadCredential on `:`).
+        assertion = let
+          plain = extra: value: builtins.match ".*[[:space:][:cntrl:]\"'%\\\\${extra}].*" value == null;
+          values = [rollout.exportRoot] ++ preparation.readWritePaths ++ cfg.requiredMounts ++ preparation.requiredMounts ++ preparation.provisionDirectories ++ preparation.supplementaryGroups;
+          slot = preparation.offHostReceiptImportFile;
+          valid = lib.all (plain "") values && (slot == null || plain ":" slot);
+        in
+          rollout == null || preparation == null || valid;
+        message = "Rollout systemd property values (writable paths, mounts, export root, groups, import file) must not contain whitespace, quotes, `\\`, `%` or (in the import file) `:`.";
+      }
+      {
         assertion = preparation == null || lib.all (path: lib.any (writable: path == writable || lib.hasPrefix "${writable}/" path) preparation.readWritePaths) preparation.provisionDirectories;
         message = "Managed recovery provisioning must stay within the explicit writable preparation paths.";
       }
@@ -561,7 +573,20 @@ in {
     environment.etc."harbor-db/postgresql-rollout.json" = mkIf (rollout != null) {source = rolloutManifest;};
     systemd.tmpfiles.rules = ["d ${cfg.stateDir} 0700 postgres postgres -"];
     system.preSwitchChecks = lib.mkMerge [
-      (lib.mkIf (preparation != null) {
+      # With a rollout the coordinator prepares, imports and adopts under the
+      # fence; re-running preparation (and the exporter) at activation would
+      # bypass its locks and receiver quiescence and could mutate the certified
+      # hand-off. Its guard refuses activation mid-rollout instead.
+      (lib.mkIf (rollout != null) {
+        "00-0-harbor-db-postgresql-rollout" = ''
+          case "''${2-}" in
+            switch|test)
+              ${lib.getExe cfg.package} --config ${rolloutManifest} rollout activation-check >/dev/null || exit $?
+              ;;
+          esac
+        '';
+      })
+      (lib.mkIf (preparation != null && rollout == null) {
         "00-0-harbor-db-postgresql-prepare" = ''
           case "''${2-}" in
             switch|test)

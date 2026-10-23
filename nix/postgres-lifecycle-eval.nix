@@ -364,6 +364,26 @@ in
         message = "The opt-in rollout manifest must bind the fenced primary, client inventory, setup units, publishers and executor.";
       }
       {
+        name = "rollout-replaces-legacy-preparation-and-rejects-split-properties";
+        assertion = let
+          checks = withRollout.config.system.preSwitchChecks;
+          accepted = overrides:
+            lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout systemd property" entry.message))
+            (withRollout.extendModules {modules = [overrides];}).config.assertions;
+          rollout = value: {services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce value;};
+          preparation = name: value: {services.harbor-db.postgresql.recoveryPreparation.${name} = lib.mkForce value;};
+        in
+          !(checks ? "00-0-harbor-db-postgresql-prepare")
+          && lib.hasInfix "rollout activation-check" checks."00-0-harbor-db-postgresql-rollout"
+          && !(withPreparation.config.system.preSwitchChecks ? "00-0-harbor-db-postgresql-rollout")
+          && accepted {}
+          && lib.all (path: !accepted (rollout path)) ["/srv/harbor-db/ex port" "/srv/harbor-db/ex\tport" "/srv/harbor-db/ex%h" "/srv/harbor-db/ex\\port" "/srv/harbor-db/ex'port"]
+          && !accepted (preparation "readWritePaths" ["/srv/backups /srv/postgres/18" "/srv/disposable"])
+          && !accepted (preparation "supplementaryGroups" ["users wheel"])
+          && !accepted (preparation "offHostReceiptImportFile" "/srv/import/off:host.json");
+        message = "A rollout replaces the legacy pre-switch preparation with its activation guard and refuses systemd property values that split into extra entries.";
+      }
+      {
         name = "managed-preactivation-preparation";
         assertion = let
           checks = withPreparation.config.system.preSwitchChecks;

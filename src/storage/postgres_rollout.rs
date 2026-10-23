@@ -121,6 +121,9 @@ pub struct Journal {
     /// so a failed or interrupted cleanup is retried, never forgotten.
     #[serde(default)]
     pub pending_receivers: Vec<String>,
+    /// Publishers that were running when paused; restarted after the pause.
+    #[serde(default)]
+    pub stopped_publishers: Vec<String>,
     /// Recorded once no foreign fence was found and before `fence-open`, so a
     /// fence this rollout opened but never recorded is resumed, not refused.
     #[serde(default)]
@@ -133,6 +136,8 @@ pub struct Journal {
 
 pub enum Action {
     Status,
+    /// Pre-switch guard of a rollout-enabled generation.
+    ActivationCheck,
     Next,
     Fence,
     Prepare,
@@ -175,6 +180,7 @@ pub fn operate(config: &Path, action: Action) -> Result<Value> {
     let rollout = Rollout::load(&durable::immutable_config_path(config)?)?;
     match action {
         Action::Status => rollout.status(),
+        Action::ActivationCheck => rollout.activation_check(),
         Action::Certify {
             export,
             export_sha256,
@@ -396,6 +402,33 @@ impl Rollout {
         {
             return Err(invalid("invalid rollout manifest or primary binding"));
         }
+        // systemd splits ReadWritePaths/RequiresMountsFor/SupplementaryGroups
+        // on whitespace and LoadCredential on `:`, so one entry must never
+        // smuggle in another (or a quote, escape or specifier).
+        let plain = |text: Option<&str>, extra: &str| {
+            text.is_some_and(|text| {
+                !text.is_empty()
+                    && !text.chars().any(|c| {
+                        c.is_whitespace()
+                            || c.is_control()
+                            || "\\\"'%".contains(c)
+                            || extra.contains(c)
+                    })
+            })
+        };
+        let prepare = &manifest.prepare;
+        if !(prepare.read_write_paths.iter())
+            .chain(&prepare.required_mounts)
+            .chain([&prepare.export_root])
+            .chain(prepare.provision_directories.iter().map(|d| &d.path))
+            .all(|path| plain(path.to_str(), ""))
+            || !plain(manifest.import_slot.to_str(), ":")
+            || !(prepare.supplementary_groups.iter()).all(|group| plain(Some(group), ""))
+        {
+            return Err(invalid(
+                "rollout systemd property values must not contain whitespace, quotes, `\\`, `%` (or `:` in the import slot)",
+            ));
+        }
         let state = Path::new(STATE_ROOT);
         let export = manifest.prepare.export_root.as_path();
         if !dedicated(export) || overlaps(state, export) {
@@ -468,6 +501,7 @@ impl Rollout {
             receipt_sha256: None,
             acceptance_sha256: None,
             pending_receivers: Vec::new(),
+            stopped_publishers: Vec::new(),
             fence_opening: false,
             reopened: false,
         }
@@ -485,17 +519,23 @@ impl Rollout {
         Ok(journal)
     }
 
+    /// Fail unless every declared mount covering `path` is mounted.
+    fn require_covering_mounts(&self, path: &Path) -> Result<()> {
+        let covering: Vec<_> = (self.manifest.prepare.required_mounts.iter())
+            .filter(|mount| path.starts_with(mount))
+            .collect();
+        if covering.is_empty() {
+            return Ok(());
+        }
+        super::pg_core::require_mounts(&json!({ "required_mounts": covering }))
+    }
+
     /// Create the journal root privately, but never re-permission an existing
     /// one: it must already be a private directory this process owns.
     fn state_dir(&self) -> Result<()> {
         let state = &self.state;
         // Never create the journal on the root filesystem below an absent mount.
-        let covering: Vec<_> = (self.manifest.prepare.required_mounts.iter())
-            .filter(|mount| state.starts_with(mount))
-            .collect();
-        if !covering.is_empty() {
-            super::pg_core::require_mounts(&json!({ "required_mounts": covering }))?;
-        }
+        self.require_covering_mounts(state)?;
         // Walk from the anchor (`/` on hosts): every component must be a real
         // directory that only root or the coordinator can modify (a sticky one
         // lets only an entry's owner rename it). A missing component is created
@@ -730,6 +770,42 @@ impl Rollout {
         Ok(())
     }
 
+    /// Verify the unfenced primary is this cluster again.
+    fn inspect_live(&self) -> Result<()> {
+        let live = codec::decode(
+            &self
+                .harbor(
+                    true,
+                    &[
+                        "inspect-live",
+                        "--system-identifier",
+                        &self.manifest.system_identifier,
+                        "--socket-dir",
+                        &self.socket(),
+                        "--port",
+                        &self.manifest.port.to_string(),
+                    ],
+                )?
+                .stdout,
+        )?;
+        if live["system_identifier"] != self.manifest.system_identifier.as_str() {
+            return Err(invalid("normal primary readback differs"));
+        }
+        Ok(())
+    }
+
+    /// The token of the (shared) startup inhibition Harbor holds, if any.
+    fn held_inhibition(&self) -> Result<Option<String>> {
+        let state = super::string(&self.maintenance["startup_inhibition"], "state_dir")?;
+        let path = Path::new(state).join("inhibited.json");
+        if !writer_fence::exists(&path) {
+            return Ok(None);
+        }
+        Ok(Some(
+            super::string(&durable::read_json(&path)?, "token")?.to_owned(),
+        ))
+    }
+
     /// The token of any writer fence Harbor holds for this primary, whoever
     /// opened it: the active record, or an interrupted acquisition's selector.
     fn live_fence(&self) -> Result<Option<String>> {
@@ -800,7 +876,7 @@ impl Rollout {
 
     /// Publishers are skipped while the marker exists; the drop-in survives
     /// daemon-reload and generation switches, unlike a stopped timer.
-    fn pause_publishers(&self) -> Result<()> {
+    fn pause_publishers(&self, journal: &mut Journal) -> Result<()> {
         if self.manifest.paused_publishers.is_empty() {
             return Ok(());
         }
@@ -821,31 +897,47 @@ impl Rollout {
         }
         self.systemctl(&["daemon-reload"])?;
         for unit in &self.manifest.paused_publishers {
+            // Recorded before stopping, so abort or thaw restarts it.
+            let state = self.show(unit, "ActiveState")?;
+            if !matches!(state.as_str(), "inactive" | "failed")
+                && !journal.stopped_publishers.contains(unit)
+            {
+                journal.stopped_publishers.push(unit.clone());
+                self.save(journal)?;
+            }
             self.stop(unit)?;
         }
         Ok(())
     }
 
-    fn lift_pause(&self) -> Result<()> {
-        if self.manifest.paused_publishers.is_empty() {
-            return Ok(());
-        }
+    fn lift_pause(&self, journal: &mut Journal) -> Result<()> {
         // Publishers must not snapshot a cluster a preparation is still copying.
         if self.preparing()? {
             return Err(invalid(BUSY));
         }
-        let root = self.drop_in_root()?;
-        for unit in &self.manifest.paused_publishers {
-            let file = root.join(format!("{unit}.d")).join(PAUSE_DROP_IN);
-            if file.exists() {
-                fs::remove_file(file)?;
+        let mut lifted = false;
+        if !self.manifest.paused_publishers.is_empty() {
+            let root = self.drop_in_root()?;
+            for unit in &self.manifest.paused_publishers {
+                let file = root.join(format!("{unit}.d")).join(PAUSE_DROP_IN);
+                if file.exists() {
+                    fs::remove_file(file)?;
+                    lifted = true;
+                }
             }
         }
+        // The marker gates every manifest's drop-ins (a cross-manifest abort may
+        // declare other publishers), so it always goes.
         if self.pause_marker().exists() {
             fs::remove_file(self.pause_marker())?;
+            lifted = true;
         }
-        self.systemctl(&["daemon-reload"])?;
-        Ok(())
+        if lifted {
+            self.systemctl(&["daemon-reload"])?;
+        }
+        let restarted = self.restart(&mut journal.stopped_publishers);
+        self.save(journal)?;
+        restarted
     }
 
     fn stop_clients(&self, journal: &mut Journal) -> Result<()> {
@@ -860,6 +952,8 @@ impl Rollout {
     }
 
     fn provision(&self, path: &Path, group: &str, mode: u32) -> Result<()> {
+        // Never provision on the root filesystem below an absent mount.
+        self.require_covering_mounts(path)?;
         if !path.exists() {
             let (uid, _) = account("postgres")?;
             let gid = group_id(group)?;
@@ -884,7 +978,7 @@ impl Rollout {
         let authority = Path::new(super::string(&self.maintenance, "state_dir")?);
         self.provision(authority, "postgres", 0o700)?;
         self.inhibit(journal)?;
-        self.pause_publishers()?;
+        self.pause_publishers(journal)?;
         self.stop_clients(journal)?;
         self.stop(self.primary_unit())?;
         self.open_fence(journal)?;
@@ -983,17 +1077,21 @@ impl Rollout {
         if self.preparing()? {
             return Err(invalid(BUSY));
         }
-        let mut first = None;
-        journal
-            .pending_receivers
-            .retain(|unit| match self.start(unit) {
-                Ok(_) => false,
-                Err(error) => {
-                    first.get_or_insert(error);
-                    true
-                }
-            });
+        let restarted = self.restart(&mut journal.pending_receivers);
         self.save(journal)?;
+        restarted
+    }
+
+    /// Start every unit; those that fail stay listed for the next retry.
+    fn restart(&self, units: &mut Vec<String>) -> Result<()> {
+        let mut first = None;
+        units.retain(|unit| match self.start(unit) {
+            Ok(()) => false,
+            Err(error) => {
+                first.get_or_insert(error);
+                true
+            }
+        });
         first.map_or(Ok(()), Err)
     }
 
@@ -1198,13 +1296,31 @@ impl Rollout {
     /// startup exclusion, restart, verify, then return recorded clients.
     fn reopen(&self, journal: &mut Journal) -> Result<()> {
         if !journal.reopened {
-            if journal.fence_token.is_none() && journal.startup_token.is_some() {
+            if let (None, Some(startup)) = (&journal.fence_token, journal.startup_token.clone()) {
                 // Interrupted between inhibition and fence-open. Harbor binds the
                 // startup release to a fence boundary, so complete the offline
                 // acquisition first and then unwind it through the normal close.
-                self.stop(self.primary_unit())?;
-                self.open_fence(journal)?;
-                self.release_startup(journal, "prepared")?;
+                let foreign = self.live_fence()?.filter(|_| !journal.fence_opening);
+                if self.held_inhibition()?.as_deref() != Some(startup.as_str()) {
+                    // The shared inhibition was already released at another
+                    // coordinator's fence boundary: only restart the primary
+                    // this rollout stopped (a foreign fence is that one's to verify).
+                    self.start_primary()?;
+                    if foreign.is_none() {
+                        self.inspect_live()?;
+                    }
+                } else if let Some(foreign) = foreign {
+                    return Err(invalid(format!(
+                        "this rollout holds startup inhibition {startup} but Harbor holds writer fence \
+                         {foreign}, which it did not open; Harbor releases startup only at a fence \
+                         boundary, so finish fence {foreign} with the coordinator that opened it (that \
+                         releases the shared inhibition), then rerun `rollout abort`"
+                    )));
+                } else {
+                    self.stop(self.primary_unit())?;
+                    self.open_fence(journal)?;
+                    self.release_startup(journal, "prepared")?;
+                }
             }
             if let Some(token) = journal.fence_token.clone() {
                 self.inhibit(journal)?;
@@ -1224,25 +1340,7 @@ impl Rollout {
                 }
                 self.release_startup(journal, "closed")?;
                 self.start_primary()?;
-                let live = codec::decode(
-                    &self
-                        .harbor(
-                            true,
-                            &[
-                                "inspect-live",
-                                "--system-identifier",
-                                &self.manifest.system_identifier,
-                                "--socket-dir",
-                                &self.socket(),
-                                "--port",
-                                &self.manifest.port.to_string(),
-                            ],
-                        )?
-                        .stdout,
-                )?;
-                if live["system_identifier"] != self.manifest.system_identifier.as_str() {
-                    return Err(invalid("normal primary readback differs"));
-                }
+                self.inspect_live()?;
             }
             journal.reopened = true;
             self.save(journal)?;
@@ -1259,7 +1357,7 @@ impl Rollout {
             self.start(unit)?;
         }
         self.restart_receivers(journal)?;
-        self.lift_pause()
+        self.lift_pause(journal)
     }
 
     /// `activated` and `thaw` act on the deployed generation, so it must carry
@@ -1451,6 +1549,36 @@ impl Rollout {
             value["archived"] = json!(archived);
         }
         Ok(value)
+    }
+
+    /// Replaces the legacy pre-switch preparation for a rollout-enabled
+    /// generation: the coordinator prepares and adopts under the fence, so
+    /// activation is refused only while a rollout sits between fence and
+    /// adoption, or was adopted under another manifest. Recovery admission
+    /// (`inspect-recovery`) still gates the switch separately.
+    fn activation_check(&self) -> Result<Value> {
+        if let Some(journal) = self.journal()? {
+            let started = journal.startup_token.is_some() || journal.fence_token.is_some();
+            match journal.phase {
+                Phase::Fenced | Phase::Prepared | Phase::Imported => {
+                    return Err(invalid(
+                        "the rollout is between fence and adoption; finish it or `rollout abort` before activating",
+                    ));
+                }
+                Phase::Idle if started => {
+                    return Err(invalid(
+                        "an interrupted rollout fence is pending; rerun `rollout fence` or `rollout abort` before activating",
+                    ));
+                }
+                Phase::Adopted if journal.manifest_sha256 != self.digest => {
+                    return Err(invalid(
+                        "the rollout was adopted under another manifest; activate that candidate",
+                    ));
+                }
+                _ => {}
+            }
+        }
+        self.status()
     }
 
     /// Journals of finished rollouts, archived beside the live journal.
@@ -1646,7 +1774,10 @@ impl Rollout {
                 Phase::Imported => self.adopt(&mut journal)?,
                 _ => {}
             },
-            Action::Status | Action::Certify { .. } | Action::Abort { .. } => unreachable!(),
+            Action::Status
+            | Action::ActivationCheck
+            | Action::Certify { .. }
+            | Action::Abort { .. } => unreachable!(),
         }
         self.status()
     }
@@ -1693,7 +1824,15 @@ mod tests {
         fn new(polls: u32) -> Self {
             let root = tempfile::tempdir().unwrap();
             let p = |name: &str| root.path().join(name);
-            for dir in ["units", "authority", "data", "evidence", "control", "state"] {
+            for dir in [
+                "units",
+                "authority",
+                "data",
+                "evidence",
+                "control",
+                "state",
+                "startup",
+            ] {
                 fs::create_dir(p(dir)).unwrap();
             }
             fs::set_permissions(p("state"), fs::Permissions::from_mode(0o700)).unwrap();
@@ -1744,9 +1883,9 @@ exit 0"#,
                 &format!(
                     r#"log={log}; shift 2; echo "harbor $*" >> "$log"
 case "$1" in
-  inhibit-startup) echo '{{"status":"startup-inhibited","token":"{TOKEN}"}}' ;;
+  inhibit-startup) [ -f {inhibited} ] || echo '{{"token":"{TOKEN}"}}' > {inhibited}; echo '{{"status":"startup-inhibited","token":"{TOKEN}"}}' ;;
   fence-open) echo '{{"token":"{TOKEN}"}}' > {marker}; echo '{{"status":"prepared-offline","token":"{TOKEN}","restart_required":true}}' ;;
-  release-startup) echo '{{"status":"startup-released"}}' ;;
+  release-startup) rm -f {inhibited}; echo '{{"status":"startup-released"}}' ;;
   inspect-fence) echo '{{"status":"ready","token":"{TOKEN}","system_identifier":"42"}}' ;;
   inspect-offline-fence) exit 1 ;;
   fence-close) rm -f {marker}; echo '{{"status":"closed-offline","token":"{TOKEN}"}}' ;;
@@ -1756,13 +1895,15 @@ case "$1" in
 esac"#,
                     log = log.display(),
                     marker = p("authority/writer-fence.json").display(),
+                    inhibited = p("startup/inhibited.json").display(),
                 ),
             );
             let maintenance = json!({
                 "data_dir": p("data"), "state_dir": p("authority"),
                 "recovery": {"system_identifier": "42", "require_writer_fence": true,
                     "snapshot_file": p("evidence/records.json")},
-                "startup_inhibition": {"unit": "postgresql.service", "drop_in_root": p("control")},
+                "startup_inhibition": {"unit": "postgresql.service", "drop_in_root": p("control"),
+                    "state_dir": p("startup")},
             });
             fs::write(p("maintenance.json"), maintenance.to_string()).unwrap();
             let fixture = Self { root };
@@ -2183,6 +2324,11 @@ esac"#,
         journal.startup_token = Some(TOKEN.into());
         journal.clients = vec!["a.service".into()];
         rollout.save(&journal).unwrap();
+        fs::write(
+            f.p("startup/inhibited.json"),
+            json!({ "token": TOKEN }).to_string(),
+        )
+        .unwrap();
         fs::write(f.p("units/a.service"), "inactive").unwrap();
         rollout
             .run(Action::Abort {
@@ -2345,7 +2491,7 @@ esac"#,
         for error in [
             rollout.run(Action::Prepare).unwrap_err(),
             rollout.run(NO_ADOPTION).unwrap_err(),
-            rollout.lift_pause().unwrap_err(),
+            rollout.lift_pause(&mut journal).unwrap_err(),
         ] {
             assert!(error.to_string().contains(PREPARE_UNIT), "{error}");
         }
@@ -2551,6 +2697,117 @@ esac"#,
     }
 
     #[test]
+    fn paused_publishers_that_were_running_are_restarted_after_the_pause() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| {
+            m["paused_publishers"] = json!(["pub.service", "idle-pub.service"])
+        })
+        .unwrap();
+        fs::write(f.p("units/idle-pub.service"), "inactive").unwrap();
+        rollout.run(Action::Fence).unwrap();
+        assert_eq!(f.unit("pub.service"), "inactive");
+        let journal = rollout.journal().unwrap().unwrap();
+        assert_eq!(journal.stopped_publishers, ["pub.service"]);
+        rollout.run(NO_ADOPTION).unwrap();
+        assert_eq!(f.unit("pub.service"), "active");
+        // A publisher that was idle stays for its own trigger.
+        assert_eq!(f.unit("idle-pub.service"), "inactive");
+        assert!(
+            rollout
+                .journal()
+                .unwrap()
+                .unwrap()
+                .stopped_publishers
+                .is_empty()
+        );
+        assert!(!f.p("state/paused").exists());
+    }
+
+    #[test]
+    fn systemd_property_values_never_split_into_extra_entries() {
+        let f = Fixture::new(0);
+        for edit in [
+            json!({"prepare": {"read_write_paths": ["/srv/backups /srv/postgres/18"]}}),
+            json!({"prepare": {"export_root": "/srv/harbor-db/ex port"}}),
+            json!({"prepare": {"required_mounts": ["/srv\tdata"]}}),
+            json!({"prepare": {"supplementary_groups": ["users wheel"]}}),
+            json!({"prepare": {"provision_directories": [{"path": "/srv/a%h", "group": "postgres", "mode": 448}]}}),
+            json!({"import_slot": "/srv/import/off:host.json"}),
+            json!({"prepare": {"read_write_paths": ["/srv/\"quoted\""]}}),
+        ] {
+            let error = edit_manifest(&f, |m| {
+                for (key, value) in edit.as_object().unwrap() {
+                    match value.as_object() {
+                        Some(fields) => fields.iter().for_each(|(k, v)| m[key][k] = v.clone()),
+                        None => m[key] = value.clone(),
+                    }
+                }
+            })
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(error.contains("systemd property"), "{edit}: {error}");
+            f.manifest("rollout.json", 2);
+        }
+        assert!(
+            edit_manifest(&f, |m| m["prepare"]["read_write_paths"] =
+                json!(["/srv/backups"]))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn preparation_never_provisions_below_an_absent_mount() {
+        let f = Fixture::new(0);
+        fs::create_dir(f.p("mnt")).unwrap();
+        let rollout = edit_manifest(&f, |m| {
+            m["prepare"]["required_mounts"] = json!([f.p("mnt")]);
+            m["prepare"]["provision_directories"] =
+                json!([{"path": f.p("mnt/export"), "group": "postgres", "mode": 488}]);
+        })
+        .unwrap();
+        let error = rollout
+            .run_preparation(&mut rollout.bound().unwrap(), false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("required mount"), "{error}");
+        assert!(!f.p("mnt/export").exists());
+        assert!(!f.calls().contains("systemd-run"));
+    }
+
+    #[test]
+    fn activation_is_refused_between_fence_and_adoption() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        assert!(rollout.activation_check().is_ok(), "no rollout");
+        rollout.run(Action::Fence).unwrap();
+        let mut journal = rollout.journal().unwrap().unwrap();
+        for phase in [Phase::Fenced, Phase::Prepared, Phase::Imported] {
+            journal.phase = phase;
+            rollout.save(&journal).unwrap();
+            let error = rollout.activation_check().unwrap_err().to_string();
+            assert!(
+                error.contains("between fence and adoption"),
+                "{phase:?}: {error}"
+            );
+        }
+        journal.phase = Phase::Idle;
+        rollout.save(&journal).unwrap();
+        assert!(rollout.activation_check().is_err(), "interrupted fence");
+        journal.phase = Phase::Adopted;
+        rollout.save(&journal).unwrap();
+        assert!(rollout.activation_check().is_ok());
+        let other = f.load(&f.manifest("other.json", 5)).unwrap();
+        let error = other.activation_check().unwrap_err().to_string();
+        assert!(error.contains("another manifest"), "{error}");
+        for phase in [Phase::Activated, Phase::Thawed, Phase::Aborted] {
+            journal.phase = phase;
+            rollout.save(&journal).unwrap();
+            assert!(other.activation_check().is_ok(), "{phase:?}");
+        }
+    }
+
+    #[test]
     fn pre_fence_completion_never_adopts_another_coordinators_fence() {
         let f = Fixture::new(0);
         let rollout = f.rollout();
@@ -2559,11 +2816,33 @@ esac"#,
         let mut journal = rollout.bound().unwrap();
         journal.startup_token = Some(TOKEN.into());
         rollout.save(&journal).unwrap();
+        let inhibited = f.p("startup/inhibited.json");
+        fs::write(&inhibited, json!({ "token": TOKEN }).to_string()).unwrap();
+        fs::write(f.p("units/postgresql.service"), "inactive").unwrap();
+        let other = "f".repeat(32);
         let marker = f.p("authority/writer-fence.json");
-        fs::write(&marker, json!({ "token": "f".repeat(32) }).to_string()).unwrap();
+        fs::write(&marker, json!({ "token": other }).to_string()).unwrap();
+        // Harbor releases startup only at a fence boundary: name both tokens.
         let error = rollout.run(NO_ADOPTION).unwrap_err().to_string();
-        assert!(error.contains("did not open"), "{error}");
-        assert!(!f.calls().contains("harbor fence-open"), "{}", f.calls());
+        assert!(
+            error.contains(TOKEN) && error.contains(&other) && error.contains("then rerun"),
+            "{error}"
+        );
+        let calls = fs::read_to_string(f.p("calls.log")).unwrap_or_default();
+        assert!(
+            !calls.contains("harbor fence-open") && !calls.contains("systemctl stop"),
+            "{calls}"
+        );
+        // Once the other coordinator released the shared inhibition at its own
+        // boundary, the retry restarts the primary without adopting its fence.
+        fs::remove_file(&inhibited).unwrap();
+        assert_eq!(rollout.run(NO_ADOPTION).unwrap()["phase"], "aborted");
+        assert_eq!(f.unit("postgresql.service"), "active");
+        let calls = f.calls();
+        assert!(
+            !calls.contains("harbor fence-open") && !calls.contains("harbor inspect-live"),
+            "{calls}"
+        );
     }
 
     #[test]

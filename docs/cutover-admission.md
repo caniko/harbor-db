@@ -219,9 +219,14 @@ unwound.
 Exclusion and recovery:
 
 - **Foreign fences.** Harbor resumes any prepared writer fence, so `fence`
-  refuses (before touching any unit) a live fence or interrupted fence selector
-  whose token this journal does not own, as does the pre-fence completion
-  inside `abort`; finish it with the coordinator that opened it.
+  refuses (before touching any unit or writing a journal) a live fence or
+  interrupted fence selector whose token this journal does not own; finish it
+  with the coordinator that opened it. An `abort` interrupted between
+  inhibition and fence-open never adopts such a fence either: Harbor releases
+  startup only at a fence boundary, so while the shared inhibition is still
+  held it names both tokens and asks for the other fence to be finished first;
+  once that coordinator has released the inhibition, the retried `abort`
+  restarts the primary this rollout stopped.
 - **Execution lock.** `executionLock` names an existing host lock file (for
   example `/run/lock/canix/switch.lock`). Every mutating step holds a
   non-blocking exclusive `flock` on it besides the journal's `rollout.lock`, and
@@ -247,10 +252,25 @@ Exclusion and recovery:
   one to `rollout.<unix-seconds>.thawed.json`, an abort (only once its reopen is
   recorded and no Harbor fence is held) to `rollout.<unix-seconds>.aborted.json`.
   `status` lists the archives.
-- **Start limits.** Every coordinator start (primary, clients, receivers) runs
-  `systemctl reset-failed` first, so repeated cycles never leave a unit down on
-  its start limit.
+- **Start limits.** Every coordinator start (primary, clients, receivers,
+  publishers) runs `systemctl reset-failed` first, so repeated cycles never
+  leave a unit down on its start limit.
 - **Output.** Each step prints exactly one JSON status document on stdout; the
   preparation worker's and the executor command's own output goes to stderr.
+- **Publishers.** Publishers that were running when the pause began are
+  journaled and restarted (after `reset-failed`) once `abort` or `thaw` lifts
+  the pause; idle ones keep waiting for their own triggers.
+- **Mounts and systemd values.** Every directory the coordinator provisions
+  (and its journal root) is created only after the declared mounts covering
+  it are mounted. Paths, mounts, groups and the import slot rendered into the
+  worker's systemd properties must not contain whitespace, quotes, `\`, `%`
+  (or `:` in the import slot), both in Nix and when the manifest is loaded.
+- **Activation.** A rollout-enabled generation does not install the legacy
+  `00-0-harbor-db-postgresql-prepare` pre-switch hook: the coordinator already
+  prepared, imported and adopted under the fence. Its
+  `00-0-harbor-db-postgresql-rollout` hook (`rollout activation-check`) refuses
+  activation while a rollout sits between fence and adoption, or was adopted
+  under another manifest; `00-harbor-db-postgresql-recovery` still requires
+  accepted recovery evidence.
 - **Status.** `rollout status` needs read access to the root-owned journal; an
   unreadable journal is an error, never an idle rollout.

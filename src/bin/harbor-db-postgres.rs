@@ -149,6 +149,10 @@ enum RolloutStep {
     /// Show the journal phase and the next action (needs read access to the
     /// root-owned journal; takes no lease).
     Status,
+    /// Pre-switch guard: refuse activation while a rollout sits between fence
+    /// and adoption (installed by the module in place of legacy preparation).
+    #[command(hide = true)]
+    ActivationCheck,
     /// Perform the next local step, or print the external action.
     Next,
     /// Pause publishers, stop clients and open the writer fence.
@@ -192,6 +196,7 @@ fn operate(args: Args) -> Result<Option<Value>> {
         use storage::postgres_rollout::Action;
         let action = match step {
             RolloutStep::Status => Action::Status,
+            RolloutStep::ActivationCheck => Action::ActivationCheck,
             RolloutStep::Next => Action::Next,
             RolloutStep::Fence => Action::Fence,
             RolloutStep::Prepare => Action::Prepare,
