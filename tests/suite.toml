@@ -1777,14 +1777,14 @@ case = "vm.x86_64-linux.native-postgres-rollout"
 capability = "nixos"
 operation = "nixos.postgres-rollout"
 dimension = "interruption"
-evidence = "nix/test-postgres-rollout.nix interrupts acquisition after startup inhibition (a client refuses to stop), loses the journal of a fenced rollout, and fails thaw after the fence closed (a client fails to start); the journal or Harbor's live fence retains what the explicit retry needs."
+evidence = "nix/test-postgres-rollout.nix interrupts acquisition after startup inhibition (a client refuses to stop), fails fence-open after the coordinator recorded its intent (the fence lock is held) and then completes that fence-open out of band, loses the journal of a fenced rollout, and fails thaw after the fence closed (a client fails to start); the journal or Harbor's live fence retains what the explicit retry needs."
 
 [[coverage]]
 case = "vm.x86_64-linux.native-postgres-rollout"
 capability = "nixos"
 operation = "nixos.postgres-rollout"
 dimension = "recovery"
-evidence = "nix/test-postgres-rollout.nix aborts the interrupted acquisition, the fenced rollout and the journal-less rollout (by adopting Harbor's fence token), then reruns thaw without restarting the reopened primary (same MainPID): each closes the fence, releases startup inhibition, restarts recorded clients and quiesced receivers, never restarts retired clients and lifts the publisher pause drop-in."
+evidence = "nix/test-postgres-rollout.nix aborts the interrupted acquisition, the fenced rollout and the journal-less rollout (by adopting Harbor's fence token); resumes the interrupted opening only with its exact live token (an absent or different one cannot prove ownership); and reruns thaw without restarting the reopened primary (same MainPID). Each unwind closes the fence, releases startup inhibition, restarts recorded clients, quiesced receivers and paused publishers, and never restarts retired clients."
 
 [[coverage]]
 case = "vm.x86_64-linux.native-postgres-rollout"

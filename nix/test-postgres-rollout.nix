@@ -350,9 +350,30 @@ in
           primary.succeed("systemctl start fixture-daemon.service")
           reopened()
 
+      with subtest("an opening interrupted before its token is adopted only explicitly"):
+          lock = "/var/lib/harbor-db/postgresql/writer-fence.lock"
+          maintenance = json.loads(primary.succeed(f"cat {manifest}"))["maintenance"]
+          # Harbor's fence-open fails after the coordinator recorded its intent.
+          primary.succeed(f"systemd-run --unit=fixture-fence-holder --collect flock {lock} ${pkgs.coreutils}/bin/sleep infinity")
+          primary.wait_until_fails(f"flock -n {lock} true")
+          refused("fence", "temporarily unavailable")
+          journal = step("status")
+          assert journal["fence_opening"] and journal["fence_token"] is None, journal
+          primary.succeed("systemctl stop fixture-fence-holder.service")
+          # As if the interrupted coordinator's own fence-open had completed.
+          token = json.loads(primary.succeed(f"runuser -u postgres -- harbor-db-postgres --config {maintenance} fence-open --system-identifier {identifier}"))["token"]
+          refused("fence", "cannot prove")
+          refused("fence --adopt-fence-token " + "0" * 32, "cannot prove")
+          adopted = step(f"fence --adopt-fence-token {token}")
+          assert adopted["phase"] == "fenced" and adopted["fence_token"] == token, adopted
+          fenced()
+          refused(f"abort --adopt-fence-token {token}", "records its fence")
+          assert step("abort")["phase"] == "aborted"
+          reopened()
+
       with subtest("the full rollout hands off to the executor and thaws"):
           assert step("next")["phase"] == "fenced"
-          assert len(step("status")["archived"]) == 3
+          assert len(step("status")["archived"]) == 4
           # The candidate's pre-switch check refuses activation mid-rollout.
           activation_refused()
           # A surviving preparation worker blocks the step, before any receiver stops.
@@ -405,6 +426,6 @@ in
           assert step("thaw --acceptance /root/acceptance/receipt.json")["phase"] == "thawed"
           assert primary_pid() == reopened_pid
           reopened()
-          assert sql("SELECT count(*) FROM retained WHERE id = 'daemon'") == "5"
+          assert sql("SELECT count(*) FROM retained WHERE id = 'daemon'") == "6"
     '';
   }
