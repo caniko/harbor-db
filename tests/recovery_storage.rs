@@ -732,7 +732,7 @@ fn primary_configuration_links_are_protected_without_admitting_restore_redirects
         .to_string()
         .contains("redirected or special")
     );
-    let script = r#"import json,sys
+    let script = r#"import json,os,sys
 from pathlib import Path
 from harbor_db import recovery
 c=json.loads(sys.argv[1]); root=Path(c['data_dir']).parent
@@ -746,7 +746,12 @@ else: raise AssertionError('redirected restoration admitted')
 (restored/'redirected-config').unlink()
 recovery.isolated_restore(restored,root/'data',root/'backup/base/base-1')
 locked=root/'executor-postgresql'; locked.mkdir(); locked.chmod(0)
-try: recovery.isolated_restore(restored,locked/'17',root/'backup/base/base-1')
+try:
+    recovery.isolated_restore(restored,locked/'17',root/'backup/base/base-1',independent=True)
+    if os.geteuid() != 0:
+        try: recovery.isolated_restore(restored,locked/'17',root/'backup/base/base-1')
+        except PermissionError: pass
+        else: raise AssertionError('local certifier skipped an unsearchable primary')
 finally: locked.chmod(0o700)
 (restored/'shared-config').hardlink_to(configuration)
 try: recovery.isolated_restore(restored,root/'data',root/'backup/base/base-1')
@@ -1652,24 +1657,32 @@ fn record_queries_use_the_recovery_verification_bound_in_both_engines() {
     let _workers = WORKERS.lock().unwrap();
     let f = Fixture::new();
     executable(&f.p("package/bin/psql"), "sleep 2\nprintf 'rows\\n'");
+    let socket = Path::new("/local/socket");
     let mut short = f.config.clone();
     short["recovery"]["verify_timeout_seconds"] = json!(0.5);
-    assert!(recovery::query(&short, Path::new("/local/socket"), 5432, "app", "SELECT 1").is_err());
+    assert!(recovery::record_query_leased(&short, socket, 5432, "app", "SELECT 1", &[]).is_err());
+    // Auxiliary (compatibility/inventory) queries keep the generic bound.
+    assert_eq!(
+        recovery::query(&short, socket, 5432, "app", "SELECT 1").unwrap(),
+        "rows\n"
+    );
     let mut long = f.config.clone();
     long["recovery"]["verify_timeout_seconds"] = json!(30);
     assert_eq!(
-        recovery::query(&long, Path::new("/local/socket"), 5432, "app", "SELECT 1").unwrap(),
+        recovery::record_query_leased(&long, socket, 5432, "app", "SELECT 1", &[]).unwrap(),
         "rows\n"
     );
     let script = r#"import json,subprocess,sys
 from harbor_db import recovery
 c=json.loads(sys.argv[1])
+checks={'record_checks':[{'name':'app','database':'app','sql':'SELECT 1'}]}
 c['recovery']['verify_timeout_seconds']=0.5
-try: recovery.query(c,'/local/socket',5432,'app','SELECT 1')
+try: recovery.records(c,checks,'/local/socket',5432)
 except subprocess.TimeoutExpired: pass
 else: raise AssertionError('record query outlived the recovery bound')
-c['recovery']['verify_timeout_seconds']=30
 assert recovery.query(c,'/local/socket',5432,'app','SELECT 1')=='rows\n'
+c['recovery']['verify_timeout_seconds']=30
+assert set(recovery.records(c,checks,'/local/socket',5432))=={'app'}
 "#;
     let mut spec = harbor_db::storage::process::CommandSpec::new(vec![
         "python3".into(),

@@ -396,6 +396,32 @@ pub fn query_leased(
     sql: &str,
     leases: &[RawFd],
 ) -> Result<String> {
+    let spec = query_spec(config, socket, port, database, sql, leases)?;
+    process::text(&process::execute(&spec)?)
+}
+/// Record checks hash whole relations, so the generic 60 s bound kills them on
+/// large clusters; bound them by the recovery verification timeout instead.
+/// Auxiliary compatibility and inventory queries keep the short bound.
+pub fn record_query_leased(
+    config: &Value,
+    socket: &Path,
+    port: u16,
+    database: &str,
+    sql: &str,
+    leases: &[RawFd],
+) -> Result<String> {
+    let mut spec = query_spec(config, socket, port, database, sql, leases)?;
+    spec.timeout = verify_timeout(config)?;
+    process::text(&process::execute(&spec)?)
+}
+fn query_spec(
+    config: &Value,
+    socket: &Path,
+    port: u16,
+    database: &str,
+    sql: &str,
+    leases: &[RawFd],
+) -> Result<process::CommandSpec> {
     let mut spec =
         process::CommandSpec::new(query_argv(config, socket, port, database, sql, None)?);
     let mut env = std::env::vars()
@@ -404,12 +430,7 @@ pub fn query_leased(
     env.insert("PGCONNECT_TIMEOUT".into(), "5".into());
     spec.environment = Some(env);
     spec.leases = leases.to_vec();
-    // Record checks hash whole relations; the generic 60 s bound kills them
-    // on large clusters. Recovery configs carry the operator's bound.
-    if !config["recovery"]["verify_timeout_seconds"].is_null() {
-        spec.timeout = verify_timeout(config)?;
-    }
-    process::text(&process::execute(&spec)?)
+    Ok(spec)
 }
 /// One PostgreSQL-parsed statement inside a read-only boundary. Custody workers
 /// reuse the same argv while retaining their account, environment and lease policy.
@@ -476,7 +497,7 @@ fn records(
         result.insert(
             string(item, "name")?.into(),
             json!(codec::digest(
-                query_leased(
+                record_query_leased(
                     config,
                     socket,
                     port,
@@ -791,13 +812,21 @@ pub(crate) fn storage_identities_until(
 /// independent executor it is either absent or, when the executor runs its own
 /// cluster there, unsearchable; a restore the executor can write cannot live
 /// inside a tree it cannot search, so neither can alias the copy.
-fn foreign_primary(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-    )
+fn foreign_primary(error: &std::io::Error, independent: bool) -> bool {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => true,
+        // A local certifier must still scan its own primary; an unsearchable
+        // path there could hide storage shared with the restored copy.
+        std::io::ErrorKind::PermissionDenied => independent,
+        _ => false,
+    }
 }
-fn isolated_restore(restored: &Path, authoritative: &Path, backup: &Path) -> Result<()> {
+fn isolated_restore(
+    restored: &Path,
+    authoritative: &Path,
+    backup: &Path,
+    independent: bool,
+) -> Result<()> {
     let restored_root = fs::symlink_metadata(restored)?;
     for root in [authoritative, backup] {
         match fs::symlink_metadata(root) {
@@ -810,14 +839,14 @@ fn isolated_restore(restored: &Path, authoritative: &Path, backup: &Path) -> Res
                 ));
             }
             Ok(_) => {}
-            Err(error) if root == authoritative && foreign_primary(&error) => {}
+            Err(error) if root == authoritative && foreign_primary(&error, independent) => {}
             Err(error) => return Err(error.into()),
         }
     }
     let mut primary = BTreeSet::new();
     match fs::symlink_metadata(authoritative) {
         Ok(_) => storage_identities(authoritative, &mut primary, true)?,
-        Err(error) if foreign_primary(&error) => {}
+        Err(error) if foreign_primary(&error, independent) => {}
         Err(error) => return Err(error.into()),
     }
     let mut protected = BTreeSet::new();
@@ -865,6 +894,7 @@ pub fn certify(
         &restored,
         &absolute(&path(config, "data_dir")?)?,
         &directory,
+        settings["source_hostname"].as_str() != Some(executor.as_str()),
     )?;
     let source = snapshot_evidence(config, settings, &binding, now)?;
     source_fence(settings, &source)?;
@@ -1532,9 +1562,15 @@ mod tests {
         }
         fs::write(restored.join("PG_VERSION"), "17").unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-        let result = isolated_restore(&restored, &locked.join("17"), &backup);
+        let independent = isolated_restore(&restored, &locked.join("17"), &backup, true);
+        let local = isolated_restore(&restored, &locked.join("17"), &backup, false);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
-        result.unwrap();
+        independent.unwrap();
+        // Root searches any directory; only an unprivileged local certifier sees EACCES.
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(local.is_err(), "a local certifier must stay fail-closed");
+        }
     }
 
     #[test]

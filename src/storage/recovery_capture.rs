@@ -529,7 +529,7 @@ pub fn finalize(
         records.insert(
             string(check, "name")?.into(),
             json!(codec::digest(
-                recovery::query_leased(
+                recovery::record_query_leased(
                     config,
                     &socket,
                     port,
