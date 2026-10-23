@@ -307,10 +307,28 @@ Exclusion and recovery:
   one (evidence in its backup root), and the export root inside a writable
   path. The recovery evidence directories (snapshot, receipt and off-host
   receipt) and the provisioned directories must lie inside the writable paths.
+- **Load-time inputs.** Every local executable a step runs (`harbor`,
+  `systemctl`, `systemd-run` and thaw's cutover checker) must be an executable
+  regular store file reached without a mutable alias, and the worker's
+  preparation config must be a store file. The executor command runs on the
+  executor host, so it is checked only lexically: a host, a user, an absolute
+  program and non-empty arguments.
+- **One maintenance manifest.** With a rollout, every guard and service of the
+  generation that inspects recovery, fence or startup state renders from
+  `rollout.maintenance`, the manifest the coordinator fences, prepares and
+  adopts under. That covers the pre-switch recovery and adoption checks,
+  PostgreSQL's start `check` and `serve`, and the recovery-check service. The
+  upgrade service keeps the module's own manifest.
 - **Preflight.** Anything static that could fail a later step once the fence
   is held is checked by `fence` before any side effect (and the worker's part
   again by `prepare`):
   - every declared mount is present;
+  - every name a later step resolves exists: the `postgres` account and group,
+    each provisioned directory's group (including directories still to be
+    created) and the worker's supplementary groups;
+  - while the primary runs, `inspect-live` answers on the manifest's socket and
+    port with its system identifier, as `inspect-fence` must once the fence is
+    open;
   - each provisioned directory, and the identity state directory that Harbor's
     fence and adoption write as postgres (`postgres:postgres` 0700), either
     already has its declared owner, group and mode (an existing one, perhaps a

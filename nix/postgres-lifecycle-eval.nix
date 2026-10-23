@@ -406,6 +406,7 @@ in
             {services.harbor-db.postgresql.recovery.repositoryProtocol = "source-local-v1";}
             {services.harbor-db.postgresql.rollout.pausedPublishers = lib.mkForce ["fixture-backup.timer"];}
             {services.harbor-db.postgresql.rollout.executor.command = lib.mkForce [];}
+            {services.harbor-db.postgresql.rollout.executor.command = lib.mkForce ["certify"];}
           ]
           # The roots post-fence steps write are disjoint but for the intended nestings.
           && lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout roots:" entry.message)) withRollout.config.assertions
@@ -430,6 +431,31 @@ in
             {services.harbor-db.postgresql.recoveryPreparation.readWritePaths = lib.mkForce ["/srv/disposable"];}
           ];
         message = "A rollout replaces the legacy pre-switch preparation with its activation guard and refuses systemd property values that split into extra entries.";
+      }
+      {
+        name = "rollout-guards-render-from-its-maintenance";
+        assertion = let
+          custom = pkgs.writeText "custom-maintenance.json" "{}";
+          plain = value: builtins.unsafeDiscardStringContext (toString value);
+          default = plain eval.config.environment.etc."harbor-db/postgresql.json".source;
+          guards = selected: let
+            inherit (selected.config) system systemd;
+          in [
+            system.preSwitchChecks."00-harbor-db-postgresql-recovery"
+            system.preSwitchChecks.harbor-db-postgresql-adoption
+            systemd.services.postgresql.preStart
+            systemd.services.postgresql.serviceConfig.ExecStart
+            systemd.services.harbor-db-postgresql-recovery-check.serviceConfig.ExecStart
+          ];
+          renders = path: selected: lib.all (text: lib.hasInfix "--config ${path} " (plain text)) (guards selected);
+          customized = withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.maintenance = custom;}];};
+        in
+          renders (plain custom) customized
+          && renders default withRollout
+          && renders default withPreparation
+          # The upgrade keeps the module's own (upgrade-bound) manifest.
+          && lib.hasInfix default (plain customized.config.systemd.services.harbor-db-postgresql-upgrade.serviceConfig.ExecStart);
+        message = "With a rollout, every guard inspecting recovery, fence or startup state must render from the rollout's maintenance manifest, so activation after adoption agrees with the coordinator.";
       }
       {
         name = "managed-preactivation-preparation";

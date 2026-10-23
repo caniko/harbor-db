@@ -6965,6 +6965,8 @@ selectors = [
   "rollout_roots_are_pairwise_disjoint_but_for_intended_nestings",
   "harbor_never_creates_the_parents_of_its_inhibition_state",
   "import_never_creates_its_slot_directory_below_an_absent_mount",
+  "local_executables_and_inputs_are_checked_at_load",
+  "every_name_and_endpoint_a_post_fence_step_uses_is_resolved_before_the_fence",
   "activation_is_refused_between_fence_and_adoption",
   "a_never_loaded_or_collected_worker_is_idle_whatever_its_state_reads",
   "sandbox_and_provisioned_paths_never_resolve_through_a_swappable_component",

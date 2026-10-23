@@ -213,6 +213,9 @@ pub struct Rollout {
     service_owner: Option<(u32, u32)>,
     /// Where the open journal's opening manifest is rooted against GC.
     gcroots: PathBuf,
+    /// Resolves a group name (`getgrnam` on hosts; tests stand in for
+    /// service groups a build sandbox lacks).
+    group: fn(&str) -> Result<u32>,
 }
 
 fn root() -> bool {
@@ -374,6 +377,15 @@ fn dedicated(path: &Path) -> bool {
 
 fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
+}
+
+/// A local executable a step runs: a regular file of the immutable store
+/// reached without a mutable alias (as the store reference requires), and
+/// executable.
+fn store_executable(path: &Path) -> bool {
+    durable::immutable_store_reference(path)
+        .and_then(|resolved| Ok(fs::metadata(resolved)?))
+        .is_ok_and(|metadata| metadata.mode() & 0o111 != 0)
 }
 
 /// The directories Harbor's preparation writes its evidence into: the record
@@ -567,7 +579,6 @@ impl Rollout {
             || maintenance["recovery"]["system_identifier"] != manifest.system_identifier.as_str()
             || maintenance["recovery"]["require_writer_fence"] != true
             || !units.clone().all(valid_unit)
-            || manifest.executor.command.is_empty()
             || !manifest.execution_lock.as_deref().is_none_or(dedicated)
         {
             return Err(invalid("invalid rollout manifest or primary binding"));
@@ -753,7 +764,37 @@ impl Rollout {
                 }
             }
         }
+        // What post-fence steps run or read is checked now, not when first
+        // used: each local executable (thaw's cutover checker included) is an
+        // executable regular store file, the worker's preparation config a
+        // store file. The executor command runs on another host: lexical only.
+        if !([&manifest.harbor, &manifest.systemctl, &manifest.systemd_run].into_iter())
+            .chain(manifest.cutover.as_ref().map(|cutover| &cutover.checker))
+            .all(|path| store_executable(path))
+            || durable::immutable_store_reference(&manifest.preparation).is_err()
+        {
+            return Err(invalid(
+                "rollout harbor, systemctl, systemd-run and cutover checker must be executable regular store files and the preparation config a store file",
+            ));
+        }
+        let executor = &manifest.executor;
+        if executor.host.is_empty()
+            || executor.user.is_empty()
+            || !executor
+                .command
+                .first()
+                .is_some_and(|program| program.starts_with('/'))
+            || executor
+                .command
+                .iter()
+                .any(|arg| arg.is_empty() || arg.contains('\0'))
+        {
+            return Err(invalid(
+                "rollout executor needs a host, a user and an absolute command of non-empty arguments",
+            ));
+        }
         Ok(Self {
+            group: group_id,
             gcroots: PathBuf::from(GC_ROOTS),
             digest: codec::file_digest(config)?,
             maintenance,
@@ -1476,9 +1517,12 @@ impl Rollout {
 
     /// The owner a provisioned directory of `group` must have.
     fn provision_owner(&self, group: &str) -> Result<(u32, u32)> {
+        // Resolved even where tests stand in for the owner: an unknown group
+        // must fail the preflight, never the provisioning after the fence.
+        let gid = (self.group)(group)?;
         Ok(match self.service_owner {
             Some(owner) => owner,
-            None => (account("postgres")?.0, group_id(group)?),
+            None => (account("postgres")?.0, gid),
         })
     }
 
@@ -1494,7 +1538,7 @@ impl Rollout {
         };
         if worker {
             for group in &self.manifest.prepare.supplementary_groups {
-                groups.push(group_id(group)?);
+                groups.push((self.group)(group)?);
             }
         }
         Ok((uid, groups))
@@ -1550,15 +1594,15 @@ impl Rollout {
             })
             .chain([(authority, "postgres", 0o700, &harbor)]);
         for (path, group, mode, identity) in provisioned {
-            if let Some(metadata) = self.walk(path, &holders, false)? {
-                let (uid, gid) = self.provision_owner(group)?;
-                if (metadata.uid(), metadata.gid(), metadata.mode() & 0o7777) != (uid, gid, mode) {
-                    return Err(invalid(format!(
-                        "{} exists but is not {uid}:{gid} mode {mode:o}; fix it first (an \
-                         existing directory is never re-owned)",
-                        path.display()
-                    )));
-                }
+            let (uid, gid) = self.provision_owner(group)?;
+            if let Some(metadata) = self.walk(path, &holders, false)?
+                && (metadata.uid(), metadata.gid(), metadata.mode() & 0o7777) != (uid, gid, mode)
+            {
+                return Err(invalid(format!(
+                    "{} exists but is not {uid}:{gid} mode {mode:o}; fix it first (an \
+                     existing directory is never re-owned)",
+                    path.display()
+                )));
             }
             self.require_traversable(path, identity)?;
         }
@@ -1730,6 +1774,12 @@ impl Rollout {
         self.check_root_directory(startup, 0o022, writable_by_root)?;
         self.check_root_directory(&self.drop_in_root()?, 0o022, writable_by_root)?;
         self.refuse_stale_evidence(journal)?;
+        // The socket, port and identifier `inspect-fence` uses once the fence
+        // is open, checked against the running primary first (one already
+        // down has nothing to answer).
+        if self.unit_state(self.primary_unit())?.1 == "active" {
+            self.inspect_live()?;
+        }
         let authority = Path::new(super::string(&self.maintenance, "state_dir")?);
         self.provision(authority, "postgres", 0o700)?;
         // Harbor would create missing parents of its inhibition state private
@@ -2857,6 +2907,42 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
+    /// An executable regular store file from PATH (coreutils' `true`).
+    fn store_tool() -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .filter(|directory| directory.starts_with("/nix/store"))
+            .map(|directory| directory.join("true"))
+            .find(|path| store_executable(path))
+            .expect("an executable store `true` on PATH")
+    }
+
+    /// A regular store file without execute permission, from a PATH package.
+    fn store_data_file() -> PathBuf {
+        fn find(directory: &Path, depth: u32) -> Option<PathBuf> {
+            let mut entries: Vec<_> = fs::read_dir(directory)
+                .ok()?
+                .flatten()
+                .map(|e| e.path())
+                .collect();
+            entries.sort();
+            entries.into_iter().find_map(|path| {
+                let metadata = fs::symlink_metadata(&path).ok()?;
+                if metadata.is_file() && metadata.mode() & 0o111 == 0 {
+                    Some(path)
+                } else if metadata.is_dir() && depth > 0 {
+                    find(&path, depth - 1)
+                } else {
+                    None
+                }
+            })
+        }
+        std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .filter(|directory| directory.starts_with("/nix/store"))
+            .filter_map(|directory| find(directory.parent()?, 3))
+            .find(|path| durable::immutable_store_reference(path).is_ok())
+            .expect("a non-executable store file in a PATH package")
+    }
+
     struct Fixture {
         root: tempfile::TempDir,
     }
@@ -2976,9 +3062,9 @@ esac"#,
         fn manifest(&self, name: &str, settle: u64) -> PathBuf {
             let manifest = json!({
                 "version": 2, "host": "primary", "system_identifier": "42",
-                "harbor": self.p("harbor"), "systemctl": self.p("systemctl"),
-                "systemd_run": self.p("systemd-run"),
-                "maintenance": self.p("maintenance.json"), "preparation": self.p("preparation.json"),
+                // Load requires store executables; `load` swaps in the fakes.
+                "harbor": store_tool(), "systemctl": store_tool(), "systemd_run": store_tool(),
+                "maintenance": self.p("maintenance.json"), "preparation": store_tool(),
                 "socket_dir": "/run/postgresql", "port": 5432,
                 "clients": ["a.service", "b.service"], "retired_clients": [],
                 "setup_units": ["setup.service"], "receiver_units": [],
@@ -3002,6 +3088,14 @@ esac"#,
         /// fixed host paths.
         fn load(&self, path: &Path) -> Result<Rollout> {
             let mut rollout = Rollout::load(path)?;
+            rollout.manifest.harbor = self.p("harbor");
+            rollout.manifest.systemctl = self.p("systemctl");
+            rollout.manifest.systemd_run = self.p("systemd-run");
+            // A build sandbox has no postgres or users group.
+            rollout.group = |group| match group {
+                "postgres" | "users" => Ok(unsafe { libc::getegid() }),
+                _ => group_id(group),
+            };
             rollout.state = self.p("state");
             rollout.installed = self.p("installed.json");
             // A build sandbox's `/` need not be root-owned.
@@ -5073,6 +5167,100 @@ exit 1"#,
         ] {
             assert_eq!(load(edit.clone()), None, "{edit}");
         }
+    }
+
+    #[test]
+    fn local_executables_and_inputs_are_checked_at_load() {
+        let f = Fixture::new(0);
+        let error = |edit: &dyn Fn(&mut Value)| {
+            let result = edit_manifest(&f, |m| edit(m));
+            f.manifest("rollout.json", 2);
+            result
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default()
+        };
+        let (tool, data) = (store_tool(), store_data_file());
+        let directory = tool.parent().unwrap().to_owned();
+        // Outside the store, not a regular file, not executable.
+        for (field, value) in [
+            ("harbor", json!(f.p("harbor"))),
+            ("systemctl", json!(directory)),
+            ("systemd_run", json!(data)),
+        ] {
+            let error = error(&|m| m[field] = value.clone());
+            assert!(
+                error.contains("executable regular store"),
+                "{field}: {error}"
+            );
+        }
+        let error_text = error(&|m| m["preparation"] = json!(f.p("preparation.json")));
+        assert!(error_text.contains("preparation config"), "{error_text}");
+        // Thaw's checker must be runnable, not only a store path.
+        let checker = |checker: &Path| {
+            error(&|m| m["cutover"] = json!({"checker": checker, "contract": data}))
+        };
+        assert!(checker(&data).contains("executable regular store"));
+        assert_eq!(checker(&tool), "");
+        // The executor command runs on another host: checked lexically.
+        for (host, user, command) in [
+            ("", "can", json!(["/bin/true"])),
+            ("executor", "", json!(["/bin/true"])),
+            ("executor", "can", json!(["true"])),
+            ("executor", "can", json!(["/bin/true", ""])),
+            ("executor", "can", json!([])),
+        ] {
+            let error =
+                error(&|m| m["executor"] = json!({"host": host, "user": user, "command": command}));
+            assert!(error.contains("rollout executor"), "{command}: {error}");
+        }
+    }
+
+    #[test]
+    fn every_name_and_endpoint_a_post_fence_step_uses_is_resolved_before_the_fence() {
+        let refused = |edit: &dyn Fn(&Fixture, &mut Value), expected: &str| {
+            let f = Fixture::new(0);
+            let rollout = edit_manifest(&f, |m| edit(&f, m)).unwrap();
+            let error = rollout.run(FENCE).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+            let calls = fs::read_to_string(f.p("calls.log")).unwrap_or_default();
+            assert!(
+                !calls.contains("inhibit-startup") && !calls.contains("systemctl stop"),
+                "{calls}"
+            );
+            assert!(rollout.journal().unwrap().is_none());
+        };
+        // The group of a directory still to be provisioned.
+        refused(
+            &|f, m| {
+                m["prepare"]["read_write_paths"] = json!([f.p("evidence"), f.p("backup")]);
+                m["prepare"]["provision_directories"] =
+                    json!([{"path": f.p("backup"), "group": "harbor-db-absent", "mode": 448}]);
+            },
+            "group harbor-db-absent is absent",
+        );
+        // A supplementary group of the worker.
+        refused(
+            &|_, m| m["prepare"]["supplementary_groups"] = json!(["harbor-db-absent"]),
+            "group harbor-db-absent is absent",
+        );
+        // The socket and port `inspect-fence` uses once the fence is open.
+        refused(
+            &|f, _| {
+                let harbor = fs::read_to_string(f.p("harbor")).unwrap();
+                let live = "inspect-live) echo '{\"system_identifier\":\"42\"}' ;;";
+                assert!(harbor.contains(live));
+                fs::write(
+                    f.p("harbor"),
+                    harbor.replace(
+                        live,
+                        "inspect-live) echo no server on that socket >&2; exit 1 ;;",
+                    ),
+                )
+                .unwrap();
+            },
+            "no server on that socket",
+        );
     }
 
     #[test]

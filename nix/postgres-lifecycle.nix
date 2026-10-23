@@ -74,7 +74,14 @@
     if cfg.upgrade == null
     then rawManifest
     else immutableFiles.checkedManifest "Harbor DB PostgreSQL upgrade" (cfg.upgrade.executableFiles ++ lib.optional (cfg.upgrade.validateCommand != []) (lib.head cfg.upgrade.validateCommand)) rawManifest;
-  command = "${lib.getExe cfg.package} --config ${manifest}";
+  # With a rollout, every guard and service that inspects recovery, fence or
+  # startup state renders from the maintenance manifest the coordinator fences,
+  # prepares and adopts under, so the candidate's activation agrees with it.
+  command = "${lib.getExe cfg.package} --config ${
+    if cfg.rollout != null
+    then cfg.rollout.maintenance
+    else manifest
+  }";
   liveArgs = lib.optionalString (cfg.switchAdoption != null) (lib.escapeShellArgs [
     "--system-identifier"
     cfg.switchAdoption.systemIdentifier
@@ -600,10 +607,12 @@ in {
             cfg.recovery.requireWriterFence
             && cfg.recovery.repositoryProtocol == "legacy"
             && lib.all validUnit units
-            && rollout.executor.command != [];
+            && rollout.executor.command != []
+            # The executor command runs on another host: checked lexically.
+            && lib.hasPrefix "/" (lib.head rollout.executor.command);
         in
           rollout == null || cfg.recovery == null || valid;
-        message = "Rollout coordinator: recovery must require the writer fence over the legacy repository protocol, units must be `.service` names and the executor command non-empty.";
+        message = "Rollout coordinator: recovery must require the writer fence over the legacy repository protocol, units must be `.service` names and the executor command an absolute program with arguments.";
       }
       {
         # Mirrors the coordinator's load: the roots post-fence steps write are
@@ -796,7 +805,7 @@ in {
         Type = "oneshot";
         User = "postgres";
         Group = "postgres";
-        ExecStart = "${command} upgrade";
+        ExecStart = "${lib.getExe cfg.package} --config ${manifest} upgrade";
         TimeoutStartSec = "infinity";
         UMask = "0077";
         PrivateTmp = true;
