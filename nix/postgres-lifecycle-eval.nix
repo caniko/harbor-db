@@ -75,7 +75,7 @@
     modules = [
       {
         services.harbor-db.postgresql.rollout = {
-          exportRoot = "/srv/export";
+          exportRoot = "/srv/harbor-db/export";
           pausedPublishers = ["fixture-backup.service"];
           executor = {
             host = "executor";
@@ -351,7 +351,7 @@ in
           && rollout.executor.command == ["/fixture/certify"]
           && lib.last rollout.prepare.provision_directories
           == {
-            path = "/srv/export";
+            path = "/srv/harbor-db/export";
             group = "users";
             mode = 488;
           }

@@ -347,8 +347,10 @@ in {
             defaultText = "the module's PostgreSQL manifest";
             description = "Fenced maintenance manifest; its recovery must require the writer fence.";
           };
+          # Dedicated directories at least three levels deep: never `/`, `/etc`
+          # or `/var/lib`. The coordinator enforces the same rule at load.
           stateDir = mkOption {
-            type = types.strMatching "/.*";
+            type = types.strMatching "/[^/.][^/]*/[^/.][^/]*/[^/.][^/]*(/[^/.][^/]*)*";
             default = "/var/lib/harbor-db/postgresql-rollout";
           };
           clients = mkOption {
@@ -377,7 +379,7 @@ in {
             default = 120;
             description = "Bound for setup units to finish after a primary start before fence inspection.";
           };
-          exportRoot = mkOption {type = types.strMatching "/.*";};
+          exportRoot = mkOption {type = types.strMatching "/[^/.][^/]*/[^/.][^/]*/[^/.][^/]*(/[^/.][^/]*)*";};
           exportGroup = mkOption {
             type = types.nonEmptyStr;
             default = "users";

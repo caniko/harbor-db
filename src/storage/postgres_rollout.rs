@@ -210,15 +210,16 @@ fn euid() -> u32 {
 /// A private file this process owns, in a directory no one else can modify.
 fn trusted_file(metadata: &fs::Metadata, path: &Path, owner: u32) -> Result<()> {
     let parent = fs::symlink_metadata(path.parent().ok_or_else(|| invalid("path has no parent"))?)?;
+    // Owner-only read (0400, as staging emits) or read-write (0600).
     if !metadata.is_file()
         || metadata.uid() != owner
-        || metadata.mode() & 0o777 != 0o600
+        || !matches!(metadata.mode() & 0o777, 0o400 | 0o600)
         || !parent.is_dir()
         || parent.uid() != owner
         || parent.mode() & 0o022 != 0
     {
         return Err(invalid(format!(
-            "{} must be a mode-0600 file owned by uid {owner} in a directory only that owner can modify",
+            "{} must be an owner-only (0400/0600) file of uid {owner} in a directory only that owner can modify",
             path.display()
         )));
     }
@@ -1416,7 +1417,7 @@ esac"#,
         fs::write(f.p("import/receipt.json"), bytes).unwrap();
         fs::set_permissions(
             f.p("import/receipt.json"),
-            fs::Permissions::from_mode(0o600),
+            fs::Permissions::from_mode(0o400),
         )
         .unwrap();
         let import = || {
@@ -1431,6 +1432,11 @@ esac"#,
         // The staged copy is reused, so the retry reaches admission.
         let error = import();
         assert!(error.contains("not admitted"), "{error}");
+        fs::set_permissions(
+            f.p("import/receipt.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
         fs::write(f.p("import/receipt.json"), br#"{"status":"other"}"#).unwrap();
         let error = import();
         assert!(error.contains("different receipt"), "{error}");
