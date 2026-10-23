@@ -6921,6 +6921,26 @@ selectors = [
 
 [[inventories]]
 origin = "rust"
+id_prefix = "native.postgres-rollout."
+selector_prefix = "storage::postgres_rollout::tests::"
+source = "src/storage/postgres_rollout.rs"
+argv_prefix = ["cargo", "test", "--locked", "--all-features", "--lib"]
+argv_suffix = ["--", "--exact"]
+profile = "integration"
+maturity = "crystallized"
+platforms = ["x86_64-linux", "aarch64-linux"]
+deadline_seconds = 120
+resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
+selectors = [
+  "fence_waits_for_setup_units_then_abort_restores_the_primary_and_clients",
+  "unsettled_setup_units_keep_the_fence_unverified",
+  "fence_resumes_idempotently_and_steps_stay_bound_to_their_manifest",
+  "activated_rollouts_refuse_abort_and_receipts_are_digest_bound",
+  "next_hands_off_external_steps_with_exact_commands",
+]
+
+[[inventories]]
+origin = "rust"
 id_prefix = "native.recovery-preparation."
 selector_prefix = "storage::recovery::tests::"
 source = "src/storage/recovery.rs"
