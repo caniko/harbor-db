@@ -341,6 +341,27 @@ impl Rollout {
     /// existing one: it must already be a private directory this process owns.
     fn state_dir(&self) -> Result<()> {
         let state = &self.manifest.state_dir;
+        // Every existing ancestor must be a real directory that only root or
+        // the coordinator can modify (a root-owned sticky directory such as
+        // /tmp lets only an entry's owner rename it), so the checked leaf
+        // cannot be swapped for a symlink before the lease or journal write.
+        for ancestor in state.ancestors().skip(1) {
+            let metadata = match fs::symlink_metadata(ancestor) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let sticky = metadata.mode() & 0o1000 != 0 && metadata.uid() == 0;
+            if !metadata.is_dir()
+                || ![0, euid()].contains(&metadata.uid())
+                || (metadata.mode() & 0o022 != 0 && !sticky)
+            {
+                return Err(invalid(format!(
+                    "rollout state directory ancestry is untrusted at {}",
+                    ancestor.display()
+                )));
+            }
+        }
         match fs::symlink_metadata(state) {
             Ok(metadata) => {
                 if !metadata.is_dir() || metadata.uid() != euid() || metadata.mode() & 0o077 != 0 {
@@ -713,9 +734,14 @@ impl Rollout {
             .systemctl()
             .args(["stop", &format!("{unit}.service")])
             .output();
+        // Attempt every restart: a retry would no longer see these as active.
+        let mut restarted = Ok(());
         for unit in resume {
-            checked(self.systemctl().args(["start", "--", unit]))?;
+            if let Err(error) = checked(self.systemctl().args(["start", "--", unit])) {
+                restarted = restarted.and(Err(error));
+            }
         }
+        restarted?;
         Ok(status?.success())
     }
 
@@ -1530,6 +1556,44 @@ esac"#,
         let journal = rollout.journal().unwrap().unwrap();
         let error = rollout.import_slot(&journal).unwrap_err().to_string();
         assert!(error.contains("unrecorded"), "{error}");
+    }
+
+    #[test]
+    fn untrusted_state_directory_ancestry_is_refused() {
+        let f = Fixture::new(0);
+        fs::create_dir(f.p("shared")).unwrap();
+        fs::set_permissions(f.p("shared"), fs::Permissions::from_mode(0o777)).unwrap();
+        let rollout = edit_manifest(&f, |m| {
+            m["state_dir"] = json!(f.p("shared").join("rollout"))
+        })
+        .unwrap();
+        let error = rollout.run(Action::Fence).unwrap_err().to_string();
+        assert!(error.contains("ancestry"), "{error}");
+        assert!(!f.p("shared/rollout").exists());
+    }
+
+    #[test]
+    fn every_quiesced_receiver_is_restarted_even_if_one_restart_fails() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| {
+            m["receiver_units"] = json!(["r1.service", "r2.service"])
+        })
+        .unwrap();
+        fs::write(f.p("units/r1.service"), "active").unwrap();
+        fs::write(f.p("units/r2.service"), "active").unwrap();
+        // Make only r1's restart fail; r2 must still be started afterwards.
+        let systemctl = fs::read_to_string(f.p("systemctl")).unwrap();
+        fs::write(
+            f.p("systemctl"),
+            systemctl.replacen(
+                "case \"$1\" in",
+                "[ \"$1 $3\" = \"start r1.service\" ] && exit 1\ncase \"$1\" in",
+                1,
+            ),
+        )
+        .unwrap();
+        assert!(rollout.run_preparation(false).is_err());
+        assert_eq!(f.unit("r2.service"), "active");
     }
 
     #[test]
