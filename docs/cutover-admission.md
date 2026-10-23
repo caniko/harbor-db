@@ -293,6 +293,11 @@ Exclusion and recovery:
   journaled before the receivers it stopped are restored, so a failed restore
   never reruns preparation or its export command; any later step first
   restores the pending receivers.
+  A worker that finished before its outcome was journaled (the coordinator
+  was killed in between) is never relaunched either: before launching, `prepare`
+  and `import` recover it from Harbor's evidence, admission (`inspect-recovery`
+  ready) as `imported`, a fence-bound snapshot with its preparation binding and
+  export plan as `prepared`.
 - **Preflight.** Anything static that could fail `prepare` once the fence is
   held is checked by `fence` before any side effect (and again by `prepare`):
   each provisioned directory either already has its declared owner, group and

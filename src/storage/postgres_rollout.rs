@@ -1809,28 +1809,64 @@ impl Rollout {
     fn prepare(&self, journal: &mut Journal) -> Result<()> {
         self.inspect_fence(journal)?;
         let import = self.import_slot(journal)?;
+        if self.recovered_outcome(journal, import)? {
+            return Ok(());
+        }
         self.run_preparation(journal, import, |journal, ready| {
             if ready {
-                journal.phase = Phase::Imported;
-                return self.save(journal);
+                return self.settle_imported(journal);
             }
             if import {
                 return Err(invalid(
                     "recovery preparation failed; retain the writer window and inspect its unit",
                 ));
             }
-            // Harbor stops before admission until the independent receipt
-            // exists; the retained export is then the hand-off to the executor.
-            // Postgres-written evidence: read pinned and bounded.
-            let evidence = self.evidence_dir()?.join("preparation.json");
-            let preparation = codec::decode(&read_pinned(&evidence, MAX_RECEIPT_BYTES)?.1)?;
-            self.require_bound_evidence(journal)?;
-            let (export, digest) = self.reported_export(&preparation)?;
-            journal.export_sha256 = Some(digest);
-            journal.export = Some(export);
-            journal.phase = Phase::Prepared;
-            self.save(journal)
+            self.settle_prepared(journal)
         })
+    }
+
+    /// The outcome of a worker that finished before it was journaled (the
+    /// coordinator was killed in between), recovered from Harbor's own
+    /// evidence, so preparation and its non-idempotent export never run twice
+    /// in one writer window. Admission is what a ready worker leaves; a
+    /// fence-bound snapshot, its preparation binding and the export plan are
+    /// what one stopped at the certification hand-off leaves.
+    fn recovered_outcome(&self, journal: &mut Journal, import: bool) -> Result<bool> {
+        if import {
+            if !self.admitted() {
+                return Ok(false);
+            }
+            self.settle_imported(journal)?;
+        } else if self.settle_prepared(journal).is_err() {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// Whether Harbor admits the recovery: the read-only check a ready
+    /// preparation worker ends with.
+    fn admitted(&self) -> bool {
+        self.response(true, &["inspect-recovery"], "ready").is_ok()
+    }
+
+    fn settle_imported(&self, journal: &mut Journal) -> Result<()> {
+        journal.phase = Phase::Imported;
+        self.save(journal)
+    }
+
+    /// Harbor stops before admission until the independent receipt exists;
+    /// the retained export, under evidence bound to this fence, is then the
+    /// hand-off to the executor.
+    fn settle_prepared(&self, journal: &mut Journal) -> Result<()> {
+        // Postgres-written evidence: read pinned and bounded.
+        let evidence = self.evidence_dir()?.join("preparation.json");
+        let preparation = codec::decode(&read_pinned(&evidence, MAX_RECEIPT_BYTES)?.1)?;
+        self.require_bound_evidence(journal)?;
+        let (export, digest) = self.reported_export(&preparation)?;
+        journal.export_sha256 = Some(digest);
+        journal.export = Some(export);
+        journal.phase = Phase::Prepared;
+        self.save(journal)
     }
 
     /// Whether a receipt that `rollout import` staged and recorded is waiting.
@@ -1894,14 +1930,16 @@ impl Rollout {
             super::recovery::stage_off_host_import(&verified, slot)?;
         }
         self.inspect_fence(journal)?;
+        if self.recovered_outcome(journal, true)? {
+            return Ok(());
+        }
         self.run_preparation(journal, true, |journal, ready| {
             if !ready {
                 return Err(invalid(
                     "independent receipt was not admitted; retain the writer window",
                 ));
             }
-            journal.phase = Phase::Imported;
-            self.save(journal)
+            self.settle_imported(journal)
         })
     }
 
@@ -2725,12 +2763,14 @@ case "$1" in
   inspect-offline-fence) exit 1 ;;
   fence-close) rm -f {marker}; echo '{{"status":"closed-offline","token":"{TOKEN}"}}' ;;
   inspect-live) echo '{{"system_identifier":"42"}}' ;;
-  inspect-recovery) echo '{{"status":"ready"}}' ;;
+  # Live (adopt) inspection is ready; admission only once a worker admitted.
+  inspect-recovery) if [ -n "$2" ] || [ -f {admitted} ]; then echo '{{"status":"ready"}}'; else exit 1; fi ;;
   *) echo '{{}}' ;;
 esac"#,
                     log = log.display(),
                     marker = p("authority/writer-fence.json").display(),
                     inhibited = p("startup/inhibited.json").display(),
+                    admitted = p("evidence/.admitted").display(),
                 ),
             );
             let maintenance = json!({
@@ -3687,6 +3727,78 @@ esac"#,
         rollout.run(NO_ADOPTION).unwrap();
         assert_eq!(f.unit("ml.service"), "active");
         assert_eq!(f.unit("r.service"), "active");
+    }
+
+    /// A worker that logs each run and leaves what Harbor would: admission
+    /// when given the staged receipt, else the hand-off evidence.
+    fn counting_worker(f: &Fixture) {
+        executable(
+            &f.p("systemd-run"),
+            &format!(
+                r#"echo "systemd-run $*" >> {log}
+case "$*" in *LoadCredential*) touch {admitted}; exit 0 ;; esac
+echo '{{"backup_id":"backup-1"}}' > {evidence}/preparation.json
+echo '{{"backup_id":"backup-1","writer_fence_token":"{TOKEN}"}}' > {evidence}/records.json
+mkdir -p {export}/backup-1; printf '{{}}' > {export}/backup-1/recovery-export.json
+exit 1"#,
+                log = f.p("calls.log").display(),
+                admitted = f.p("evidence/.admitted").display(),
+                evidence = f.p("evidence").display(),
+                export = f.p("export").display(),
+            ),
+        );
+    }
+
+    #[test]
+    fn a_hand_off_finished_before_it_was_journaled_is_recovered_not_rerun() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        counting_worker(&f);
+        assert_eq!(rollout.run(Action::Prepare).unwrap()["phase"], "prepared");
+        // Killed after the worker exited, before its outcome was saved.
+        let mut journal = rollout.journal().unwrap().unwrap();
+        journal.phase = Phase::Fenced;
+        journal.export = None;
+        journal.export_sha256 = None;
+        rollout.save(&journal).unwrap();
+        let status = rollout.run(Action::Prepare).unwrap();
+        assert_eq!(status["phase"], "prepared");
+        assert_eq!(status["export_sha256"], codec::digest(b"{}"));
+        // The worker (and its export command) ran once.
+        assert_eq!(f.calls().matches("systemd-run ").count(), 1);
+    }
+
+    #[test]
+    fn an_admission_finished_before_it_was_journaled_is_recovered_not_rerun() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        counting_worker(&f);
+        let bytes = br#"{"status":"ready"}"#;
+        staged(&f, &rollout, "import/receipt.json", bytes);
+        assert_eq!(rollout.run(Action::Prepare).unwrap()["phase"], "imported");
+        // Killed after the worker admitted, before its outcome was saved: both
+        // a retried `prepare` and a retried `import` recover it.
+        let killed = || {
+            let mut journal = rollout.journal().unwrap().unwrap();
+            journal.phase = Phase::Prepared;
+            rollout.save(&journal).unwrap();
+        };
+        killed();
+        assert_eq!(rollout.run(Action::Prepare).unwrap()["phase"], "imported");
+        killed();
+        let receipt = f.p("receipt.json");
+        fs::write(&receipt, bytes).unwrap();
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+        let status = rollout
+            .run(Action::Import {
+                receipt,
+                sha256: codec::digest(bytes),
+            })
+            .unwrap();
+        assert_eq!(status["phase"], "imported");
+        assert_eq!(f.calls().matches("systemd-run ").count(), 1);
     }
 
     #[test]

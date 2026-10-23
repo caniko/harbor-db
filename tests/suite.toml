@@ -6984,6 +6984,8 @@ selectors = [
   "a_recorded_receipt_that_failed_admission_is_replaced",
   "publishers_the_running_generation_lacks_are_not_stopped",
   "units_the_primary_stop_takes_down_are_restored",
+  "a_hand_off_finished_before_it_was_journaled_is_recovered_not_rerun",
+  "an_admission_finished_before_it_was_journaled_is_recovered_not_rerun",
   "a_completed_preparation_is_journaled_before_receivers_restart",
   "templates_and_conflicting_provisions_are_refused_at_load",
   "a_failed_setup_unit_fails_the_fence_and_can_be_retried",
