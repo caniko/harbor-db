@@ -27,7 +27,9 @@ sha256 = "4ee1b3b4ab3dae479b2d5cc01fccb23db3b0916dc40970ae6ff993a1f4b3d51b"
 
 [[extensions]]
 path = "python/harbor_db/recovery.py"
-sha256 = "5dcda3718ba2f160a0f5608d951004f934bb16ab36dfcf122cea84c4b0cf373f"
+# Record checks honour recovery.verify_timeout_seconds; an unsearchable
+# source data_dir on an independent executor is treated like an absent one.
+sha256 = "481d9bc2c5f0e51a37408c4fa55861766f1276810c0d8a5b457c03cd5c31eb28"
 
 [[extensions]]
 path = "python/harbor_db/application_transition.py"
