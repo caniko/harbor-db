@@ -253,9 +253,10 @@ Exclusion and recovery:
   `harbor-db-rollout-prepare.service` with a one-day bound. Termination
   signals are deferred while it runs: an interrupt stops the unit, restores the
   receivers and fails the step. While that unit is active (for example an
-  orphan of a killed coordinator) no step starts another worker, restarts
-  receivers or lifts the publisher pause; `status` and `next` say so. A
-  never-loaded or collected unit reads `LoadState=not-found` and is idle.
+  orphan of a killed coordinator) every mutating step, `abort` and `thaw`
+  included, is refused before any side effect, so no fence closes and no
+  writer starts under it; `status` and `next` say so. A never-loaded or
+  collected unit reads `LoadState=not-found` and is idle.
 - **Bounded commands.** Every `systemctl` and Harbor command runs in its own
   process group with a bound (600 and 1800 seconds). Cluster-owned verbs drop
   to the `postgres` account in-process.
@@ -265,8 +266,24 @@ Exclusion and recovery:
 - **Lost journal.** Without a journal, `abort` names Harbor's live fence token
   (verify it with `inspect-fence --token`). `rollout abort --adopt-fence-token
   <token>` then unwinds that fence through the normal close, restarting every
-  declared receiver and paused publisher. The lost journal's stopped clients
+  declared receiver and paused publisher. With no live fence but a held startup
+  inhibition (which keeps the primary from starting), `abort` names its token,
+  and `rollout abort --adopt-startup-token <token>` completes the fence boundary
+  Harbor releases startup at and unwinds it. The lost journal's stopped clients
   are unknown, so re-activate the current generation afterwards.
+- **Crash windows.** Every external change is journaled before it is made, or
+  recovered from Harbor's own record on retry: the inhibition intent (its token
+  is recovered from the held inhibition), the fence-opening intent, stopped
+  clients, publishers and receivers, pause drop-ins and the staged slot.
+  Provisioned directories appear only complete: they are made, permissioned
+  and owned under a private name and then renamed into place.
+- **Undo what was decided.** Which stopped clients stay down (the opening
+  manifest's retired clients) is journaled when they are stopped, so no
+  manifest that unwinds the rollout changes what is restarted.
+- **Pinned reads.** Files other writers control (a transported receipt, the
+  acceptance, preparation evidence, Harbor's fence selector and records) are
+  read through one descriptor opened without following a symlink or blocking,
+  checked as a bounded regular file.
 - **Starting again.** A finished rollout is archived beside the journal by the
   next `fence` or `next`, under any manifest, which then starts afresh: a thawed
   one to `rollout.<unix-seconds>.thawed.json`, an abort (only once its reopen is

@@ -203,6 +203,10 @@ enum RolloutStep {
         /// journal, or after an opening interrupted before its token was recorded.
         #[arg(long)]
         adopt_fence_token: Option<String>,
+        /// With no journal and no live fence, explicitly adopt Harbor's held
+        /// startup inhibition by its token.
+        #[arg(long, conflicts_with = "adopt_fence_token")]
+        adopt_startup_token: Option<String>,
     },
 }
 fn operate(args: Args) -> Result<Option<Value>> {
@@ -230,7 +234,13 @@ fn operate(args: Args) -> Result<Option<Value>> {
             RolloutStep::Adopt => Action::Adopt,
             RolloutStep::Activated => Action::Activated,
             RolloutStep::Thaw { acceptance } => Action::Thaw { acceptance },
-            RolloutStep::Abort { adopt_fence_token } => Action::Abort { adopt_fence_token },
+            RolloutStep::Abort {
+                adopt_fence_token,
+                adopt_startup_token,
+            } => Action::Abort {
+                adopt_fence_token,
+                adopt_startup_token,
+            },
         };
         return Ok(Some(storage::postgres_rollout::operate(
             &args.config,
