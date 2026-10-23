@@ -279,6 +279,15 @@ fn sha_hex(value: &str) -> Result<String> {
     Ok(value.to_ascii_lowercase())
 }
 
+/// A directory opened without following a final symlink.
+fn open_directory(path: &Path) -> Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    Ok(fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(path)?)
+}
+
 /// The PIDs holding a flock on `path`, from /proc/locks. Btrfs reports a
 /// per-subvolume device to stat, so an inode-only match is the fallback.
 fn lock_holders(path: &Path) -> String {
@@ -530,60 +539,91 @@ impl Rollout {
         super::pg_core::require_mounts(&json!({ "required_mounts": covering }))
     }
 
-    /// Create the journal root privately, but never re-permission an existing
-    /// one: it must already be a private directory this process owns.
-    fn state_dir(&self) -> Result<()> {
-        let state = &self.state;
-        // Never create the journal on the root filesystem below an absent mount.
-        self.require_covering_mounts(state)?;
-        // Walk from the anchor (`/` on hosts): every component must be a real
-        // directory that only root or the coordinator can modify (a sticky one
-        // lets only an entry's owner rename it). A missing component is created
-        // by one mkdir and re-checked, and never below a directory others can
-        // write, where its name could be raced before the lease or journal write.
-        let untrusted = |path: &Path| {
+    /// Walk `path` from the anchor (`/` on hosts) without following symlinks.
+    /// Every existing component must be a real directory and every ancestor
+    /// one that only root or the coordinator can modify (or one of `holders`);
+    /// below a sticky directory a component must be theirs too, since its owner
+    /// may rename it. So no other user can swap a component for a symlink
+    /// before systemd or a root write resolves the path. With `create`, a
+    /// missing component is made by one mkdir (intermediates 0755 so service
+    /// users can traverse them, the leaf 0700), adjusted through a no-follow
+    /// descriptor and never made below a directory others can write. Returns
+    /// the leaf when it exists.
+    fn walk(&self, path: &Path, holders: &[&Path], create: bool) -> Result<Option<fs::Metadata>> {
+        let untrusted = |at: &Path| {
             invalid(format!(
-                "rollout journal ancestry is untrusted at {}",
-                path.display()
+                "{} has untrusted ancestry at {}",
+                path.display(),
+                at.display()
             ))
         };
-        let below = state
+        let below = path
             .strip_prefix(&self.anchor)
-            .map_err(|_| untrusted(state))?;
+            .map_err(|_| untrusted(path))?;
         let mut current = self.anchor.clone();
         let mut parent_shared = false;
+        let mut leaf_metadata = None;
         for component in std::iter::once(None).chain(below.components().map(Some)) {
             current.extend(component);
-            let leaf = current == *state;
+            let leaf = current == *path;
             let metadata = match fs::symlink_metadata(&current) {
                 Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
+                    return Ok(None);
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     if parent_shared {
                         return Err(untrusted(&current));
                     }
-                    // Intermediate components stay traversable for service users.
                     let mode = if leaf { 0o700 } else { 0o755 };
                     fs::DirBuilder::new().mode(mode).create(&current)?;
-                    fs::set_permissions(&current, fs::Permissions::from_mode(mode))?;
-                    fs::symlink_metadata(&current)?
+                    let directory = open_directory(&current)?;
+                    directory.set_permissions(fs::Permissions::from_mode(mode))?;
+                    directory.metadata()?
                 }
                 Err(error) => return Err(error.into()),
             };
+            let owned = [0, euid()].contains(&metadata.uid());
             let shared = metadata.mode() & 0o022 != 0;
             let sticky = metadata.mode() & 0o1000 != 0;
-            if leaf {
-                if !metadata.is_dir() || metadata.uid() != euid() || metadata.mode() & 0o077 != 0 {
-                    return Err(invalid(
-                        "rollout journal root must be a private directory owned by the coordinator",
-                    ));
-                }
-            } else if !metadata.is_dir()
-                || ![0, euid()].contains(&metadata.uid())
-                || (shared && !sticky)
+            let holder = holders.contains(&current.as_path());
+            if !metadata.is_dir()
+                || (parent_shared && !owned)
+                || (!leaf && (!(owned || holder) || (shared && !sticky)))
             {
                 return Err(untrusted(&current));
             }
             parent_shared = shared;
+            leaf_metadata = Some(metadata);
+        }
+        Ok(leaf_metadata)
+    }
+
+    /// Create the journal root privately, but never re-permission an existing
+    /// one: it must already be a private directory this process owns.
+    fn state_dir(&self) -> Result<()> {
+        // Never create the journal on the root filesystem below an absent mount.
+        self.require_covering_mounts(&self.state)?;
+        let leaf = self
+            .walk(&self.state, &[], true)?
+            .ok_or_else(|| invalid("rollout journal root is missing"))?;
+        if leaf.uid() != euid() || leaf.mode() & 0o077 != 0 {
+            return Err(invalid(
+                "rollout journal root must be a private directory owned by the coordinator",
+            ));
+        }
+        Ok(())
+    }
+
+    /// systemd resolves symlinks in the worker's sandbox paths, granting the
+    /// target write access: every one must lie on a chain no one else can swap.
+    fn check_sandbox_paths(&self) -> Result<()> {
+        let prepare = &self.manifest.prepare;
+        for path in (prepare.read_write_paths.iter())
+            .chain([&prepare.export_root])
+            .chain(&prepare.required_mounts)
+        {
+            self.walk(path, &[], false)?;
         }
         Ok(())
     }
@@ -647,11 +687,19 @@ impl Rollout {
     }
 
     /// Whether the deterministic preparation worker is still loaded and running.
+    /// A never-loaded or collected (`--collect`) worker reads `not-found`
+    /// (systemctl still exits 0) and is idle; any other unknown state is busy.
     fn preparing(&self) -> Result<bool> {
-        Ok(!matches!(
-            self.show(PREPARE_UNIT, "ActiveState")?.as_str(),
-            "inactive" | "failed"
-        ))
+        let output = self.systemctl(&["show", PREPARE_UNIT, "--property=LoadState,ActiveState"])?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let value = |key: &str| {
+            text.lines()
+                .find_map(|line| line.strip_prefix(key))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        Ok(value("LoadState=") != "not-found"
+            && !matches!(value("ActiveState=").as_str(), "inactive" | "failed"))
     }
 
     fn active_clients(&self) -> Result<Vec<String>> {
@@ -951,19 +999,25 @@ impl Rollout {
         Ok(())
     }
 
+    /// Create a service directory as root without ever following a symlink.
     fn provision(&self, path: &Path, group: &str, mode: u32) -> Result<()> {
         // Never provision on the root filesystem below an absent mount.
         self.require_covering_mounts(path)?;
-        if !path.exists() {
-            let (uid, _) = account("postgres")?;
-            let gid = group_id(group)?;
-            fs::create_dir_all(path)?;
-            fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-            std::os::unix::fs::chown(path, Some(uid), Some(gid))?;
+        // A declared directory may hold further ones (an evidence directory in
+        // its backup root): those are made by mkdir inside it and adjusted
+        // through a no-follow descriptor, so its owner cannot redirect them.
+        let holders: Vec<&Path> = (self.manifest.prepare.provision_directories.iter())
+            .map(|directory| directory.path.as_path())
+            .collect();
+        if self.walk(path, &holders, false)?.is_some() {
+            return Ok(());
         }
-        if !fs::metadata(path)?.is_dir() {
-            return Err(invalid(format!("{} is not a directory", path.display())));
-        }
+        let (uid, _) = account("postgres")?;
+        let gid = group_id(group)?;
+        self.walk(path, &holders, true)?;
+        let directory = open_directory(path)?;
+        directory.set_permissions(fs::Permissions::from_mode(mode))?;
+        std::os::unix::fs::fchown(&directory, Some(uid), Some(gid))?;
         Ok(())
     }
 
@@ -1148,6 +1202,7 @@ impl Rollout {
         for directory in &self.manifest.prepare.provision_directories {
             self.provision(&directory.path, &directory.group, directory.mode)?;
         }
+        self.check_sandbox_paths()?;
         let signals = Deferred::block()?;
         let quiesced = (|| {
             for unit in &self.manifest.receiver_units {
@@ -1685,6 +1740,9 @@ impl Rollout {
                 journal.fence_token = Some(token);
                 journal.fence_opening = true;
                 journal.pending_receivers = self.manifest.receiver_units.clone();
+                // Which publishers the pause stopped is unknown too: resume them
+                // all (an idle timer-driven one just runs early).
+                journal.stopped_publishers = self.manifest.paused_publishers.clone();
                 self.save(&journal)?;
                 journal
             }
@@ -1845,7 +1903,6 @@ mod tests {
                 fs::write(p("units").join(unit), "active").unwrap();
             }
             fs::write(p("units/setup.service"), "inactive").unwrap();
-            fs::write(p("units").join(PREPARE_UNIT), "inactive").unwrap();
             fs::write(p("evidence/records.json"), "{}").unwrap();
             let log = p("calls.log");
             executable(
@@ -1861,6 +1918,11 @@ case "$1" in
     [ $n -gt 5 ] && {{ echo "start of the service was attempted too often" >&2; exit 1; }}
     echo active > "$u/$3"; [ "$3" = postgresql.service ] && echo {polls} > "$u/.setup-polls" ;;
   show) prop="$4"; unit="$2"
+    # As systemd 261: an unloaded unit reads not-found/inactive, exit 0.
+    if [ "$3" = --property=LoadState,ActiveState ]; then
+      if [ -f "$u/$unit" ]; then echo LoadState=loaded; echo "ActiveState=$(cat "$u/$unit")"
+      else echo LoadState=not-found; echo ActiveState=inactive; fi; exit 0
+    fi
     if [ "$unit" = setup.service ] && [ -f "$u/.setup-polls" ]; then
       n=$(cat "$u/.setup-polls")
       if [ "$n" != 0 ] && [ "$n" != forever ]; then [ "$prop" = --property=Job ] && echo $((n-1)) > "$u/.setup-polls"; [ "$prop" = --property=Job ] && echo 7 || echo activating; exit 0; fi
@@ -2649,6 +2711,71 @@ esac"#,
         assert_eq!(f.unit("postgresql.service"), "active");
         assert_eq!(f.unit("r.service"), "active");
         assert!(!f.p("state/paused").exists());
+        // The pause stopped this publisher; the lost journal cannot say so.
+        assert_eq!(f.unit("pub.service"), "active");
+    }
+
+    #[test]
+    fn a_never_loaded_or_collected_worker_is_idle_whatever_its_state_reads() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        assert!(!rollout.preparing().unwrap());
+        let systemctl = fs::read_to_string(f.p("systemctl")).unwrap();
+        fs::write(
+            f.p("systemctl"),
+            systemctl.replace(
+                "echo LoadState=not-found; echo ActiveState=inactive",
+                "echo LoadState=not-found",
+            ),
+        )
+        .unwrap();
+        assert!(!rollout.preparing().unwrap());
+        assert!(
+            rollout
+                .status()
+                .unwrap()
+                .get("preparation_worker")
+                .is_none()
+        );
+        let unit = f.p("units").join(PREPARE_UNIT);
+        fs::write(&unit, "activating").unwrap();
+        assert!(rollout.preparing().unwrap());
+        fs::write(&unit, "failed").unwrap();
+        assert!(!rollout.preparing().unwrap());
+    }
+
+    #[test]
+    fn sandbox_and_provisioned_paths_never_resolve_through_a_swappable_component() {
+        let f = Fixture::new(0);
+        let prepare = |edit: &dyn Fn(&mut Value)| {
+            let rollout = edit_manifest(&f, |m| edit(m)).unwrap();
+            let error = rollout
+                .run_preparation(&mut rollout.bound().unwrap(), false)
+                .unwrap_err()
+                .to_string();
+            f.manifest("rollout.json", 2);
+            error
+        };
+        // A symlinked export root would make systemd grant the target write access.
+        std::os::unix::fs::symlink(f.p("data"), f.p("export")).unwrap();
+        let error = prepare(&|_| {});
+        assert!(error.contains("untrusted ancestry"), "{error}");
+        fs::remove_file(f.p("export")).unwrap();
+        // So would a writable path whose parent another user can modify.
+        fs::create_dir_all(f.p("shared/backups")).unwrap();
+        fs::set_permissions(f.p("shared"), fs::Permissions::from_mode(0o777)).unwrap();
+        let error = prepare(&|m| m["prepare"]["read_write_paths"] = json!([f.p("shared/backups")]));
+        assert!(error.contains("untrusted ancestry"), "{error}");
+        // Provisioning never follows (nor re-permissions) a symlink.
+        std::os::unix::fs::symlink(f.p("data"), f.p("provisioned")).unwrap();
+        let mode = fs::metadata(f.p("data")).unwrap().mode();
+        let error = prepare(&|m| {
+            m["prepare"]["provision_directories"] =
+                json!([{"path": f.p("provisioned"), "group": "postgres", "mode": 448}])
+        });
+        assert!(error.contains("untrusted ancestry"), "{error}");
+        assert_eq!(fs::metadata(f.p("data")).unwrap().mode(), mode);
+        assert!(!f.p("calls.log").exists() || !f.calls().contains("systemd-run"));
     }
 
     #[test]

@@ -236,7 +236,8 @@ Exclusion and recovery:
   signals are deferred while it runs: an interrupt stops the unit, restores the
   receivers and fails the step. While that unit is active (for example an
   orphan of a killed coordinator) no step starts another worker, restarts
-  receivers or lifts the publisher pause; `status` and `next` say so.
+  receivers or lifts the publisher pause; `status` and `next` say so. A
+  never-loaded or collected unit reads `LoadState=not-found` and is idle.
 - **Bounded commands.** Every `systemctl` and Harbor command runs in its own
   process group with a bound (600 and 1800 seconds). Cluster-owned verbs drop
   to the `postgres` account in-process.
@@ -245,8 +246,9 @@ Exclusion and recovery:
   receivers and publishers and never restarts the primary again.
 - **Lost journal.** Without a journal, `abort` names Harbor's live fence token
   (verify it with `inspect-fence --token`). `rollout abort --adopt-fence-token
-  <token>` then unwinds that fence through the normal close. The lost journal's
-  stopped clients are unknown, so re-activate the current generation afterwards.
+  <token>` then unwinds that fence through the normal close, restarting every
+  declared receiver and paused publisher. The lost journal's stopped clients
+  are unknown, so re-activate the current generation afterwards.
 - **Starting again.** A finished rollout is archived beside the journal by the
   next `fence` or `next`, under any manifest, which then starts afresh: a thawed
   one to `rollout.<unix-seconds>.thawed.json`, an abort (only once its reopen is
@@ -265,6 +267,14 @@ Exclusion and recovery:
   it are mounted. Paths, mounts, groups and the import slot rendered into the
   worker's systemd properties must not contain whitespace, quotes, `\`, `%`
   (or `:` in the import slot), both in Nix and when the manifest is loaded.
+- **No swappable components.** systemd resolves symlinks in `ReadWritePaths`,
+  so before the worker starts every writable path, the export root and every
+  required mount must be reached through real directories (never a symlink)
+  that only root can modify; below a sticky directory a component must be
+  root's too. Provisioned directories follow the same rule, except that one may
+  sit inside another declared provisioned directory (an evidence directory in
+  a backup root); they are made by `mkdir` and permissioned through a
+  no-follow descriptor, never through a path.
 - **Activation.** A rollout-enabled generation does not install the legacy
   `00-0-harbor-db-postgresql-prepare` pre-switch hook: the coordinator already
   prepared, imported and adopted under the fence. Its

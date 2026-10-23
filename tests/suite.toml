@@ -6962,6 +6962,8 @@ selectors = [
   "systemd_property_values_never_split_into_extra_entries",
   "preparation_never_provisions_below_an_absent_mount",
   "activation_is_refused_between_fence_and_adoption",
+  "a_never_loaded_or_collected_worker_is_idle_whatever_its_state_reads",
+  "sandbox_and_provisioned_paths_never_resolve_through_a_swappable_component",
   "pre_fence_completion_never_adopts_another_coordinators_fence",
   "a_thawed_journal_is_archived_so_a_new_generation_can_roll_out",
   "worker_and_executor_output_never_reaches_step_stdout",
