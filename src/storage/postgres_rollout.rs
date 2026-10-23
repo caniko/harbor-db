@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -446,6 +446,66 @@ fn open_directory(path: &Path) -> Result<fs::File> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
         .open(path)?)
+}
+
+const DIRECTORY: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY;
+
+/// Open `name` within the pinned directory `parent` (`openat`), never
+/// following a symlink there.
+fn open_at(
+    parent: &fs::File,
+    name: &std::ffi::OsStr,
+    flags: libc::c_int,
+) -> std::io::Result<fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let name = c_name(name)?;
+    // SAFETY: a live descriptor and a NUL-terminated name; a returned
+    // descriptor is owned exactly once by the File below.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+fn c_name(name: &std::ffi::OsStr) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+}
+
+/// `mkdirat` within the pinned directory `parent`.
+fn make_at(parent: &fs::File, name: &std::ffi::OsStr, mode: u32) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let name = c_name(name)?;
+    // SAFETY: a live descriptor and a NUL-terminated name.
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), mode) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Rename `from` to `to` within the pinned directory `parent`, never
+/// replacing an existing `to` (`renameat2(RENAME_NOREPLACE)`).
+fn rename_at(
+    parent: &fs::File,
+    from: &std::ffi::OsStr,
+    to: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let (from, to) = (c_name(from)?, c_name(to)?);
+    let fd = parent.as_raw_fd();
+    // SAFETY: a live descriptor and NUL-terminated names.
+    if unsafe { libc::renameat2(fd, from.as_ptr(), fd, to.as_ptr(), libc::RENAME_NOREPLACE) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// The PIDs holding a flock on `path`, from /proc/locks. Btrfs reports a
@@ -889,12 +949,20 @@ impl Rollout {
     /// one that only root or the coordinator can modify (or one of `holders`);
     /// below a sticky directory a component must be theirs too, since its owner
     /// may rename it. So no other user can swap a component for a symlink
-    /// before systemd or a root write resolves the path. With `create`, a
-    /// missing component is made by one mkdir (intermediates 0755 so service
-    /// users can traverse them, the leaf 0700), adjusted through a no-follow
-    /// descriptor and never made below a directory others can write. Returns
-    /// the leaf when it exists.
-    fn walk(&self, path: &Path, holders: &[&Path], create: bool) -> Result<Option<fs::Metadata>> {
+    /// before systemd or a root write resolves the path. The walk itself never
+    /// re-resolves a pathname: each component is opened (`openat`, no-follow)
+    /// from its parent's descriptor and checked through its own (`fstat`).
+    /// With `create` (the leaf's mode), a missing component is made by one
+    /// `mkdirat` (intermediates 0755 so service users can traverse them),
+    /// adjusted through a no-follow descriptor once it proves to be ours, and
+    /// never made below a directory others can write. Returns the leaf's
+    /// pinned descriptor and metadata when it exists.
+    fn walk(
+        &self,
+        path: &Path,
+        holders: &[&Path],
+        create: Option<u32>,
+    ) -> Result<Option<(fs::File, fs::Metadata)>> {
         let untrusted = |at: &Path| {
             invalid(format!(
                 "{} has untrusted ancestry at {}",
@@ -906,34 +974,45 @@ impl Rollout {
             .strip_prefix(&self.anchor)
             .map_err(|_| untrusted(path))?;
         let mut current = self.anchor.clone();
+        let mut directory = open_directory(&current)?;
         let mut parent_shared = false;
-        let mut leaf_metadata = None;
         for component in std::iter::once(None).chain(below.components().map(Some)) {
             current.extend(component);
             let leaf = current == *path;
-            let metadata = match fs::symlink_metadata(&current) {
-                Ok(metadata) => metadata,
-                // Absent, and so creatable only below a directory others
-                // cannot write (where its name could be raced).
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create => {
-                    return if parent_shared {
-                        Err(untrusted(&current))
-                    } else {
-                        Ok(None)
-                    };
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    if parent_shared {
+            if let Some(component) = component {
+                let name = component.as_os_str();
+                directory = match open_at(&directory, name, DIRECTORY) {
+                    Ok(child) => child,
+                    // Absent, and so creatable only below a directory others
+                    // cannot write (where its name could be raced).
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        let Some(mode) = create.filter(|_| !parent_shared) else {
+                            return if parent_shared {
+                                Err(untrusted(&current))
+                            } else {
+                                Ok(None)
+                            };
+                        };
+                        let mode = if leaf { mode } else { 0o755 };
+                        make_at(&directory, name, mode)?;
+                        let child = open_at(&directory, name, DIRECTORY)?;
+                        // Ours, not one substituted after the mkdir.
+                        if child.metadata()?.uid() != euid() {
+                            return Err(untrusted(&current));
+                        }
+                        child.set_permissions(fs::Permissions::from_mode(mode))?;
+                        child
+                    }
+                    // A symlink (ELOOP) or a non-directory (ENOTDIR).
+                    Err(error)
+                        if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) =>
+                    {
                         return Err(untrusted(&current));
                     }
-                    let mode = if leaf { 0o700 } else { 0o755 };
-                    fs::DirBuilder::new().mode(mode).create(&current)?;
-                    let directory = open_directory(&current)?;
-                    directory.set_permissions(fs::Permissions::from_mode(mode))?;
-                    directory.metadata()?
-                }
-                Err(error) => return Err(error.into()),
-            };
+                    Err(error) => return Err(error.into()),
+                };
+            }
+            let metadata = directory.metadata()?;
             let owned = [0, euid()].contains(&metadata.uid());
             let shared = metadata.mode() & 0o022 != 0;
             let sticky = metadata.mode() & 0o1000 != 0;
@@ -945,9 +1024,9 @@ impl Rollout {
                 return Err(untrusted(&current));
             }
             parent_shared = shared;
-            leaf_metadata = Some(metadata);
         }
-        Ok(leaf_metadata)
+        let metadata = directory.metadata()?;
+        Ok(Some((directory, metadata)))
     }
 
     /// Create the journal root privately, but never re-permission an existing
@@ -955,8 +1034,8 @@ impl Rollout {
     fn state_dir(&self) -> Result<()> {
         // Never create the journal on the root filesystem below an absent mount.
         self.require_covering_mounts(&self.state)?;
-        let leaf = self
-            .walk(&self.state, &[], true)?
+        let (_, leaf) = self
+            .walk(&self.state, &[], Some(0o700))?
             .ok_or_else(|| invalid("rollout journal root is missing"))?;
         if leaf.uid() != euid() || leaf.mode() & 0o077 != 0 {
             return Err(invalid(
@@ -974,7 +1053,7 @@ impl Rollout {
             .chain([&prepare.export_root])
             .chain(&prepare.required_mounts)
         {
-            self.walk(path, &[], false)?;
+            self.walk(path, &[], None)?;
         }
         Ok(())
     }
@@ -1588,7 +1667,7 @@ impl Rollout {
             .chain([(authority, "postgres", 0o700, &harbor)]);
         for (path, group, mode, identity) in provisioned {
             let (uid, gid) = self.provision_owner(group)?;
-            if let Some(metadata) = self.walk(path, &holders, false)?
+            if let Some((_, metadata)) = self.walk(path, &holders, None)?
                 && (metadata.uid(), metadata.gid(), metadata.mode() & 0o7777) != (uid, gid, mode)
             {
                 return Err(invalid(format!(
@@ -1613,7 +1692,7 @@ impl Rollout {
             }
         }
         if !holders.contains(&prepare.export_root.as_path()) {
-            self.walk(&prepare.export_root, &holders, false)?;
+            self.walk(&prepare.export_root, &holders, None)?;
         }
         Ok(())
     }
@@ -1622,7 +1701,7 @@ impl Rollout {
     /// an existing one owned by root and writable by no one else (`mask`, as
     /// the writing step checks), a missing one creatable.
     fn check_root_directory(&self, path: &Path, mask: u32, owned: &str) -> Result<()> {
-        if let Some(metadata) = self.walk(path, &[], false)?
+        if let Some((_, metadata)) = self.walk(path, &[], None)?
             && (metadata.uid() != euid() || metadata.mode() & mask != 0)
         {
             return Err(invalid(format!("{} must be {owned}", path.display())));
@@ -1722,28 +1801,73 @@ impl Rollout {
         let holders: Vec<&Path> = (self.manifest.prepare.provision_directories.iter())
             .map(|directory| directory.path.as_path())
             .collect();
-        if self.walk(path, &holders, false)?.is_some() {
-            return Ok(());
+        let owner = self.provision_owner(group)?;
+        let parent_path =
+            (path.parent()).ok_or_else(|| invalid("provisioned directory has no parent"))?;
+        // Pin the parent once; everything after is relative to its descriptor,
+        // so a parent's owner (postgres, for evidence in its backup root)
+        // renaming paths can never redirect a root mkdir, chown or rename.
+        let (parent, metadata) = (self.walk(parent_path, &holders, Some(0o755))?)
+            .ok_or_else(|| invalid("provisioned directory has no parent"))?;
+        // Created only in a directory no one else can write, or a declared one.
+        if !([0, euid()].contains(&metadata.uid()) || holders.contains(&parent_path))
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(invalid(format!(
+                "{} has untrusted ancestry at {}",
+                path.display(),
+                parent_path.display()
+            )));
         }
-        let (uid, gid) = self.provision_owner(group)?;
-        // Publish the directory only once complete: made, permissioned and
-        // owned under a private name, then renamed into place, so a crash never
-        // leaves it root-owned where a retry would accept it as provisioned.
-        // ponytail: an interrupted attempt leaves its empty private directory.
-        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-            return Err(invalid("provisioned directory has no parent"));
-        };
-        let staging = parent.join(format!(
+        self.provision_in(&parent, path, owner, mode)
+    }
+
+    /// Provision `path` inside its pinned `parent`. Published only once
+    /// complete: made, permissioned and owned under a private name, then
+    /// renamed into place without replacing anything, so a crash never leaves
+    /// it root-owned where a retry would accept it as provisioned.
+    // ponytail: an interrupted attempt leaves its empty private directory.
+    fn provision_in(
+        &self,
+        parent: &fs::File,
+        path: &Path,
+        (uid, gid): (u32, u32),
+        mode: u32,
+    ) -> Result<()> {
+        let name =
+            (path.file_name()).ok_or_else(|| invalid("provisioned directory has no name"))?;
+        let untrusted = || invalid(format!("{} has untrusted ancestry", path.display()));
+        // An existing one's owner and mode were verified by the preflight
+        // through this same kind of no-follow descriptor.
+        match open_at(parent, name, DIRECTORY) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) => {
+                return Err(untrusted());
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let staging = std::ffi::OsString::from(format!(
             ".{}.{}.provisioning",
             name.to_string_lossy(),
             std::process::id()
         ));
-        self.walk(&staging, &holders, true)?;
-        let directory = open_directory(&staging)?;
+        // A leftover of this process's interrupted attempt is reused.
+        match make_at(parent, &staging, 0o700) {
+            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+                return Err(error.into());
+            }
+            _ => {}
+        }
+        let directory = open_at(parent, &staging, DIRECTORY)?;
+        // Ours, not one the parent's owner substituted after the mkdir.
+        if directory.metadata()?.uid() != euid() {
+            return Err(untrusted());
+        }
         directory.set_permissions(fs::Permissions::from_mode(mode))?;
         std::os::unix::fs::fchown(&directory, Some(uid), Some(gid))?;
-        fs::rename(&staging, path)?;
-        durable::sync_directory(parent)
+        rename_at(parent, &staging, name)?;
+        Ok(parent.sync_all()?)
     }
 
     fn fence(&self, journal: &mut Journal, adopt: Option<&str>) -> Result<()> {
@@ -1758,7 +1882,8 @@ impl Rollout {
         self.preflight_paths()?;
         self.check_sandbox_paths()?;
         self.check_slot_directory()?;
-        // Harbor's inhibition and the publisher pause write these as root.
+        // Harbor's inhibition, the publisher pause and the opening GC root
+        // write these as root, by pathname: only root may modify them.
         let startup = Path::new(super::string(
             &self.maintenance["startup_inhibition"],
             "state_dir",
@@ -1766,6 +1891,7 @@ impl Rollout {
         let writable_by_root = "a directory only root can write";
         self.check_root_directory(startup, 0o022, writable_by_root)?;
         self.check_root_directory(&self.drop_in_root()?, 0o022, writable_by_root)?;
+        self.check_root_directory(&self.gcroots, 0o022, writable_by_root)?;
         self.refuse_stale_evidence(journal)?;
         // The socket, port and identifier `inspect-fence` uses once the fence
         // is open, checked against the running primary first (one already
@@ -1777,7 +1903,7 @@ impl Rollout {
         self.provision(authority, "postgres", 0o700)?;
         // Harbor would create missing parents of its inhibition state private
         // to root, where a sibling postgres path could no longer be searched.
-        self.walk(startup, &[], true)?;
+        self.walk(startup, &[], Some(0o700))?;
         self.inhibit(journal)?;
         self.pause_publishers(journal)?;
         self.stop_clients(journal)?;
@@ -1988,7 +2114,6 @@ impl Rollout {
     /// following a symlink, so no postgres-side writer can point the journal
     /// or the hand-off at another directory.
     fn reported_export(&self, preparation: &Value) -> Result<(PathBuf, String)> {
-        use std::os::fd::{AsRawFd, FromRawFd};
         let root = &self.manifest.prepare.export_root;
         let backup = super::string(preparation, "backup_id")?;
         let export = root.join(backup);
@@ -2002,23 +2127,14 @@ impl Rollout {
         let unavailable = || {
             invalid("recovery preparation failed; retain the writer window and inspect its unit")
         };
-        self.walk(&export, &[root.as_path()], false)?
-            .ok_or_else(unavailable)?;
-        let directory = open_directory(&export)?;
-        let name = std::ffi::CString::new("recovery-export.json").expect("static name");
-        // SAFETY: openat reads a live descriptor and NUL-terminated name; a
-        // returned descriptor is owned exactly once by the File below.
-        let fd = unsafe {
-            libc::openat(
-                directory.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(unavailable());
-        }
-        let mut plan = unsafe { fs::File::from_raw_fd(fd) };
+        let (directory, _) =
+            (self.walk(&export, &[root.as_path()], None)?).ok_or_else(unavailable)?;
+        let mut plan = open_at(
+            &directory,
+            "recovery-export.json".as_ref(),
+            libc::O_RDONLY | libc::O_NONBLOCK,
+        )
+        .map_err(|_| unavailable())?;
         if !plan.metadata()?.is_file() {
             return Err(unavailable());
         }
@@ -2126,7 +2242,7 @@ impl Rollout {
             .parent()
             .ok_or_else(|| invalid("import slot has no directory"))?;
         self.require_covering_mounts(directory)?;
-        self.walk(directory, &[], true)?;
+        self.walk(directory, &[], Some(0o700))?;
         if let Ok(metadata) = fs::symlink_metadata(slot) {
             trusted_file(&metadata, slot, euid())?;
             let staged = read_pinned(slot, MAX_RECEIPT_BYTES)?.1;
@@ -2631,8 +2747,8 @@ impl Rollout {
         let parent = path
             .parent()
             .ok_or_else(|| invalid("execution lock has no directory"))?;
-        match self.walk(parent, &[], false)? {
-            Some(metadata)
+        match self.walk(parent, &[], None)? {
+            Some((_, metadata))
                 if [0, euid()].contains(&metadata.uid()) && metadata.mode() & 0o022 == 0 => {}
             _ => {
                 return Err(invalid(format!(
@@ -5018,7 +5134,16 @@ exit 1"#,
         let mode = |f: &Fixture, path: &str, mode: u32| {
             fs::set_permissions(f.p(path), fs::Permissions::from_mode(mode)).unwrap();
         };
-        let cases: [(&str, Setup, &str); 9] = [
+        let cases: [(&str, Setup, &str); 10] = [
+            // The opening manifest's GC root is published there by pathname.
+            (
+                "gc roots",
+                |f| {
+                    fs::set_permissions(f.p("gcroots"), fs::Permissions::from_mode(0o777)).unwrap();
+                    json!({})
+                },
+                "only root can write",
+            ),
             // Harbor's own mounts (`fence-open` checks them), declared only in
             // the maintenance manifest.
             (
@@ -5291,6 +5416,57 @@ exit 1"#,
             },
             "no server on that socket",
         );
+    }
+
+    #[test]
+    fn provisioning_stays_in_its_pinned_parent_when_the_parent_is_swapped() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| {
+            m["prepare"]["read_write_paths"] = json!([f.p("evidence"), f.p("backup")]);
+            m["prepare"]["provision_directories"] = json!([
+                {"path": f.p("backup"), "group": "postgres", "mode": 0o700},
+                {"path": f.p("backup/nested"), "group": "postgres", "mode": 0o700},
+            ]);
+        })
+        .unwrap();
+        let backup = f.p("backup");
+        rollout.provision(&backup, "postgres", 0o700).unwrap();
+        // The walk pins the parent; then its owner (postgres on a host)
+        // swaps it for a symlink to a directory of its choosing.
+        let (parent, _) = (rollout.walk(&backup, &[&backup], Some(0o755)).unwrap()).unwrap();
+        fs::create_dir(f.p("outside")).unwrap();
+        fs::set_permissions(f.p("outside"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&backup, f.p("backup.moved")).unwrap();
+        std::os::unix::fs::symlink(f.p("outside"), &backup).unwrap();
+        let owner = (euid(), unsafe { libc::getegid() });
+        (rollout.provision_in(&parent, &f.p("backup/nested"), owner, 0o700)).unwrap();
+        // Nothing was made, permissioned or owned through the symlink: the
+        // directory landed in the pinned (moved) parent.
+        let outside = || {
+            let metadata = fs::metadata(f.p("outside")).unwrap();
+            (
+                fs::read_dir(f.p("outside")).unwrap().count(),
+                metadata.mode() & 0o7777,
+            )
+        };
+        assert_eq!(outside(), (0, 0o755));
+        let nested = fs::metadata(f.p("backup.moved/nested")).unwrap();
+        assert_eq!(nested.mode() & 0o7777, 0o700);
+        // The step itself fails closed on the swapped path.
+        let error = worker_ready(&rollout, &mut rollout.bound().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("untrusted ancestry"), "{error}");
+        assert_eq!(outside(), (0, 0o755));
+        assert!(!f.calls().contains("systemd-run"));
+        // Never provisioned in an undeclared directory others can write.
+        fs::create_dir(f.p("shared")).unwrap();
+        fs::set_permissions(f.p("shared"), fs::Permissions::from_mode(0o777)).unwrap();
+        let error = (rollout.provision(&f.p("shared/x"), "postgres", 0o700))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("untrusted ancestry"), "{error}");
+        assert_eq!(fs::read_dir(f.p("shared")).unwrap().count(), 0);
     }
 
     #[test]

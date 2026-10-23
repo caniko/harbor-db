@@ -308,6 +308,15 @@ Exclusion and recovery:
   one (evidence in its backup root), and the export root inside a writable
   path. The recovery evidence directories (snapshot, receipt and off-host
   receipt) and the provisioned directories must lie inside the writable paths.
+- **Root writes.** Root never resolves a pathname below a directory another
+  account can write. Paths are walked by opening each component from its
+  parent's descriptor without following symlinks, and each component is
+  checked through its own descriptor. Provisioning, including below the
+  postgres-owned backup root (evidence), creates, permissions, owns and renames
+  relative to the pinned parent descriptor, and never replaces an existing
+  entry. Every other root write (journal root and archives, staged and retired
+  receipts, the import slot, pause drop-ins, the GC root) is in a directory
+  whose whole ancestry only root can modify, which the fence preflight checks.
 - **Load-time inputs.** Every local executable a step runs (`harbor`,
   `systemctl`, `systemd-run` and thaw's cutover checker) must be an executable
   regular store file reached without a mutable alias, and the worker's
