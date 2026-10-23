@@ -6937,6 +6937,8 @@ selectors = [
   "fence_resumes_idempotently_and_steps_stay_bound_to_their_manifest",
   "activated_rollouts_refuse_abort_and_receipts_are_digest_bound",
   "next_hands_off_external_steps_with_exact_commands",
+  "preparation_quiesces_transitional_receivers_and_may_write_its_export",
+  "interrupted_import_reuses_its_staged_receipt_but_never_replaces_another",
 ]
 
 [[inventories]]

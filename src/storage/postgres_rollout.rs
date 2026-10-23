@@ -575,12 +575,12 @@ impl Rollout {
                 prepare.supplementary_groups.join(" ")
             ));
         }
-        if !prepare.read_write_paths.is_empty() {
-            command.arg(format!(
-                "--property=ReadWritePaths={}",
-                join(&prepare.read_write_paths)
-            ));
+        // The worker publishes the hand-off export under the export root.
+        let mut writable = prepare.read_write_paths.clone();
+        if !writable.contains(&prepare.export_root) {
+            writable.push(prepare.export_root.clone());
         }
+        command.arg(format!("--property=ReadWritePaths={}", join(&writable)));
         if !prepare.required_mounts.is_empty() {
             command.arg(format!(
                 "--property=RequiresMountsFor={}",
@@ -615,9 +615,14 @@ impl Rollout {
         }
         let mut resume = Vec::new();
         for unit in &self.manifest.receiver_units {
-            if self.show(unit, "ActiveState")? == "active" {
+            // A transitional receiver can still be writing WAL; quiesce every
+            // non-terminal state, and resume those that were (going) up.
+            let state = self.show(unit, "ActiveState")?;
+            if !matches!(state.as_str(), "inactive" | "failed") {
                 self.stop(unit)?;
-                resume.push(unit);
+                if state != "deactivating" {
+                    resume.push(unit);
+                }
             }
         }
         let unit = format!("harbor-db-rollout-prepare-{}", std::process::id());
@@ -680,9 +685,20 @@ impl Rollout {
             ));
         }
         // Stage the verified bytes, never a pathname the transport can still swap.
-        let verified = self.manifest.state_dir.join("receipt.verified.json");
-        durable::atomic_write_mode(&verified, &bytes, 0o600)?;
-        super::recovery::stage_off_host_import(&verified, &self.manifest.import_slot)?;
+        // An interrupted import may already have staged these exact bytes;
+        // reuse them, but never replace a different staged receipt.
+        let slot = &self.manifest.import_slot;
+        if slot.exists() {
+            if codec::file_digest(slot)? != expected {
+                return Err(invalid(
+                    "import slot holds a different receipt; retain the writer window",
+                ));
+            }
+        } else {
+            let verified = self.manifest.state_dir.join("receipt.verified.json");
+            durable::atomic_write_mode(&verified, &bytes, 0o600)?;
+            super::recovery::stage_off_host_import(&verified, slot)?;
+        }
         journal.receipt_sha256 = Some(expected);
         self.save(journal)?;
         self.inspect_fence(journal)?;
@@ -1065,6 +1081,8 @@ exit 0"#,
                 ),
             );
             executable(&p("runuser"), "shift 3\nexec \"$@\"");
+            // The preparation worker always reports "not ready".
+            executable(&p("systemd-run"), "exit 1");
             executable(
                 &p("harbor"),
                 &format!(
@@ -1103,7 +1121,7 @@ esac"#,
             let manifest = json!({
                 "version": 1, "host": "primary", "system_identifier": "42",
                 "harbor": self.p("harbor"), "systemctl": self.p("systemctl"),
-                "runuser": self.p("runuser"), "systemd_run": "/bin/false",
+                "runuser": self.p("runuser"), "systemd_run": self.p("systemd-run"),
                 "maintenance": self.p("maintenance.json"), "preparation": self.p("preparation.json"),
                 "state_dir": self.p("state"), "socket_dir": "/run/postgresql", "port": 5432,
                 "clients": ["a.service", "b.service"], "retired_clients": [],
@@ -1243,6 +1261,59 @@ esac"#,
             .unwrap_err()
             .to_string();
         assert!(error.contains("root-owned"), "{error}");
+    }
+
+    #[test]
+    fn preparation_quiesces_transitional_receivers_and_may_write_its_export() {
+        let f = Fixture::new(0);
+        let path = f.p("rollout.json");
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest["receiver_units"] = json!(["r.service"]);
+        fs::write(&path, manifest.to_string()).unwrap();
+        fs::write(f.p("units/r.service"), "activating").unwrap();
+        let rollout = f.rollout();
+        let export = format!("{}", f.p("export").display());
+        let writable = rollout
+            .preparation_command("u", false)
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .any(|arg| arg.starts_with("--property=ReadWritePaths=") && arg.contains(&export));
+        assert!(writable, "export root must be writable by the worker");
+        assert!(!rollout.run_preparation(false).unwrap());
+        let calls = f.calls();
+        assert!(calls.contains("systemctl stop -- r.service"), "{calls}");
+        assert!(calls.contains("systemctl start -- r.service"), "{calls}");
+    }
+
+    #[test]
+    fn interrupted_import_reuses_its_staged_receipt_but_never_replaces_another() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(Action::Fence).unwrap();
+        let mut journal = rollout.journal().unwrap().unwrap();
+        journal.phase = Phase::Prepared;
+        rollout.save(&journal).unwrap();
+        let bytes = br#"{"status":"ready"}"#;
+        let receipt = f.p("receipt.json");
+        fs::write(&receipt, bytes).unwrap();
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::create_dir_all(f.p("import")).unwrap();
+        fs::write(f.p("import/receipt.json"), bytes).unwrap();
+        let import = || {
+            rollout
+                .run(Action::Import {
+                    receipt: receipt.clone(),
+                    sha256: codec::digest(bytes),
+                })
+                .unwrap_err()
+                .to_string()
+        };
+        // The staged copy is reused, so the retry reaches admission.
+        let error = import();
+        assert!(error.contains("not admitted"), "{error}");
+        fs::write(f.p("import/receipt.json"), br#"{"status":"other"}"#).unwrap();
+        let error = import();
+        assert!(error.contains("different receipt"), "{error}");
     }
 
     #[test]
