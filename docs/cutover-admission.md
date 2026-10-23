@@ -227,6 +227,14 @@ Exclusion and recovery:
   held it names both tokens and asks for the other fence to be finished first;
   once that coordinator has released the inhibition, the retried `abort`
   restarts the primary this rollout stopped.
+- **Interrupted fence opening.** The journal records the intent to open a fence
+  before `fence-open` and the token after it. Harbor mints the token, so if the
+  coordinator dies in between and a fence is live on retry, nothing proves it
+  is this rollout's: `fence`, `next` and `abort` refuse, naming the token, until
+  the operator confirms no other coordinator ran (for example a legacy
+  writer-fence acquisition) and reruns with `--adopt-fence-token <token>`. With
+  no live fence the retry simply opens one. The flag is refused once a token is
+  recorded.
 - **Execution lock.** `executionLock` names an existing host lock file (for
   example `/run/lock/canix/switch.lock`). Every mutating step holds a
   non-blocking exclusive `flock` on it besides the journal's `rollout.lock`, and
@@ -274,7 +282,8 @@ Exclusion and recovery:
   root's too. Provisioned directories follow the same rule, except that one may
   sit inside another declared provisioned directory (an evidence directory in
   a backup root); they are made by `mkdir` and permissioned through a
-  no-follow descriptor, never through a path.
+  no-follow descriptor, never through a path. They are provisioned shallowest
+  first, so a declared parent always gets its own owner and mode.
 - **Activation.** A rollout-enabled generation does not install the legacy
   `00-0-harbor-db-postgresql-prepare` pre-switch hook: the coordinator already
   prepared, imported and adopted under the fence. Its

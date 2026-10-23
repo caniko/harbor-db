@@ -154,9 +154,18 @@ enum RolloutStep {
     #[command(hide = true)]
     ActivationCheck,
     /// Perform the next local step, or print the external action.
-    Next,
+    Next {
+        /// As for `fence`.
+        #[arg(long)]
+        adopt_fence_token: Option<String>,
+    },
     /// Pause publishers, stop clients and open the writer fence.
-    Fence,
+    Fence {
+        /// After an opening interrupted before its token was recorded, adopt
+        /// Harbor's live fence by its token (once no other coordinator ran).
+        #[arg(long)]
+        adopt_fence_token: Option<String>,
+    },
     /// Run recovery preparation; stops at the independent-certification hand-off.
     Prepare,
     /// On the executor: restore and certify a transported export.
@@ -186,7 +195,8 @@ enum RolloutStep {
     },
     /// Back out before activation: close the fence and restart clients.
     Abort {
-        /// With no journal, explicitly adopt Harbor's live writer fence by its token.
+        /// Explicitly adopt Harbor's live writer fence by its token: with no
+        /// journal, or after an opening interrupted before its token was recorded.
         #[arg(long)]
         adopt_fence_token: Option<String>,
     },
@@ -197,8 +207,8 @@ fn operate(args: Args) -> Result<Option<Value>> {
         let action = match step {
             RolloutStep::Status => Action::Status,
             RolloutStep::ActivationCheck => Action::ActivationCheck,
-            RolloutStep::Next => Action::Next,
-            RolloutStep::Fence => Action::Fence,
+            RolloutStep::Next { adopt_fence_token } => Action::Next { adopt_fence_token },
+            RolloutStep::Fence { adopt_fence_token } => Action::Fence { adopt_fence_token },
             RolloutStep::Prepare => Action::Prepare,
             RolloutStep::Certify {
                 export,

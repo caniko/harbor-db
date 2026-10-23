@@ -138,8 +138,13 @@ pub enum Action {
     Status,
     /// Pre-switch guard of a rollout-enabled generation.
     ActivationCheck,
-    Next,
-    Fence,
+    Next {
+        adopt_fence_token: Option<String>,
+    },
+    Fence {
+        /// Adopt the live fence after an opening interrupted before its token was recorded.
+        adopt_fence_token: Option<String>,
+    },
     Prepare,
     Certify {
         export: PathBuf,
@@ -170,6 +175,9 @@ pub struct Rollout {
     installed: PathBuf,
     /// Trusted directory the journal ancestry walk starts from (`/` on hosts).
     anchor: PathBuf,
+    /// Owner of provisioned directories (`postgres` and each declared group on
+    /// hosts; tests cannot chown to them).
+    service_owner: Option<(u32, u32)>,
 }
 
 fn root() -> bool {
@@ -472,6 +480,7 @@ impl Rollout {
             state: PathBuf::from(STATE_ROOT),
             installed: PathBuf::from(INSTALLED),
             anchor: PathBuf::from("/"),
+            service_owner: None,
         })
     }
 
@@ -877,24 +886,39 @@ impl Rollout {
 
     /// Refuse a live fence this rollout did not open (another coordinator's),
     /// unless it recorded opening one whose token it has yet to learn.
-    fn refuse_foreign_fence(&self, journal: &Journal) -> Result<()> {
-        if !journal.fence_opening
-            && let Some(token) = self.live_fence()?
-            && journal.fence_token.as_deref() != Some(token.as_str())
-        {
+    fn refuse_foreign_fence(&self, journal: &Journal, adopt: Option<&str>) -> Result<()> {
+        let Some(token) = self.live_fence()? else {
+            return Ok(());
+        };
+        if journal.fence_token.as_deref() == Some(token.as_str()) {
+            return Ok(());
+        }
+        if !journal.fence_opening {
             return Err(invalid(format!(
                 "Harbor holds writer fence {token}, which this rollout did not open; \
                  finish it with the coordinator that opened it first"
+            )));
+        }
+        // Interrupted between recording the intent and the token: Harbor mints
+        // the token, so nothing proves this fence is ours rather than one
+        // another coordinator opened meanwhile. Only the operator can say.
+        if adopt != Some(token.as_str()) {
+            return Err(invalid(format!(
+                "this rollout was interrupted while opening a writer fence and Harbor now holds fence \
+                 {token}, which it cannot prove it opened; only after confirming no other coordinator \
+                 (such as a legacy writer-fence-acquire and its transition journal) ran since, rerun \
+                 with `--adopt-fence-token {token}`"
             )));
         }
         Ok(())
     }
 
     /// Open (or resume) the writer fence. Harbor resumes any prepared fence, so
-    /// first refuse one this rollout did not open (another coordinator's).
-    fn open_fence(&self, journal: &mut Journal) -> Result<()> {
+    /// first refuse one this rollout did not open (another coordinator's) or,
+    /// after an interrupted opening, one the operator did not adopt.
+    fn open_fence(&self, journal: &mut Journal, adopt: Option<&str>) -> Result<()> {
+        self.refuse_foreign_fence(journal, adopt)?;
         if !journal.fence_opening {
-            self.refuse_foreign_fence(journal)?;
             journal.fence_opening = true;
             self.save(journal)?;
         }
@@ -907,8 +931,26 @@ impl Rollout {
             ],
             "prepared-offline",
         )?;
-        journal.fence_token = Some(super::string(&value, "token")?.to_owned());
+        let token = super::string(&value, "token")?;
+        if adopt.is_some_and(|adopted| adopted != token) {
+            return Err(invalid(
+                "Harbor opened a different fence than the adopted one",
+            ));
+        }
+        journal.fence_token = Some(token.to_owned());
         self.save(journal)
+    }
+
+    /// `--adopt-fence-token` only resolves an opening interrupted before its
+    /// token was recorded (a lost journal is adopted by `abort` separately).
+    fn adoptable(journal: &Journal, adopt: Option<&str>) -> Result<()> {
+        if adopt.is_some() && !(journal.fence_opening && journal.fence_token.is_none()) {
+            return Err(invalid(
+                "--adopt-fence-token applies only to a fence opening interrupted before its token \
+                 was recorded",
+            ));
+        }
+        Ok(())
     }
 
     fn pause_marker(&self) -> PathBuf {
@@ -999,6 +1041,18 @@ impl Rollout {
         Ok(())
     }
 
+    /// Provision the declared directories shallowest first (stable), so a
+    /// nested one never creates its declared parent as a root intermediate.
+    fn provision_all(&self) -> Result<()> {
+        let mut directories: Vec<&Provision> =
+            self.manifest.prepare.provision_directories.iter().collect();
+        directories.sort_by_key(|directory| directory.path.components().count());
+        for directory in directories {
+            self.provision(&directory.path, &directory.group, directory.mode)?;
+        }
+        Ok(())
+    }
+
     /// Create a service directory as root without ever following a symlink.
     fn provision(&self, path: &Path, group: &str, mode: u32) -> Result<()> {
         // Never provision on the root filesystem below an absent mount.
@@ -1012,8 +1066,10 @@ impl Rollout {
         if self.walk(path, &holders, false)?.is_some() {
             return Ok(());
         }
-        let (uid, _) = account("postgres")?;
-        let gid = group_id(group)?;
+        let (uid, gid) = match self.service_owner {
+            Some(owner) => owner,
+            None => (account("postgres")?.0, group_id(group)?),
+        };
         self.walk(path, &holders, true)?;
         let directory = open_directory(path)?;
         directory.set_permissions(fs::Permissions::from_mode(mode))?;
@@ -1021,21 +1077,21 @@ impl Rollout {
         Ok(())
     }
 
-    fn fence(&self, journal: &mut Journal) -> Result<()> {
+    fn fence(&self, journal: &mut Journal, adopt: Option<&str>) -> Result<()> {
         if journal.phase != Phase::Idle {
             // Resumed: re-stop any newly started declared client and re-verify.
             self.stop_clients(journal)?;
             return self.inspect_fence(journal);
         }
         // Before any side effect: a refusal must leave production untouched.
-        self.refuse_foreign_fence(journal)?;
+        self.refuse_foreign_fence(journal, adopt)?;
         let authority = Path::new(super::string(&self.maintenance, "state_dir")?);
         self.provision(authority, "postgres", 0o700)?;
         self.inhibit(journal)?;
         self.pause_publishers(journal)?;
         self.stop_clients(journal)?;
         self.stop(self.primary_unit())?;
-        self.open_fence(journal)?;
+        self.open_fence(journal, adopt)?;
         self.release_startup(journal, "prepared")?;
         self.start_primary()?;
         self.inspect_fence(journal)?;
@@ -1199,9 +1255,7 @@ impl Rollout {
         if self.preparing()? {
             return Err(invalid(BUSY));
         }
-        for directory in &self.manifest.prepare.provision_directories {
-            self.provision(&directory.path, &directory.group, directory.mode)?;
-        }
+        self.provision_all()?;
         self.check_sandbox_paths()?;
         let signals = Deferred::block()?;
         let quiesced = (|| {
@@ -1349,22 +1403,22 @@ impl Rollout {
 
     /// Unwind to the normal primary: close (or confirm closed) the fence under
     /// startup exclusion, restart, verify, then return recorded clients.
-    fn reopen(&self, journal: &mut Journal) -> Result<()> {
+    fn reopen(&self, journal: &mut Journal, adopt: Option<&str>) -> Result<()> {
         if !journal.reopened {
             if let (None, Some(startup)) = (&journal.fence_token, journal.startup_token.clone()) {
                 // Interrupted between inhibition and fence-open. Harbor binds the
                 // startup release to a fence boundary, so complete the offline
                 // acquisition first and then unwind it through the normal close.
-                let foreign = self.live_fence()?.filter(|_| !journal.fence_opening);
+                let live = self.live_fence()?;
                 if self.held_inhibition()?.as_deref() != Some(startup.as_str()) {
                     // The shared inhibition was already released at another
                     // coordinator's fence boundary: only restart the primary
-                    // this rollout stopped (a foreign fence is that one's to verify).
+                    // this rollout stopped (an unrecorded fence is not ours to verify).
                     self.start_primary()?;
-                    if foreign.is_none() {
+                    if live.is_none() {
                         self.inspect_live()?;
                     }
-                } else if let Some(foreign) = foreign {
+                } else if let Some(foreign) = live.filter(|_| !journal.fence_opening) {
                     return Err(invalid(format!(
                         "this rollout holds startup inhibition {startup} but Harbor holds writer fence \
                          {foreign}, which it did not open; Harbor releases startup only at a fence \
@@ -1372,8 +1426,10 @@ impl Rollout {
                          releases the shared inhibition), then rerun `rollout abort`"
                     )));
                 } else {
+                    // Refuse an unadopted fence before touching the primary.
+                    self.refuse_foreign_fence(journal, adopt)?;
                     self.stop(self.primary_unit())?;
-                    self.open_fence(journal)?;
+                    self.open_fence(journal, adopt)?;
                     self.release_startup(journal, "prepared")?;
                 }
             }
@@ -1495,7 +1551,7 @@ impl Rollout {
                 self.save(journal)?;
             }
         }
-        self.reopen(journal)?;
+        self.reopen(journal, None)?;
         journal.phase = Phase::Thawed;
         self.save(journal)
     }
@@ -1708,13 +1764,18 @@ impl Rollout {
     }
 
     fn abort(&self, adopt_fence_token: Option<String>) -> Result<Value> {
-        let adopted = adopt_fence_token.is_some();
+        let mut adopted = false;
+        let mut opening = None;
         let mut journal = match (self.journal()?, adopt_fence_token) {
             (Some(journal), None) => journal,
-            (Some(_), Some(_)) => {
-                return Err(invalid(
-                    "a rollout journal exists; abort it without --adopt-fence-token",
-                ));
+            (Some(journal), Some(token)) => {
+                Self::adoptable(&journal, Some(&token)).map_err(|_| {
+                    invalid(
+                        "a rollout journal records its fence; abort it without --adopt-fence-token",
+                    )
+                })?;
+                opening = Some(token);
+                journal
             }
             (None, None) => {
                 return Err(invalid(match self.live_fence()? {
@@ -1744,6 +1805,7 @@ impl Rollout {
                 // all (an idle timer-driven one just runs early).
                 journal.stopped_publishers = self.manifest.paused_publishers.clone();
                 self.save(&journal)?;
+                adopted = true;
                 journal
             }
         };
@@ -1753,7 +1815,7 @@ impl Rollout {
             ));
         }
         if journal.phase != Phase::Aborted {
-            self.reopen(&mut journal)?;
+            self.reopen(&mut journal, opening.as_deref())?;
             journal.phase = Phase::Aborted;
             self.save(&journal)?;
         }
@@ -1773,10 +1835,13 @@ impl Rollout {
         if let Action::Abort { adopt_fence_token } = action {
             return self.abort(adopt_fence_token);
         }
-        if matches!(action, Action::Fence | Action::Next) {
+        if matches!(action, Action::Fence { .. } | Action::Next { .. }) {
             self.archive_finished()?;
         }
         let mut journal = self.bound()?;
+        if let Action::Fence { adopt_fence_token } | Action::Next { adopt_fence_token } = &action {
+            Self::adoptable(&journal, adopt_fence_token.as_deref())?;
+        }
         let unwinding =
             journal.reopened && !matches!(journal.phase, Phase::Aborted | Phase::Thawed);
         if unwinding && !matches!(action, Action::Thaw { .. }) {
@@ -1793,9 +1858,9 @@ impl Rollout {
             }
         };
         match action {
-            Action::Fence => {
+            Action::Fence { adopt_fence_token } => {
                 require(&[Phase::Idle, Phase::Fenced])?;
-                self.fence(&mut journal)?;
+                self.fence(&mut journal, adopt_fence_token.as_deref())?;
             }
             Action::Prepare => {
                 require(&[Phase::Fenced, Phase::Prepared])?;
@@ -1823,8 +1888,8 @@ impl Rollout {
                     self.thaw(&mut journal, &acceptance)?;
                 }
             }
-            Action::Next => match phase {
-                Phase::Idle => self.fence(&mut journal)?,
+            Action::Next { adopt_fence_token } => match phase {
+                Phase::Idle => self.fence(&mut journal, adopt_fence_token.as_deref())?,
                 Phase::Fenced => self.prepare(&mut journal)?,
                 // External hand-off: certification runs on the executor; `next`
                 // prints the exact commands.
@@ -2010,6 +2075,7 @@ esac"#,
             rollout.installed = self.p("installed.json");
             // A build sandbox's `/` need not be root-owned.
             rollout.anchor = self.root.path().to_owned();
+            rollout.service_owner = Some((euid(), unsafe { libc::getegid() }));
             Ok(rollout)
         }
 
@@ -2028,7 +2094,7 @@ esac"#,
     #[test]
     fn fence_waits_for_setup_units_then_abort_restores_the_primary_and_clients() {
         let f = Fixture::new(3);
-        let status = f.rollout().run(Action::Fence).unwrap();
+        let status = f.rollout().run(FENCE).unwrap();
         assert_eq!(status["phase"], "fenced");
         assert_eq!(status["fence_token"], TOKEN);
         assert_eq!(f.unit("a.service"), "inactive");
@@ -2079,7 +2145,7 @@ esac"#,
             "echo forever > \"$u/.setup-polls\"",
         );
         executable(&f.p("systemctl"), script.trim_start_matches("#!/bin/sh\n"));
-        let error = f.rollout().run(Action::Fence).unwrap_err().to_string();
+        let error = f.rollout().run(FENCE).unwrap_err().to_string();
         assert!(error.contains("did not settle"), "{error}");
         assert!(!f.calls().contains("harbor inspect-fence"));
         let journal = f.rollout().journal().unwrap().unwrap();
@@ -2090,9 +2156,9 @@ esac"#,
     #[test]
     fn fence_resumes_idempotently_and_steps_stay_bound_to_their_manifest() {
         let f = Fixture::new(0);
-        f.rollout().run(Action::Fence).unwrap();
+        f.rollout().run(FENCE).unwrap();
         fs::write(f.p("units/a.service"), "active").unwrap();
-        assert_eq!(f.rollout().run(Action::Fence).unwrap()["phase"], "fenced");
+        assert_eq!(f.rollout().run(FENCE).unwrap()["phase"], "fenced");
         assert_eq!(f.unit("a.service"), "inactive");
         assert!(f.rollout().run(Action::Adopt).is_err());
 
@@ -2115,7 +2181,7 @@ esac"#,
     fn activated_rollouts_refuse_abort_and_receipts_are_digest_bound() {
         let f = Fixture::new(0);
         let rollout = f.rollout();
-        rollout.run(Action::Fence).unwrap();
+        rollout.run(FENCE).unwrap();
         let mut journal = rollout.journal().unwrap().unwrap();
         journal.phase = Phase::Prepared;
         rollout.save(&journal).unwrap();
@@ -2182,7 +2248,7 @@ esac"#,
     fn interrupted_import_reuses_its_staged_receipt_but_never_replaces_another() {
         let f = Fixture::new(0);
         let rollout = f.rollout();
-        rollout.run(Action::Fence).unwrap();
+        rollout.run(FENCE).unwrap();
         let mut journal = rollout.journal().unwrap().unwrap();
         journal.phase = Phase::Prepared;
         rollout.save(&journal).unwrap();
@@ -2268,7 +2334,7 @@ esac"#,
     fn an_existing_shared_state_directory_is_refused_not_repermissioned() {
         let f = Fixture::new(0);
         fs::set_permissions(f.p("state"), fs::Permissions::from_mode(0o755)).unwrap();
-        let error = f.rollout().run(Action::Fence).unwrap_err().to_string();
+        let error = f.rollout().run(FENCE).unwrap_err().to_string();
         assert!(error.contains("private directory"), "{error}");
         assert_eq!(fs::metadata(f.p("state")).unwrap().mode() & 0o777, 0o755);
     }
@@ -2300,7 +2366,7 @@ esac"#,
     fn preparation_refuses_an_unrecorded_import_slot() {
         let f = Fixture::new(0);
         let rollout = f.rollout();
-        rollout.run(Action::Fence).unwrap();
+        rollout.run(FENCE).unwrap();
         fs::create_dir_all(f.p("import")).unwrap();
         fs::write(f.p("import/receipt.json"), br#"{"status":"ready"}"#).unwrap();
         fs::set_permissions(
@@ -2320,7 +2386,7 @@ esac"#,
         fs::set_permissions(f.p("shared"), fs::Permissions::from_mode(0o777)).unwrap();
         let mut rollout = f.rollout();
         rollout.state = f.p("shared/rollout");
-        let error = rollout.run(Action::Fence).unwrap_err().to_string();
+        let error = rollout.run(FENCE).unwrap_err().to_string();
         assert!(error.contains("ancestry"), "{error}");
         assert!(!f.p("shared/rollout").exists());
     }
@@ -2412,7 +2478,7 @@ esac"#,
         })
         .unwrap();
         rollout.state = f.p("mnt/rollout");
-        let error = rollout.run(Action::Fence).unwrap_err().to_string();
+        let error = rollout.run(FENCE).unwrap_err().to_string();
         assert!(error.contains("required mount"), "{error}");
         assert!(!f.p("mnt/rollout").exists());
     }
@@ -2421,13 +2487,13 @@ esac"#,
     fn next_hands_off_external_steps_with_exact_commands() {
         let f = Fixture::new(0);
         let rollout = f.rollout();
-        assert_eq!(rollout.run(Action::Next).unwrap()["phase"], "fenced");
+        assert_eq!(rollout.run(NEXT).unwrap()["phase"], "fenced");
         let mut journal = rollout.journal().unwrap().unwrap();
         journal.phase = Phase::Prepared;
         journal.export = Some(f.p("export/backup-1"));
         journal.export_sha256 = Some("a".repeat(64));
         rollout.save(&journal).unwrap();
-        let status = rollout.run(Action::Next).unwrap();
+        let status = rollout.run(NEXT).unwrap();
         assert_eq!(status["phase"], "prepared");
         let next = status["next"].as_str().unwrap();
         assert!(
@@ -2463,6 +2529,12 @@ esac"#,
     const NO_ADOPTION: Action = Action::Abort {
         adopt_fence_token: None,
     };
+    const FENCE: Action = Action::Fence {
+        adopt_fence_token: None,
+    };
+    const NEXT: Action = Action::Next {
+        adopt_fence_token: None,
+    };
 
     #[test]
     fn a_fence_this_rollout_did_not_open_is_refused_not_adopted() {
@@ -2470,7 +2542,7 @@ esac"#,
         let other = "f".repeat(32);
         let marker = f.p("authority/writer-fence.json");
         fs::write(&marker, json!({ "token": other }).to_string()).unwrap();
-        let error = f.rollout().run(Action::Fence).unwrap_err().to_string();
+        let error = f.rollout().run(FENCE).unwrap_err().to_string();
         assert!(error.contains("did not open"), "{error}");
         // The refusal precedes every side effect, so production is untouched
         // and nothing is left for `abort` to unwind.
@@ -2496,18 +2568,104 @@ esac"#,
             format!("port = 5432\n# harbor-db-writer-fence={other}\n"),
         )
         .unwrap();
-        let error = f.rollout().run(Action::Fence).unwrap_err().to_string();
+        let error = f.rollout().run(FENCE).unwrap_err().to_string();
         assert!(error.contains(&other), "{error}");
         untouched(&f);
-        // A fence this rollout recorded opening (then crashed before recording
-        // its token) is resumed, not refused.
-        fs::remove_file(f.p("data/postgresql.auto.conf")).unwrap();
+        // The adoption flag never overrides a fence this rollout did not try to open.
+        let error = f
+            .rollout()
+            .run(Action::Fence {
+                adopt_fence_token: Some(other.clone()),
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("applies only"), "{error}");
+        untouched(&f);
+    }
+
+    /// Killed after recording the opening intent but before the token: Harbor
+    /// mints tokens, so a live fence then is adopted only explicitly.
+    fn interrupted_opening(f: &Fixture, live: Option<&str>) -> Rollout {
         let rollout = f.rollout();
         let mut journal = rollout.bound().unwrap();
+        journal.startup_token = Some(TOKEN.into());
         journal.fence_opening = true;
         rollout.save(&journal).unwrap();
-        fs::write(&marker, json!({ "token": TOKEN }).to_string()).unwrap();
-        assert_eq!(rollout.run(Action::Fence).unwrap()["fence_token"], TOKEN);
+        fs::write(
+            f.p("startup/inhibited.json"),
+            json!({ "token": TOKEN }).to_string(),
+        )
+        .unwrap();
+        if let Some(token) = live {
+            fs::write(
+                f.p("authority/writer-fence.json"),
+                json!({ "token": token }).to_string(),
+            )
+            .unwrap();
+        }
+        rollout
+    }
+
+    fn adopting(token: &str, abort: bool) -> Action {
+        let adopt_fence_token = Some(token.to_owned());
+        if abort {
+            Action::Abort { adopt_fence_token }
+        } else {
+            Action::Fence { adopt_fence_token }
+        }
+    }
+
+    #[test]
+    fn an_interrupted_fence_opening_adopts_a_live_fence_only_explicitly() {
+        // Nothing was opened: the retry opens a fresh fence, which is ours.
+        let f = Fixture::new(0);
+        let rollout = interrupted_opening(&f, None);
+        assert_eq!(rollout.run(FENCE).unwrap()["fence_token"], TOKEN);
+        for abort in [false, true] {
+            let f = Fixture::new(0);
+            let rollout = interrupted_opening(&f, Some(TOKEN));
+            let refused = |action: Action| rollout.run(action).unwrap_err().to_string();
+            let error = refused(if abort { NO_ADOPTION } else { FENCE });
+            assert!(
+                error.contains(&format!("--adopt-fence-token {TOKEN}"))
+                    && error.contains("no other coordinator"),
+                "{error}"
+            );
+            let error = refused(adopting(&"f".repeat(32), abort));
+            assert!(error.contains("cannot prove"), "{error}");
+            let calls = fs::read_to_string(f.p("calls.log")).unwrap_or_default();
+            assert!(!calls.contains("harbor fence-open"), "{calls}");
+            // A refusal leaves the primary as it found it.
+            assert!(!calls.contains("systemctl stop"), "{calls}");
+            let status = rollout.run(adopting(TOKEN, abort)).unwrap();
+            if abort {
+                assert_eq!(status["phase"], "aborted");
+                assert!(f.calls().contains("harbor fence-close"));
+            } else {
+                assert_eq!(status["fence_token"], TOKEN);
+            }
+            // A recorded token is never re-adopted.
+            let error = refused(adopting(TOKEN, abort));
+            assert!(error.contains("adopt-fence-token"), "{error}");
+        }
+    }
+
+    #[test]
+    fn declared_parents_are_provisioned_before_nested_children() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| {
+            m["prepare"]["provision_directories"] = json!([
+                {"path": f.p("export/evidence"), "group": "postgres", "mode": 0o700},
+                {"path": f.p("export"), "group": "users", "mode": 0o750},
+            ])
+        })
+        .unwrap();
+        rollout.provision_all().unwrap();
+        for (path, mode) in [("export", 0o750), ("export/evidence", 0o700)] {
+            let metadata = fs::symlink_metadata(f.p(path)).unwrap();
+            assert_eq!(metadata.mode() & 0o7777, mode, "{path}");
+            assert_eq!(metadata.uid(), euid(), "{path}");
+        }
     }
 
     #[test]
@@ -2517,7 +2675,7 @@ esac"#,
         fs::write(&lock, "").unwrap();
         let rollout = edit_manifest(&f, |m| m["execution_lock"] = json!(lock)).unwrap();
         let held = durable::lock(&lock, false, false).unwrap();
-        let error = rollout.run(Action::Fence).unwrap_err().to_string();
+        let error = rollout.run(FENCE).unwrap_err().to_string();
         assert!(
             error.contains("execution lock") && error.contains(&std::process::id().to_string()),
             "{error}"
@@ -2525,7 +2683,7 @@ esac"#,
         assert!(!f.p("calls.log").exists(), "no step ran without the lock");
         assert_eq!(rollout.status().unwrap()["phase"], "idle");
         drop(held);
-        assert_eq!(rollout.run(Action::Fence).unwrap()["phase"], "fenced");
+        assert_eq!(rollout.run(FENCE).unwrap()["phase"], "fenced");
     }
 
     #[test]
@@ -2539,7 +2697,7 @@ esac"#,
                 .get_args()
                 .any(|arg| arg == unit.as_str())
         );
-        rollout.run(Action::Fence).unwrap();
+        rollout.run(FENCE).unwrap();
         // An orphaned worker from an interrupted run is still preparing.
         fs::write(f.p("units").join(PREPARE_UNIT), "active").unwrap();
         fs::write(f.p("units/r.service"), "inactive").unwrap();
@@ -2629,7 +2787,7 @@ esac"#,
     fn an_unwinding_retry_never_restarts_the_reopened_primary() {
         let f = Fixture::new(0);
         let rollout = f.rollout();
-        rollout.run(Action::Fence).unwrap();
+        rollout.run(FENCE).unwrap();
         // A client fails to start after the fence is already closed.
         let systemctl = fail_start(&f, "a.service");
         assert!(rollout.run(NO_ADOPTION).is_err());
@@ -2650,7 +2808,7 @@ esac"#,
     fn activated_and_thaw_require_the_running_generation_to_carry_the_manifest() {
         let f = Fixture::new(0);
         let rollout = f.rollout();
-        rollout.run(Action::Fence).unwrap();
+        rollout.run(FENCE).unwrap();
         let mut journal = rollout.journal().unwrap().unwrap();
         journal.phase = Phase::Adopted;
         rollout.save(&journal).unwrap();
@@ -2680,7 +2838,7 @@ esac"#,
     fn a_lost_journal_is_aborted_only_by_explicitly_adopting_the_live_fence() {
         let f = Fixture::new(0);
         let rollout = edit_manifest(&f, |m| m["receiver_units"] = json!(["r.service"])).unwrap();
-        rollout.run(Action::Fence).unwrap();
+        rollout.run(FENCE).unwrap();
         fs::write(f.p("units/r.service"), "inactive").unwrap();
         fs::remove_file(f.p("state/rollout.json")).unwrap();
         let error = rollout.run(NO_ADOPTION).unwrap_err().to_string();
@@ -2782,7 +2940,7 @@ esac"#,
     fn deliberate_starts_clear_the_systemd_start_limit() {
         let f = Fixture::new(0);
         let rollout = edit_manifest(&f, |m| m["receiver_units"] = json!(["r.service"])).unwrap();
-        rollout.run(Action::Fence).unwrap();
+        rollout.run(FENCE).unwrap();
         fs::write(f.p("units/r.service"), "inactive").unwrap();
         let mut journal = rollout.journal().unwrap().unwrap();
         journal.pending_receivers = vec!["r.service".into()];
@@ -2802,7 +2960,7 @@ esac"#,
     fn a_finished_abort_is_archived_so_the_candidate_can_start_again() {
         let f = Fixture::new(0);
         let rollout = f.rollout();
-        rollout.run(Action::Fence).unwrap();
+        rollout.run(FENCE).unwrap();
         let aborted = rollout.run(NO_ADOPTION).unwrap();
         assert!(
             aborted["next"].as_str().unwrap().contains("archives"),
@@ -2811,11 +2969,11 @@ esac"#,
         // An abort whose fence is held again is not fully unwound.
         let marker = f.p("authority/writer-fence.json");
         fs::write(&marker, json!({ "token": "f".repeat(32) }).to_string()).unwrap();
-        let error = rollout.run(Action::Fence).unwrap_err().to_string();
+        let error = rollout.run(FENCE).unwrap_err().to_string();
         assert!(error.contains("not fully unwound"), "{error}");
         assert!(rollout.archives().unwrap().is_empty());
         fs::remove_file(&marker).unwrap();
-        assert_eq!(rollout.run(Action::Fence).unwrap()["phase"], "fenced");
+        assert_eq!(rollout.run(FENCE).unwrap()["phase"], "fenced");
         let archives = rollout.archives().unwrap();
         assert_eq!(archives.len(), 1, "{archives:?}");
         let archived = durable::read_json(&f.p("state").join(&archives[0])).unwrap();
@@ -2831,7 +2989,7 @@ esac"#,
         })
         .unwrap();
         fs::write(f.p("units/idle-pub.service"), "inactive").unwrap();
-        rollout.run(Action::Fence).unwrap();
+        rollout.run(FENCE).unwrap();
         assert_eq!(f.unit("pub.service"), "inactive");
         let journal = rollout.journal().unwrap().unwrap();
         assert_eq!(journal.stopped_publishers, ["pub.service"]);
@@ -2907,7 +3065,7 @@ esac"#,
         let f = Fixture::new(0);
         let rollout = f.rollout();
         assert!(rollout.activation_check().is_ok(), "no rollout");
-        rollout.run(Action::Fence).unwrap();
+        rollout.run(FENCE).unwrap();
         let mut journal = rollout.journal().unwrap().unwrap();
         for phase in [Phase::Fenced, Phase::Prepared, Phase::Imported] {
             journal.phase = phase;
@@ -2976,7 +3134,7 @@ esac"#,
     fn a_thawed_journal_is_archived_so_a_new_generation_can_roll_out() {
         let f = Fixture::new(0);
         let rollout = f.rollout();
-        rollout.run(Action::Fence).unwrap();
+        rollout.run(FENCE).unwrap();
         // The thaw closed the fence and reopened under the old manifest.
         let mut journal = rollout.journal().unwrap().unwrap();
         journal.phase = Phase::Thawed;
@@ -2984,7 +3142,7 @@ esac"#,
         rollout.save(&journal).unwrap();
         fs::remove_file(f.p("authority/writer-fence.json")).unwrap();
         let next = f.load(&f.manifest("next.json", 5)).unwrap();
-        let status = next.run(Action::Fence).unwrap();
+        let status = next.run(FENCE).unwrap();
         assert_eq!(status["phase"], "fenced");
         assert_eq!(status["manifest_sha256"], next.digest);
         let archives = next.archives().unwrap();
@@ -3059,7 +3217,7 @@ esac"#,
             return;
         }
         let f = Fixture::new(0);
-        f.rollout().run(Action::Fence).unwrap();
+        f.rollout().run(FENCE).unwrap();
         fs::set_permissions(f.p("state"), fs::Permissions::from_mode(0o000)).unwrap();
         let status = f.rollout().status();
         fs::set_permissions(f.p("state"), fs::Permissions::from_mode(0o700)).unwrap();
