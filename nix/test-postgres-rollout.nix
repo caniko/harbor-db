@@ -354,7 +354,8 @@ in
           primary.succeed(f"mkdir -p /run/systemd/system/{unit}.d; printf {shlex.quote(text)} > /run/systemd/system/{unit}.d/fault.conf; systemctl daemon-reload")
 
       def clear_drop_in(unit):
-          primary.succeed(f"rm -r /run/systemd/system/{unit}.d; systemctl daemon-reload; systemctl reset-failed {unit}")
+          # An inactive unit nothing references is unloaded; only a failed one needs resetting.
+          primary.succeed(f"rm -r /run/systemd/system/{unit}.d; systemctl daemon-reload; if systemctl is-failed --quiet {unit}; then systemctl reset-failed {unit}; fi")
 
       def primary_pid():
           return primary.succeed("systemctl show postgresql.service -p MainPID --value").strip()
