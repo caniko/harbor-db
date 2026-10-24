@@ -604,12 +604,14 @@ in
           assert step(certify(step("status")["export"], "second"))["phase"] == "imported"
           assert step("next")["phase"] == "adopted"
           # Activated as `nixos-rebuild switch` does: the candidate becomes the
-          # boot default too.
+          # system profile, the boot default Harbor reads. The VM has no
+          # installable boot loader (grub-install refuses its disk), so each
+          # profile change is activated with `test`.
           profile = "/nix/var/nix/profiles/system"
           # The specialisation's own toplevel: nix-env would truncate a path
           # inside the base toplevel to the base itself.
           toplevel = primary.succeed(f"readlink -f {candidate}").strip()
-          primary.succeed(f"nix-env -p {profile} --set {toplevel}; {toplevel}/bin/switch-to-configuration switch")
+          primary.succeed(f"nix-env -p {profile} --set {toplevel}; {toplevel}/bin/switch-to-configuration test")
           assert primary.succeed(f"readlink -f {profile}/etc/harbor-db/postgresql-rollout.json").strip() == manifest
           assert step("activated")["phase"] == "activated"
           # A generation without the coordinator may roll it back; thaw is then
@@ -619,7 +621,7 @@ in
           refused("abort", "still the boot default")
           # Rolled back to the legacy generation as the boot default (what
           # `nixos-rebuild switch --rollback` does); the host booted it too.
-          primary.succeed(f"nix-env -p {profile} --set {base}; {base}/bin/switch-to-configuration switch")
+          primary.succeed(f"nix-env -p {profile} --set {base}; {base}/bin/switch-to-configuration test")
           assert primary.succeed(f"readlink -f {profile}").strip() == base
           assert primary.succeed("readlink -f /run/booted-system").strip() == base
           assert step("abort")["phase"] == "aborted"
