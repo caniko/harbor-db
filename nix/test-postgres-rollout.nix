@@ -606,7 +606,11 @@ in
           # Activated as `nixos-rebuild switch` does: the candidate becomes the
           # boot default too.
           profile = "/nix/var/nix/profiles/system"
-          primary.succeed(f"nix-env -p {profile} --set {candidate}; {candidate}/bin/switch-to-configuration switch")
+          # The specialisation's own toplevel: nix-env would truncate a path
+          # inside the base toplevel to the base itself.
+          toplevel = primary.succeed(f"readlink -f {candidate}").strip()
+          primary.succeed(f"nix-env -p {profile} --set {toplevel}; {toplevel}/bin/switch-to-configuration switch")
+          assert primary.succeed(f"readlink -f {profile}/etc/harbor-db/postgresql-rollout.json").strip() == manifest
           assert step("activated")["phase"] == "activated"
           # A generation without the coordinator may roll it back; thaw is then
           # refused, and abort too while the candidate would still boot next.
