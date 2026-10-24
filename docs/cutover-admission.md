@@ -328,7 +328,9 @@ Exclusion and recovery:
   directories to be pairwise disjoint. The only intended nestings are a
   provisioned directory inside a writable path or inside another provisioned
   one (evidence in its backup root), and the export root inside a writable
-  path. The recovery evidence directories (snapshot, receipt and off-host
+  path. Such an export root is written through that root; only one outside
+  every writable root is its own sandbox entry, and its ancestry must then be
+  modifiable only by root. The recovery evidence directories (snapshot, receipt and off-host
   receipt), the recovery backup root (which the backup command fills) and the
   provisioned directories must lie inside the writable paths.
 - **Root writes.** Root never resolves a pathname below a directory another
@@ -392,6 +394,9 @@ Exclusion and recovery:
   snapshot must be bound to this rollout's fence and `preparation.json` must
   be its backup binding. Stale evidence is never moved implicitly: move it
   aside first.
+- **Receipt size.** Transported and staged receipts are bounded by the
+  recovery importer's own 16 MiB limit; Harbor's small control records and the
+  acceptance by 1 MiB.
 - **Pinned reads.** Files other writers control (a transported receipt, the
   acceptance, preparation evidence, Harbor's fence selector and records) are
   read through one descriptor opened without following a symlink or blocking,

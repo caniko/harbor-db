@@ -1171,6 +1171,9 @@ pub fn live_check(config: &Value, socket: &Path, port: u16, now: Option<i64>) ->
 }
 /// Root pins a trusted transported receipt before systemd snapshots it. The
 /// destination is a fresh private root-controlled file, never a worker pathname.
+/// The largest off-host receipt staging (and the rollout coordinator) accepts.
+pub(crate) const MAX_OFF_HOST_RECEIPT_BYTES: u64 = 16 << 20;
+
 pub fn stage_off_host_import(incoming: &Path, destination: &Path) -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         return Err(invalid("off-host receipt staging requires root"));
@@ -1192,16 +1195,16 @@ pub fn stage_off_host_import(incoming: &Path, destination: &Path) -> Result<()> 
     }
     let mut source = super::application_publication::credential_source(incoming)?;
     let info = source.metadata()?;
-    if info.nlink() != 1 || info.len() > 16 << 20 {
+    if info.nlink() != 1 || info.len() > MAX_OFF_HOST_RECEIPT_BYTES {
         return Err(invalid(
             "off-host import receipt must be a bounded single-link regular file",
         ));
     }
     let mut bytes = Vec::new();
     Read::by_ref(&mut source)
-        .take((16 << 20) + 1)
+        .take(MAX_OFF_HOST_RECEIPT_BYTES + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > 16 << 20 {
+    if bytes.len() as u64 > MAX_OFF_HOST_RECEIPT_BYTES {
         return Err(invalid("off-host import receipt exceeds the byte limit"));
     }
     // Publish only complete bytes: write and sync a private temporary beside

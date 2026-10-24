@@ -14,7 +14,9 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const PAUSE_DROP_IN: &str = "zz-harbor-db-rollout-pause.conf";
-const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
+/// Harbor's control records and the acceptance (receipts take recovery's
+/// own, larger bound).
+const MAX_RECORD_BYTES: u64 = 1024 * 1024;
 /// Record snapshots carry per-table records; still bounded.
 const MAX_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 /// The journal root is fixed, so every manifest of a primary (including a
@@ -471,7 +473,8 @@ fn read_pinned(path: &Path, limit: u64) -> Result<(fs::Metadata, Vec<u8>)> {
 /// A transported receipt: a private mode-0600 regular file, read pinned.
 pub(crate) fn receipt_bytes(path: &Path) -> Result<Vec<u8>> {
     let not_private = || invalid("transported receipt must be a private mode-0600 regular file");
-    let (metadata, bytes) = read_pinned(path, MAX_RECEIPT_BYTES).map_err(|_| not_private())?;
+    let (metadata, bytes) = read_pinned(path, super::recovery::MAX_OFF_HOST_RECEIPT_BYTES)
+        .map_err(|_| not_private())?;
     if metadata.mode() & 0o777 != 0o600 {
         return Err(not_private());
     }
@@ -1090,12 +1093,30 @@ impl Rollout {
         Ok(())
     }
 
+    /// Directories that may hold further worker paths whatever their owner:
+    /// the declared provisioned ones and writable roots (postgres may own
+    /// them; what root writes or reads below them is pinned no-follow).
+    fn writable_roots(&self) -> Vec<&Path> {
+        let prepare = &self.manifest.prepare;
+        (prepare.provision_directories.iter())
+            .map(|directory| directory.path.as_path())
+            .chain(prepare.read_write_paths.iter().map(PathBuf::as_path))
+            .collect()
+    }
+
+    /// The export root inside a writable root is writable through it; only
+    /// one outside every writable root is its own sandbox entry.
+    fn export_sandboxed(&self) -> bool {
+        let prepare = &self.manifest.prepare;
+        !(prepare.read_write_paths.iter()).any(|root| prepare.export_root.starts_with(root))
+    }
+
     /// systemd resolves symlinks in the worker's sandbox paths, granting the
     /// target write access: every one must lie on a chain no one else can swap.
     fn check_sandbox_paths(&self) -> Result<()> {
         let prepare = &self.manifest.prepare;
         for path in (prepare.read_write_paths.iter())
-            .chain([&prepare.export_root])
+            .chain(self.export_sandboxed().then_some(&prepare.export_root))
             .chain(&prepare.required_mounts)
         {
             self.walk(path, &[], None)?;
@@ -1448,7 +1469,7 @@ impl Rollout {
         if !writer_fence::exists(&path) {
             return Ok(None);
         }
-        let record = codec::decode(&read_pinned(&path, MAX_RECEIPT_BYTES)?.1)?;
+        let record = codec::decode(&read_pinned(&path, MAX_RECORD_BYTES)?.1)?;
         Ok(Some(super::string(&record, "token")?.to_owned()))
     }
 
@@ -1458,7 +1479,7 @@ impl Rollout {
         // Both live in postgres-writable storage: read pinned and bounded.
         let marker = writer_fence::marker(&self.maintenance)?;
         if writer_fence::exists(&marker) {
-            let record = codec::decode(&read_pinned(&marker, MAX_RECEIPT_BYTES)?.1)?;
+            let record = codec::decode(&read_pinned(&marker, MAX_RECORD_BYTES)?.1)?;
             return Ok(Some(super::string(&record, "token")?.to_owned()));
         }
         let auto =
@@ -1466,7 +1487,7 @@ impl Rollout {
         if !writer_fence::exists(&auto) {
             return Ok(None);
         }
-        let bytes = read_pinned(&auto, MAX_RECEIPT_BYTES)?.1;
+        let bytes = read_pinned(&auto, MAX_RECORD_BYTES)?.1;
         Ok(bytes
             .split(|b| *b == b'\n')
             .find_map(|line| line.strip_prefix(b"# harbor-db-writer-fence="))
@@ -1752,6 +1773,9 @@ impl Rollout {
         let holders: Vec<&Path> = (prepare.provision_directories.iter())
             .map(|directory| directory.path.as_path())
             .collect();
+        // Walked below declared directories and writable roots, whatever
+        // their owner (postgres may own them).
+        let roots = self.writable_roots();
         let worker = self.service_identity(true)?;
         let harbor = self.service_identity(false)?;
         let authority = Path::new(super::string(&self.maintenance, "state_dir")?);
@@ -1763,7 +1787,7 @@ impl Rollout {
             .chain([(authority, "postgres", 0o700, &harbor)]);
         for (path, group, mode, identity) in provisioned {
             let (uid, gid) = self.provision_owner(group)?;
-            if let Some((_, metadata)) = self.walk(path, &holders, None)?
+            if let Some((_, metadata)) = self.walk(path, &roots, None)?
                 && (metadata.uid(), metadata.gid(), metadata.mode() & 0o7777) != (uid, gid, mode)
             {
                 return Err(invalid(format!(
@@ -1777,9 +1801,6 @@ impl Rollout {
         // Every directory the worker writes is reached without a redirected
         // component (walked no-follow below its writable root, which postgres
         // may own) and is writable by the worker.
-        let roots: Vec<&Path> = (holders.iter().copied())
-            .chain(prepare.read_write_paths.iter().map(PathBuf::as_path))
-            .collect();
         for path in (prepare.read_write_paths.iter().cloned())
             .chain(recovery_directories(&self.maintenance))
             .chain([prepare.export_root.clone()])
@@ -1796,9 +1817,6 @@ impl Rollout {
                     )));
                 }
             }
-        }
-        if !holders.contains(&prepare.export_root.as_path()) {
-            self.walk(&prepare.export_root, &holders, None)?;
         }
         Ok(())
     }
@@ -1910,12 +1928,11 @@ impl Rollout {
     fn provision(&self, path: &Path, group: &str, mode: u32) -> Result<()> {
         // Never provision on the root filesystem below an absent mount.
         self.require_covering_mounts(path)?;
-        // A declared directory may hold further ones (an evidence directory in
-        // its backup root): those are made by mkdir inside it and adjusted
-        // through a no-follow descriptor, so its owner cannot redirect them.
-        let holders: Vec<&Path> = (self.manifest.prepare.provision_directories.iter())
-            .map(|directory| directory.path.as_path())
-            .collect();
+        // A declared directory or writable root may hold further ones (an
+        // evidence directory in its backup root): those are made by mkdir
+        // inside it and adjusted through a no-follow descriptor, so its owner
+        // cannot redirect them.
+        let holders = self.writable_roots();
         let owner = self.provision_owner(group)?;
         let parent_path =
             (path.parent()).ok_or_else(|| invalid("provisioned directory has no parent"))?;
@@ -2077,7 +2094,7 @@ impl Rollout {
         }
         // The worker publishes the hand-off export under the export root.
         let mut writable = prepare.read_write_paths.clone();
-        if !writable.contains(&prepare.export_root) {
+        if self.export_sandboxed() {
             writable.push(prepare.export_root.clone());
         }
         command.arg(format!("--property=ReadWritePaths={}", join(&writable)));
@@ -2260,8 +2277,12 @@ impl Rollout {
         let unavailable = || {
             invalid("recovery preparation failed; retain the writer window and inspect its unit")
         };
-        let (directory, _) =
-            (self.walk(&export, &[root.as_path()], None)?).ok_or_else(unavailable)?;
+        let (directory, _) = (self.walk(
+            &export,
+            &[self.writable_roots(), vec![root.as_path()]].concat(),
+            None,
+        )?)
+        .ok_or_else(unavailable)?;
         let mut plan = open_at(
             &directory,
             "recovery-export.json".as_ref(),
@@ -2339,7 +2360,7 @@ impl Rollout {
     fn settle_prepared(&self, journal: &mut Journal) -> Result<()> {
         // Postgres-written evidence: read pinned and bounded.
         let evidence = self.evidence_dir()?.join("preparation.json");
-        let preparation = codec::decode(&read_pinned(&evidence, MAX_RECEIPT_BYTES)?.1)?;
+        let preparation = codec::decode(&read_pinned(&evidence, MAX_RECORD_BYTES)?.1)?;
         self.require_bound_evidence(journal)?;
         let (export, digest) = self.reported_export(&preparation)?;
         journal.export_sha256 = Some(digest);
@@ -2389,7 +2410,7 @@ impl Rollout {
         self.walk(directory, &[], Some(0o700))?;
         if let Ok(metadata) = fs::symlink_metadata(slot) {
             trusted_file(&metadata, slot, euid())?;
-            let staged = read_pinned(slot, MAX_RECEIPT_BYTES)?.1;
+            let staged = read_pinned(slot, super::recovery::MAX_OFF_HOST_RECEIPT_BYTES)?.1;
             let digest = codec::digest(&staged);
             if digest != expected {
                 if journal.receipt_sha256.as_deref() != Some(digest.as_str()) {
@@ -2615,7 +2636,7 @@ impl Rollout {
         // that could be swapped (or a FIFO opened) between checks and reads.
         let not_root_owned = || invalid("acceptance must be a root-owned mode-0600 regular file");
         let (metadata, bytes) =
-            read_pinned(acceptance, MAX_RECEIPT_BYTES).map_err(|_| not_root_owned())?;
+            read_pinned(acceptance, MAX_RECORD_BYTES).map_err(|_| not_root_owned())?;
         if metadata.uid() != 0 {
             return Err(not_root_owned());
         }
@@ -2834,7 +2855,7 @@ impl Rollout {
             Ok(metadata) => metadata,
         };
         trusted_file(&metadata, slot, euid())?;
-        let bytes = read_pinned(slot, MAX_RECEIPT_BYTES)?.1;
+        let bytes = read_pinned(slot, super::recovery::MAX_OFF_HOST_RECEIPT_BYTES)?.1;
         if codec::digest(&bytes) == recorded {
             durable::atomic_write_mode(&self.state.join(RETIRED_RECEIPT), &bytes, 0o600)?;
         } else {
@@ -6143,6 +6164,75 @@ touch {admitted}"#,
         assert_eq!(starts(), 1);
         assert_eq!(f.unit("a.service"), "active");
         assert_eq!(f.unit("once.service"), "inactive");
+    }
+
+    #[test]
+    fn receipts_take_the_recovery_importers_bound() {
+        let f = Fixture::new(0);
+        // A JSON object of exactly `len` bytes.
+        let receipt = |len: u64| format!(r#"{{"p":"{}"}}"#, "x".repeat(len as usize - 8));
+        let private = |path: &Path, bytes: &str| {
+            fs::write(path, bytes).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        let limit = super::super::recovery::MAX_OFF_HOST_RECEIPT_BYTES;
+        private(&f.p("over-limit.json"), &receipt(limit + 1));
+        assert!(receipt_bytes(&f.p("over-limit.json")).is_err());
+        // Just over the old 1 MiB cap: read in transport and from the slot.
+        let large = receipt((1 << 20) + 1);
+        private(&f.p("receipt.json"), &large);
+        assert_eq!(
+            receipt_bytes(&f.p("receipt.json")).unwrap().len(),
+            (1 << 20) + 1
+        );
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        staged(&f, &rollout, "import/receipt.json", large.as_bytes());
+        let error = (rollout.run(Action::Import {
+            receipt: f.p("receipt.json"),
+            sha256: codec::digest(large.as_bytes()),
+        }))
+        .unwrap_err()
+        .to_string();
+        // Past both reads, the (fake) worker simply does not admit it.
+        assert!(error.contains("not admitted"), "{error}");
+    }
+
+    #[test]
+    fn an_export_root_inside_a_writable_root_is_written_through_it() {
+        let f = Fixture::new(0);
+        fs::create_dir_all(f.p("vault/export/backup-1")).unwrap();
+        let rollout = edit_manifest(&f, |m| {
+            m["prepare"]["read_write_paths"] = json!([f.p("evidence"), f.p("vault")]);
+            m["prepare"]["export_root"] = json!(f.p("vault/export"));
+        })
+        .unwrap();
+        rollout.run(FENCE).unwrap();
+        // Preparation hands off from the nested export root.
+        fs::write(
+            f.p("evidence/preparation.json"),
+            r#"{"backup_id":"backup-1"}"#,
+        )
+        .unwrap();
+        let records = json!({"backup_id": "backup-1", "version": 1, "writer_fence_token": TOKEN});
+        fs::write(f.p("evidence/records.json"), records.to_string()).unwrap();
+        fs::write(f.p("vault/export/backup-1/recovery-export.json"), "{}").unwrap();
+        let status = rollout.run(Action::Prepare).unwrap();
+        assert_eq!(status["phase"], "prepared");
+        assert_eq!(status["export"], json!(f.p("vault/export/backup-1")));
+        // systemd binds the writable root: the nested export root is no
+        // separate sandbox entry (whose path systemd would resolve itself).
+        let property = format!(
+            "--property=ReadWritePaths={} {}",
+            f.p("evidence").display(),
+            f.p("vault").display()
+        );
+        let command = rollout.preparation_command(false);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        assert!(args.iter().any(|arg| *arg == property), "{args:?}");
     }
 
     #[test]
