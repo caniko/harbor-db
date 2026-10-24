@@ -82,8 +82,9 @@
     rm -rf "$out.tmp"
     mkdir "$out.tmp"
     # Byte-reproducible: the import's preparation reruns the exporter, and the
-    # coordinator admits only an unchanged certified hand-off.
-    tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+    # coordinator admits only an unchanged certified hand-off. Source mtimes
+    # are kept: the executor checks the backup manifest's age.
+    tar --sort=name --owner=0 --group=0 --numeric-owner \
       -C /srv -cf "$out.tmp/export.tar" backup/base backup/wal backup/LAST_SUCCESS evidence/records.json
     # The test's trigger makes a rerun rewrite the hand-off.
     rewritten=$([ -e /run/fixture-rewrite-export ] && echo true || echo false)
