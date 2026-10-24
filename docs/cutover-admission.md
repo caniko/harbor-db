@@ -371,7 +371,10 @@ Exclusion and recovery:
     mountpoint, is never re-owned) or is creatable under trusted ancestry;
   - every writable path, evidence directory, the recovery backup root and the
     export root exists or is provisioned (systemd fails a missing writable
-    path, and Harbor creates no evidence directory);
+    path, and Harbor creates no evidence directory), is reached without a
+    redirected component (walked no-follow below its writable root, which
+    postgres may own) and is writable by the worker's uid or groups (mode bits;
+    ACLs are not considered);
   - every directory postgres must traverse to reach these grants it search
     permission;
   - every writable sandbox path, the export root and the required mounts lie
@@ -419,6 +422,8 @@ Exclusion and recovery:
   the candidate removed, or only it brings) is skipped, as the pause and the
   primary's stop skip it, and listed in the journal's `unloaded`. A queued job
   reads as an empty `Job` value; `0` (the D-Bus no-job id) counts as none.
+  Each unit started (or skipped) is journaled at once, so a retried unwind
+  restarts only what failed, never a oneshot that already ran.
   Only the primary's start waits, for readiness and its setup units.
 - **Hard dependents.** Before every primary stop, the unsettled services in
   its reverse Requires/BindsTo closure (through targets such as

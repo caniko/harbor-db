@@ -6980,6 +6980,7 @@ selectors = [
   "hints_never_offer_a_step_the_journal_refuses",
   "clients_whose_start_the_fence_skipped_are_started_when_it_reopens",
   "a_finished_rollout_is_archived_only_explicitly_and_never_refenced_by_next",
+  "a_retried_unwind_never_restarts_a_client_it_already_started",
   "activation_is_refused_between_fence_and_adoption",
   "a_never_loaded_or_collected_worker_is_idle_whatever_its_state_reads",
   "sandbox_and_provisioned_paths_never_resolve_through_a_swappable_component",

@@ -141,6 +141,10 @@ pub struct Journal {
     /// Publishers that were running when paused; restarted after the pause.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stopped_publishers: Vec<String>,
+    /// Recorded clients the unwind still has to restart: each leaves once
+    /// started, so a retry never restarts a finished oneshot client.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_clients: Vec<String>,
     /// Units to restore that the running generation does not load (removed
     /// by the candidate, or only it brings them): skipped, not retried.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -367,6 +371,30 @@ fn dedicated(path: &Path) -> bool {
 
 fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
+}
+
+/// Whether `identity` may write the directory `metadata` describes (read
+/// through its no-follow descriptor). POSIX mode bits only: ACLs are not
+/// considered.
+fn require_writable(
+    metadata: &fs::Metadata,
+    path: &Path,
+    (uid, groups): &(u32, Vec<u32>),
+) -> Result<()> {
+    let write = if metadata.uid() == *uid {
+        0o200
+    } else if groups.contains(&metadata.gid()) {
+        0o020
+    } else {
+        0o002
+    };
+    if metadata.mode() & write == 0 {
+        return Err(invalid(format!(
+            "{} is not writable by postgres, so the preparation worker would fail after the fence; grant it write permission first",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// A local executable a step runs: a regular file of the immutable store
@@ -897,6 +925,7 @@ impl Rollout {
             acceptance_sha256: None,
             pending_receivers: Vec::new(),
             stopped_publishers: Vec::new(),
+            pending_clients: Vec::new(),
             unloaded: Vec::new(),
             inhibiting: false,
             fence_opening: false,
@@ -1603,7 +1632,7 @@ impl Rollout {
         if lifted {
             self.systemctl(&["daemon-reload"])?;
         }
-        let restarted = self.restart(&mut journal.stopped_publishers, &mut journal.unloaded);
+        let restarted = self.restart(journal, |journal| &mut journal.stopped_publishers);
         self.save(journal)?;
         restarted
     }
@@ -1745,17 +1774,27 @@ impl Rollout {
             }
             self.require_traversable(path, identity)?;
         }
+        // Every directory the worker writes is reached without a redirected
+        // component (walked no-follow below its writable root, which postgres
+        // may own) and is writable by the worker.
+        let roots: Vec<&Path> = (holders.iter().copied())
+            .chain(prepare.read_write_paths.iter().map(PathBuf::as_path))
+            .collect();
         for path in (prepare.read_write_paths.iter().cloned())
             .chain(recovery_directories(&self.maintenance))
             .chain([prepare.export_root.clone()])
         {
             self.require_traversable(&path, &worker)?;
-            if !holders.contains(&path.as_path()) && fs::symlink_metadata(&path).is_err() {
-                return Err(invalid(format!(
-                    "{} neither exists nor is provisioned, so the preparation worker would fail \
-                     after the fence; create it first",
-                    path.display()
-                )));
+            match self.walk(&path, &roots, None)? {
+                Some((_, metadata)) => require_writable(&metadata, &path, &worker)?,
+                // Provisioned with the worker as owner before it starts.
+                None if holders.contains(&path.as_path()) => {}
+                None => {
+                    return Err(invalid(format!(
+                        "{} neither exists nor is provisioned, so the preparation worker would fail after the fence; create it first",
+                        path.display()
+                    )));
+                }
             }
         }
         if !holders.contains(&prepare.export_root.as_path()) {
@@ -2080,28 +2119,35 @@ impl Rollout {
         if self.preparing()? {
             return Err(invalid(BUSY));
         }
-        let restarted = self.restart(&mut journal.pending_receivers, &mut journal.unloaded);
+        let restarted = self.restart(journal, |journal| &mut journal.pending_receivers);
         self.save(journal)?;
         restarted
     }
 
-    /// Start every unit; those that fail stay listed for the next retry, and
-    /// those the running generation does not load move to `unloaded`.
-    fn restart(&self, units: &mut Vec<String>, unloaded: &mut Vec<String>) -> Result<()> {
+    /// Start every unit of the journal's `list`. Each one started (or not
+    /// loaded by the running generation, then moved to `unloaded`) leaves the
+    /// list and is journaled at once, so a retry never starts a finished
+    /// oneshot again; those that fail stay listed for the next retry.
+    fn restart(
+        &self,
+        journal: &mut Journal,
+        list: fn(&mut Journal) -> &mut Vec<String>,
+    ) -> Result<()> {
         let mut first = None;
-        units.retain(|unit| match self.start_queued(unit) {
-            Ok(true) => false,
-            Ok(false) => {
-                if !unloaded.contains(unit) {
-                    unloaded.push(unit.clone());
+        for unit in list(journal).clone() {
+            match self.start_queued(&unit) {
+                Ok(loaded) => {
+                    list(journal).retain(|listed| *listed != unit);
+                    if !loaded && !journal.unloaded.contains(&unit) {
+                        journal.unloaded.push(unit);
+                    }
+                    self.save(journal)?;
                 }
-                false
+                Err(error) => {
+                    first.get_or_insert(error);
+                }
             }
-            Err(error) => {
-                first.get_or_insert(error);
-                true
-            }
-        });
+        }
         first.map_or(Ok(()), Err)
     }
 
@@ -2484,19 +2530,21 @@ impl Rollout {
                 self.start_primary(false)?;
                 self.inspect_live()?;
             }
+            // Only the opening manifest unwinds, so its retirement policy
+            // decides which recorded clients this unwind restarts.
+            journal.pending_clients = (journal.clients.iter())
+                .filter(|unit| {
+                    !(self.manifest.retired_clients.iter())
+                        .any(|pattern| unit_matches(pattern, unit))
+                })
+                .cloned()
+                .collect();
             journal.reopened = true;
             self.save(journal)?;
         }
-        // Only the opening manifest unwinds, so its retirement policy decides.
         // Every client, receiver and publisher is tried before the first
         // failure is reported: one failing client must not keep the rest down.
-        let mut clients: Vec<String> = (journal.clients.iter())
-            .filter(|unit| {
-                !(self.manifest.retired_clients.iter()).any(|pattern| unit_matches(pattern, unit))
-            })
-            .cloned()
-            .collect();
-        let started = self.restart(&mut clients, &mut journal.unloaded);
+        let started = self.restart(journal, |journal| &mut journal.pending_clients);
         let receivers = self.restart_receivers(journal);
         let lifted = self.lift_pause(journal);
         started.and(receivers).and(lifted)
@@ -5328,7 +5376,33 @@ exit 1"#,
         let mode = |f: &Fixture, path: &str, mode: u32| {
             fs::set_permissions(f.p(path), fs::Permissions::from_mode(mode)).unwrap();
         };
-        let cases: [(&str, Setup, &str); 12] = [
+        let cases: [(&str, Setup, &str); 14] = [
+            // A writable path the worker cannot write (as a root 0755 one is).
+            (
+                "unwritable",
+                |f| {
+                    fs::create_dir(f.p("ro")).unwrap();
+                    fs::set_permissions(f.p("ro"), fs::Permissions::from_mode(0o555)).unwrap();
+                    json!({"read_write_paths": [f.p("evidence"), f.p("ro")]})
+                },
+                "not writable by postgres",
+            ),
+            // A recovery directory reached through a symlink below its
+            // writable root.
+            (
+                "redirected",
+                |f| {
+                    fs::create_dir_all(f.p("elsewhere/repository")).unwrap();
+                    fs::create_dir(f.p("vault")).unwrap();
+                    std::os::unix::fs::symlink(f.p("elsewhere"), f.p("vault/link")).unwrap();
+                    let path = f.p("maintenance.json");
+                    let mut maintenance = durable::read_json(&path).unwrap();
+                    maintenance["recovery"]["backup_root"] = json!(f.p("vault/link/repository"));
+                    fs::write(&path, maintenance.to_string()).unwrap();
+                    json!({"read_write_paths": [f.p("evidence"), f.p("vault")]})
+                },
+                "untrusted ancestry",
+            ),
             // A receipt left by another writer window, without its snapshot.
             (
                 "receipt",
@@ -6034,6 +6108,41 @@ touch {admitted}"#,
         rollout.run(FENCE).unwrap();
         let error = rollout.run(Action::Archive).unwrap_err().to_string();
         assert!(error.contains("not finished"), "{error}");
+    }
+
+    #[test]
+    fn a_retried_unwind_never_restarts_a_client_it_already_started() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| {
+            m["clients"] = json!(["a.service", "b.service", "once.service"])
+        })
+        .unwrap();
+        fs::write(f.p("units/once.service"), "active").unwrap();
+        rollout.run(FENCE).unwrap();
+        // a's start fails; once is a oneshot that runs and ends, after which
+        // a preparation worker appears, so every later unwind step refuses
+        // before saving: only once's own record survives.
+        let systemctl = fail_start(&f, "a.service");
+        inject(
+            &f,
+            "systemctl",
+            "[ \"$*\" = \"--no-block start -- once.service\" ] && { echo inactive > \"$u/once.service\"; \
+             echo active > \"$u/harbor-db-rollout-prepare.service\"; exit 0; }",
+        );
+        assert!(rollout.run(NO_ADOPTION).is_err());
+        let starts = || {
+            f.calls()
+                .matches("--no-block start -- once.service")
+                .count()
+        };
+        assert_eq!(starts(), 1);
+        // The retry repeats only the failed start.
+        fs::write(f.p("systemctl"), systemctl).unwrap();
+        fs::remove_file(f.p("units/harbor-db-rollout-prepare.service")).unwrap();
+        assert_eq!(rollout.run(NO_ADOPTION).unwrap()["phase"], "aborted");
+        assert_eq!(starts(), 1);
+        assert_eq!(f.unit("a.service"), "active");
+        assert_eq!(f.unit("once.service"), "inactive");
     }
 
     #[test]
