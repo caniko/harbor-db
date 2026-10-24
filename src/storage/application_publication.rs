@@ -478,6 +478,19 @@ with credential_source(alias) as stream: assert stream.read()==b'replacement cre
         fs::write(&source, b"changed after staging").unwrap();
         assert_eq!(fs::read(&output).unwrap(), b"root-transported receipt");
         assert!(stage_off_host_import(&source, &output).is_err());
+        // Published whole by a no-replace link of a synced temporary: the slot
+        // keeps its bytes, has one link, and no temporary is left beside it.
+        let entries = |directory: &Path| {
+            let mut names: Vec<String> = fs::read_dir(directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(entries(&root.path().join("private")), ["staged"]);
+        assert_eq!(fs::read(&output).unwrap(), b"root-transported receipt");
+        assert_eq!(fs::metadata(&output).unwrap().nlink(), 1);
         fs::set_permissions(&source, fs::Permissions::from_mode(0o666)).unwrap();
         assert!(stage_off_host_import(&source, &root.path().join("private/rejected")).is_err());
         assert!(!root.path().join("private/rejected").exists());
