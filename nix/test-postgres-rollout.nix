@@ -119,6 +119,11 @@
         ${maintenance} > "$workspace/config.json"
       exec ${certifyAt} "$workspace/config.json" "$workspace/backup" "$workspace/restore"
     '';
+  dependent = {
+    requires = ["postgresql.service"];
+    after = ["postgresql.service"];
+    serviceConfig.ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
+  };
   publisher.serviceConfig = {
     Type = "oneshot";
     RemainAfterExit = true;
@@ -137,9 +142,12 @@
   guarded = {config, ...}: let
     maintenance = config.environment.etc."harbor-db/postgresql.json".source;
   in {
+    # A client only the candidate brings: its start during activation is
+    # skipped by the fence's condition and resumed when the fence reopens.
+    systemd.services.fixture-candidate = client "candidate" // {wantedBy = ["multi-user.target"];};
     services.harbor-db.postgresql = {
       enable = true;
-      writerFence.blockedUnits = ["fixture-daemon.service"];
+      writerFence.blockedUnits = ["fixture-daemon.service" "fixture-candidate.service"];
       recovery = {
         systemIdentifier = identifier;
         requireWriterFence = true;
@@ -163,7 +171,7 @@
         offHostReceiptImportFile = "/var/lib/harbor-db/import/off-host.json";
       };
       rollout = {
-        clients = ["fixture-daemon.service"];
+        clients = ["fixture-daemon.service" "fixture-candidate.service"];
         retiredClients = ["fixture-retired.service"];
         receiverUnits = ["fixture-receiver.service"];
         pausedPublishers = ["fixture-publisher.service" "fixture-skipped.service" "fixture-conditional.service"];
@@ -186,7 +194,7 @@ in
       services.timesyncd.enable = lib.mkForce false;
       environment.systemPackages = [nativePackage pg pkgs.jq];
     };
-    nodes.primary = {
+    nodes.primary = {config, ...}: {
       imports = [./postgres-lifecycle.nix];
       _module.args.harborDbStoragePackage = nativePackage;
       virtualisation = {
@@ -220,12 +228,10 @@ in
         fixture-skipped = publisher;
         # Its own condition failed before the pause: never started by reopen.
         fixture-conditional = publisher // {unitConfig.ConditionPathExists = "/run/fixture-conditional";};
-        # An undeclared hard dependent the primary's stop takes down.
-        fixture-dependent = {
-          requires = ["postgresql.service"];
-          after = ["postgresql.service"];
-          serviceConfig.ExecStart = "${pkgs.coreutils}/bin/sleep infinity";
-        };
+        # Undeclared hard dependents the primary's stop takes down; only the
+        # legacy generation loads the legacy one.
+        fixture-dependent = dependent;
+        fixture-legacy = lib.mkIf (!config.services.harbor-db.postgresql.enable) dependent;
       };
       systemd.tmpfiles.rules = [
         "d ${data} 0700 postgres postgres -"
@@ -283,7 +289,7 @@ in
       primary.succeed("runuser -u postgres -- pg_resetwal -D ${data}")
       primary.succeed("systemctl start postgresql.service postgresql-setup.service")
       assert sql("SELECT system_identifier FROM pg_control_system()") == identifier
-      primary.succeed("systemctl start fixture-daemon fixture-retired fixture-receiver fixture-publisher fixture-dependent")
+      primary.succeed("systemctl start fixture-daemon fixture-retired fixture-receiver fixture-publisher fixture-dependent fixture-legacy")
       # Skipped by its own condition long before any pause.
       primary.succeed("systemctl start fixture-conditional.service")
       primary.succeed("test \"$(systemctl show fixture-conditional.service -p ConditionResult --value)\" = no")
@@ -323,13 +329,15 @@ in
           primary.succeed("test \"$(systemctl show fixture-publisher.service -p ConditionResult --value)\" = no")
           skip_publisher()
 
-      def reopened():
+      def reopened(legacy=False):
           primary.succeed("test ! -e /var/lib/harbor-db/postgresql/writer-fence.json")
           primary.succeed("test ! -e /var/lib/harbor-db/postgresql-startup/inhibited.json")
           sql("INSERT INTO retained VALUES ('probe')", user="application")
           # Recorded clients, the undeclared hard dependent and quiesced receivers
           # return; retired clients do not.
           active("fixture-daemon.service", "fixture-dependent.service", "fixture-receiver.service")
+          if legacy:
+              active("fixture-legacy.service")
           primary.fail("systemctl is-active fixture-retired.service")
           primary.succeed(f"test ! -e {pause}; test ! -e {state}/paused")
           # The publisher stopped by the pause and the one whose start it skipped
@@ -379,7 +387,7 @@ in
           skip_publisher()
           clear_drop_in("fixture-daemon.service")
           assert step("abort")["phase"] == "aborted"
-          reopened()
+          reopened(legacy=True)
 
       with subtest("a lost journal holding only startup inhibition is adopted by its token"):
           drop_in("fixture-daemon.service", "[Unit]\nRefuseManualStop=true\n")
@@ -391,7 +399,7 @@ in
           refused("abort", f"Harbor holds startup inhibition {startup}")
           refused("abort --adopt-startup-token " + "0" * 32, "differs")
           assert step(f"abort --adopt-startup-token {startup}")["phase"] == "aborted"
-          reopened()
+          reopened(legacy=True)
 
       with subtest("a fenced rollout holds the host lock and is aborted"):
           # A finished abort is archived; the same candidate starts afresh.
@@ -408,7 +416,7 @@ in
           assert step("status")["phase"] == "fenced"
           primary.succeed("systemctl stop fixture-lock-holder.service")
           assert step("abort")["phase"] == "aborted"
-          reopened()
+          reopened(legacy=True)
 
       with subtest("a lost journal is unwound only by adopting Harbor's fence"):
           assert step("fence")["phase"] == "fenced"
@@ -425,8 +433,8 @@ in
           refused("abort --adopt-fence-token " + "0" * 32, "differs")
           assert step(f"abort --adopt-fence-token {token}")["phase"] == "aborted"
           # The lost journal's stopped clients are the operator's to restart.
-          primary.succeed("systemctl start fixture-daemon.service fixture-dependent.service")
-          reopened()
+          primary.succeed("systemctl start fixture-daemon.service fixture-dependent.service fixture-legacy.service")
+          reopened(legacy=True)
 
       with subtest("an opening interrupted before its token is adopted only explicitly"):
           lock = "/var/lib/harbor-db/postgresql/writer-fence.lock"
@@ -447,10 +455,12 @@ in
           fenced()
           refused(f"abort --adopt-fence-token {token}", "records its fence")
           assert step("abort")["phase"] == "aborted"
-          reopened()
+          reopened(legacy=True)
 
       with subtest("the full rollout hands off to the executor and thaws"):
-          assert step("next")["phase"] == "fenced"
+          # `next` never re-fences a finished rollout; `fence` archives it first.
+          assert step("next")["phase"] == "aborted"
+          assert step("fence")["phase"] == "fenced"
           assert len(archived()) == 5
           # Only the opening manifest steps or unwinds the rollout, and it is
           # rooted against GC while the journal is open.
@@ -523,16 +533,15 @@ in
           # The legacy generation does not carry this manifest.
           refused("activated", "is not this manifest")
           primary.succeed(f"{candidate}/bin/switch-to-configuration test")
+          # The fence's condition skips a start of the client only the candidate brings.
+          primary.succeed("systemctl start fixture-candidate.service")
+          primary.succeed("test \"$(systemctl show fixture-candidate.service -p ConditionResult --value)\" = no")
           assert step("activated")["phase"] == "activated"
           refused("abort", "thaw with an acceptance")
-          journal = step("status")
-          acceptance = {
-              "version": 1, "status": "accepted", "host": "primary", "system_identifier": identifier,
-              "manifest_sha256": primary.succeed(f"sha256sum {manifest}").split()[0], "token": journal["fence_token"],
-              "snapshot_sha256": primary.succeed("sha256sum /srv/evidence/records.json").split()[0],
-          }
-          primary.succeed("install -d -m 0700 /root/acceptance; printf '%s' " + shlex.quote(json.dumps(acceptance)) + " > /root/acceptance/receipt.json; chmod 0600 /root/acceptance/receipt.json")
-          thaw = "thaw --acceptance /root/acceptance/receipt.json"
+          step("accept")
+          acceptance = f"{state}/acceptance.json"
+          assert f"--acceptance {acceptance}" in step("status")["next"]
+          thaw = f"thaw --acceptance {acceptance}"
           refused(thaw, f"--config {manifest}", config=other)
           # Its own condition now holds, yet it must stay down: it failed before the pause.
           primary.succeed("touch /run/fixture-conditional")
@@ -549,22 +558,60 @@ in
           primary.succeed("rm /run/fixture-conditional")
           assert int(sql("SELECT count(*) FROM retained WHERE id = 'daemon'")) == int(daemon_rows) + 1
           primary.succeed(f"test ! -e {slot}")
+          # The client the candidate introduced runs; the legacy-only dependent
+          # the candidate does not load is skipped and listed.
+          active("fixture-candidate.service")
+          journal = step("status")
+          assert "fixture-legacy.service" in journal.get("unloaded", []), journal
+          assert "rollout archive" in journal["next"], journal
 
-      with subtest("a thawed rollout lets other generations in and a second rollout starts clean"):
+      def certify(export, workspace):
+          export_root = posixpath.dirname(export)
+          primary.succeed(f"tar -C {export_root} -cf /tmp/export.tar base-1")
+          primary.copy_from_machine("/tmp/export.tar", workspace)
+          executor.copy_from_host(str(primary.out_dir / workspace / "export.tar"), f"/tmp/{workspace}.tar")
+          executor.succeed(f"install -d -o can -g users -m 0700 /home/can/{workspace}-export; tar -C /home/can/{workspace}-export -xf /tmp/{workspace}.tar; chown -R can:users /home/can/{workspace}-export")
+          align_receiver(executor, primary)
+          certified = json.loads(executor.succeed(f"runuser -u can -- harbor-db-postgres --config {manifest} rollout certify --export /home/can/{workspace}-export/base-1 --export-sha256 {step('status')['export_sha256']} --workspace /home/can/{workspace}"))
+          executor.copy_from_machine(certified["receipt"], workspace)
+          primary.copy_from_host(str(executor.out_dir / workspace / "off-host-recovery.json"), f"/root/{workspace}/off-host-recovery.json")
+          primary.succeed(f"chmod 0600 /root/{workspace}/off-host-recovery.json")
+          align_receiver(primary, executor)
+          return f"import --receipt /root/{workspace}/off-host-recovery.json --sha256 {certified['receipt_sha256']}"
+
+      with subtest("a thawed rollout is archived explicitly; a rolled-back one aborts"):
+          # `next` neither archives nor re-fences a finished rollout.
+          assert step("next")["phase"] == "thawed"
           primary.succeed(f"{base}/specialisation/plain/bin/switch-to-configuration test")
-          primary.succeed("systemctl start fixture-retired.service")
-          running = primary_pid()
-          # The thawed journal and its receipt are archived under one id, then
-          # the previous window's evidence is refused before any side effect.
-          refused("next", "another writer window")
+          assert step("archive")["phase"] == "idle"
           assert {"rollout.6.thawed.json", "rollout.6.receipt.json"} <= set(archived()), archived()
           primary.succeed(f"test ! -e {state}/rollout.json; test ! -e {gc_root}")
+          # The previous window's evidence is refused before any side effect,
+          # receipts without their snapshot included.
+          running = primary_pid()
+          refused("fence", "another writer window")
           assert primary_pid() == running
           active("fixture-daemon.service", "fixture-dependent.service")
           primary.succeed("install -d -m 0700 /root/stale; mv /srv/evidence/records.json /srv/evidence/preparation.json /root/stale/")
-          assert step("next")["phase"] == "fenced"
+          refused("fence", "/srv/evidence/off-host.json")
+          primary.succeed("mv /srv/evidence/recovery.json /srv/evidence/off-host.json /root/stale/")
+          assert primary_pid() == running
+          assert step("fence")["phase"] == "fenced"
           fenced()
+          assert step("next")["phase"] == "prepared"
+          assert step(certify(step("status")["export"], "second"))["phase"] == "imported"
+          assert step("next")["phase"] == "adopted"
+          primary.succeed(f"{candidate}/bin/switch-to-configuration test")
+          assert step("activated")["phase"] == "activated"
+          # A generation without the coordinator would strand it.
+          switch_refused(f"{base}/specialisation/plain", "adopted under")
+          # Rolled back to the legacy generation: thaw is refused, abort unwinds.
+          primary.succeed(f"{base}/bin/switch-to-configuration test")
+          refused(f"thaw --acceptance {state}/acceptance.json", "is not this manifest")
           assert step("abort")["phase"] == "aborted"
           reopened()
+          assert step("archive")["phase"] == "idle"
+          assert {"rollout.7.aborted.json", "rollout.7.receipt.json"} <= set(archived()), archived()
+          primary.succeed(f"test ! -e {gc_root}")
     '';
   }
