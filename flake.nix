@@ -111,7 +111,8 @@
     lib.applicationBackendTransition = 1;
     lib.cutoverPreflight = 3;
     # `harbor-db-postgres rollout` and `services.harbor-db.postgresql.rollout`.
-    lib.postgresRollout = 2;
+    # 3 adds the optional `executor.transport` hand-off hook.
+    lib.postgresRollout = 3;
     lib.timezone = harbor-meta.lib.timezone;
     lib.testing.mkBtrfsCrashTest = import ./nix/testing/btrfs-crash.nix;
     nixosModules.harbor-db = {

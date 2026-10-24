@@ -7080,6 +7080,31 @@ selectors = [
 
 [[inventories]]
 origin = "rust"
+id_prefix = "native.postgres-rollout-transport."
+selector_prefix = "storage::postgres_rollout::transport::tests::"
+source = "src/storage/postgres_rollout_transport.rs"
+argv_prefix = ["cargo", "test", "--locked", "--all-features", "--lib"]
+argv_suffix = ["--", "--exact"]
+profile = "integration"
+maturity = "crystallized"
+platforms = ["x86_64-linux", "aarch64-linux"]
+deadline_seconds = 120
+resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
+selectors = [
+  "transport_imports_the_receipt_the_executor_retained",
+  "failed_or_mismatched_transport_imports_nothing",
+  "a_receipt_failing_import_preconditions_is_never_journaled",
+  "an_import_interrupted_while_staging_resumes_the_import_not_preparation",
+  "a_staged_receipt_whose_copy_is_lost_is_readmitted_without_certifying",
+  "a_hand_off_of_another_export_is_certified_again",
+  "the_hook_runs_only_under_this_rollouts_bound_evidence",
+  "a_running_transport_unit_blocks_every_step_and_shows_in_status",
+  "a_refused_receipt_points_at_manual_certification",
+  "transport_hooks_are_store_executables_and_journals_stay_lenient",
+]
+
+[[inventories]]
+origin = "rust"
 id_prefix = "native.recovery-preparation."
 selector_prefix = "storage::recovery::tests::"
 source = "src/storage/recovery.rs"
