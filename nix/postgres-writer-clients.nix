@@ -12,8 +12,11 @@ in {
       Explicit application/migration services skipped while the durable writer
       fence journal exists. Existing service conditions are retained. This is
       startup policy; the coordinator still stops existing clients, and the HBA
-      excludes reconnecting clients across older generations. Thaw never starts
-      these units; restart and application health verification are explicit.
+      excludes reconnecting clients across older generations. Harbor's
+      writer-fence thaw never starts these units; restart and application health
+      verification are explicit. The rollout coordinator's thaw and abort restart
+      the declared clients they stopped, and start declared clients whose start
+      this condition skipped while the fence was held.
     '';
   };
 

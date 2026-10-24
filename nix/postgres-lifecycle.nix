@@ -406,7 +406,7 @@ in {
             user = mkOption {type = types.nonEmptyStr;};
             command = mkOption {
               type = types.listOf types.nonEmptyStr;
-              description = "Independent restore/certify argv; `--export/--export-sha256/--workspace` are appended.";
+              description = "Independent restore/certify argv run as the executor user on the executor host; `--export/--export-sha256/--workspace` are appended, and it must write its receipt to `<workspace>/off-host-recovery.json`.";
             };
           };
           cutover = mkOption {
@@ -638,11 +638,12 @@ in {
             && (inner.kind == "provisioned" && lib.elem outer.kind ["writable" "provisioned"] || inner.kind == "export" && outer.kind == "writable");
           apart = a: b: !(contains a.path b.path || contains b.path a.path) || intended a b || intended b a;
           pairs = lib.concatLists (lib.imap0 (i: a: map (apart a) (lib.drop (i + 1) roots)) roots);
-          evidence = map builtins.dirOf ([cfg.recovery.snapshotFile cfg.recovery.receiptFile] ++ lib.optional (cfg.recovery.offHostReceiptFile != null) cfg.recovery.offHostReceiptFile);
+          # The worker writes the evidence directories and the backup root.
+          evidence = map builtins.dirOf ([cfg.recovery.snapshotFile cfg.recovery.receiptFile] ++ lib.optional (cfg.recovery.offHostReceiptFile != null) cfg.recovery.offHostReceiptFile) ++ [cfg.recovery.backupRoot];
           writable = path: lib.any (root: contains root path) preparation.readWritePaths;
         in
           rollout == null || preparation == null || cfg.recovery == null || (lib.all lib.id pairs && lib.all writable evidence);
-        message = "Rollout roots: the PostgreSQL data directory, identity (writer-fence) state, startup inhibition state, journal root (/var/lib/harbor-db/postgresql-rollout), import slot directory, export root, writable paths and provisioned directories must be pairwise disjoint (a provisioned directory may lie in a writable path or another provisioned one, the export root in a writable path), and the recovery evidence directories inside the writable paths.";
+        message = "Rollout roots: the PostgreSQL data directory, identity (writer-fence) state, startup inhibition state, journal root (/var/lib/harbor-db/postgresql-rollout), import slot directory, export root, writable paths and provisioned directories must be pairwise disjoint (a provisioned directory may lie in a writable path or another provisioned one, the export root in a writable path), and the recovery evidence directories and backup root inside the writable paths.";
       }
       {
         # Mirrors the coordinator: systemd splits these property values on

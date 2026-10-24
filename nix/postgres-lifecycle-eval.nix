@@ -434,6 +434,8 @@ in
             {services.harbor-db.postgresql.recoveryPreparation.offHostReceiptImportFile = lib.mkForce "/srv/backups/import.json";}
             {services.harbor-db.postgresql.recoveryPreparation.readWritePaths = lib.mkForce ["/srv/backups" "/srv/backups/nested"];}
             {services.harbor-db.postgresql.recoveryPreparation.readWritePaths = lib.mkForce ["/srv/disposable"];}
+            # The backup command fills the backup root from the worker.
+            {services.harbor-db.postgresql.recovery.backupRoot = lib.mkForce "/srv/repository";}
           ];
         message = "A rollout replaces the legacy pre-switch preparation with its activation guard and refuses systemd property values that split into extra entries.";
       }

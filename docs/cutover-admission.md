@@ -200,18 +200,34 @@ the independent executor. One resumable journal at the fixed root
 | --- | --- | --- |
 | `fence` | `fenced` | inhibit startup, pause publishers, stop clients and the primary, open the fence, start the primary, **wait for setup units to settle**, inspect the live fence |
 | `prepare` | `prepared` | run `prepare-recovery` with receivers stopped; stops at the independent-certification hand-off and records the export and its SHA-256 |
-| `certify` | (executor) | as the declared unprivileged executor, run its restore/certify argv on the transported export |
+| `certify` | (executor) | as the declared unprivileged executor, run its restore/certify argv on the transported export (`--export`, `--export-sha256` and `--workspace` are appended; the argv must write its receipt to `<workspace>/off-host-recovery.json`) |
 | `import --receipt --sha256` | `imported` | stage the digest-verified receipt and re-run preparation to admission |
 | `adopt` | `adopted` | re-verify live records against the accepted snapshot, then `adopt-live` and `check` |
 | `activated` | `activated` | require the running generation to carry this manifest, then record that it is active under the fence |
-| `thaw --acceptance` | `thawed` | require the running generation to carry this manifest; verify a root-owned acceptance bound to host, primary, manifest, fence token and snapshot; close the fence, restart the primary and clients, lift the pause |
-| `abort` | `aborted` | before activation only (an adopted candidate that is already installed must run `activated` and thaw): close (or confirm closed) the fence, restart the primary and recorded clients, lift the pause; evidence is kept |
+| `accept` | `activated` | after verifying the deployment (the running generation carries this manifest): write the acceptance thaw checks, root 0600 at `<journal root>/acceptance.json`: `{"version": 1, "status": "accepted", "host", "system_identifier", "manifest_sha256", "token" (the fence token), "snapshot_sha256" (of the record snapshot's bytes)}` |
+| `thaw --acceptance` | `thawed` | require the running generation to carry this manifest; verify a root-owned 0400/0600 acceptance (in a directory only root can write) with exactly those fields; re-admit recovery (`inspect-recovery`, the cutover checker); close the fence, restart the primary, the clients it stopped and declared clients whose start the fence skipped, lift the pause |
+| `abort` | `aborted` | before activation, or after rolling back a failed deployment (an installed candidate, adopted or activated, must be thawed instead): close (or confirm closed) the fence, restart the primary and recorded clients, lift the pause; evidence is kept |
+| `archive` | (none) | archive a thawed or aborted journal and drop its GC root, without fencing |
 
 `rollout next` performs the next local step or prints the exact external action
 (executor certification, activation, thaw). From `prepared` it names the
 manifest closure copy (`nix copy --to ssh-ng://<executor> <manifest>`), because
 the executor runs the Harbor and certify argv that closure contains, as well as
 the export transfer. Every step is idempotent; rerun it after an interruption.
+After a thawed or aborted rollout `next` only reports: a new rollout starts only
+with an explicit `rollout fence` (which archives the finished journal first),
+and `rollout archive` retires one without fencing.
+
+Thaw re-admits the recovery evidence, which must therefore still be within its
+`maxAgeSeconds` of `prepare`. If the deployment fails verification, or the
+evidence ages out first, roll back to the previous generation, then `rollout
+abort` (allowed once the candidate is no longer installed). After thaw, retire
+the rollout within that same window: activate a generation without `rollout`
+(and `recoveryPreparation`) and with `recovery.requireWriterFence = false`, or
+the consumer's equivalent. A generation that still declares `rollout` requires
+a live writer fence for its recovery admission, so it cannot activate once the
+fence is closed. Then run `rollout archive`; never start a fresh rollout to get
+past a thawed one.
 Only the manifest that opened the journal steps or unwinds it (`abort` and
 `thaw` included): every policy its fence, inhibition, clients and slot were made
 under is that manifest's. Another manifest refuses and names the opener to rerun
@@ -313,7 +329,8 @@ Exclusion and recovery:
   provisioned directory inside a writable path or inside another provisioned
   one (evidence in its backup root), and the export root inside a writable
   path. The recovery evidence directories (snapshot, receipt and off-host
-  receipt) and the provisioned directories must lie inside the writable paths.
+  receipt), the recovery backup root (which the backup command fills) and the
+  provisioned directories must lie inside the writable paths.
 - **Root writes.** Root never resolves a pathname below a directory another
   account can write. Paths are walked by opening each component from its
   parent's descriptor without following symlinks, and each component is
@@ -352,9 +369,9 @@ Exclusion and recovery:
     fence and adoption write as postgres (`postgres:postgres` 0700), either
     already has its declared owner, group and mode (an existing one, perhaps a
     mountpoint, is never re-owned) or is creatable under trusted ancestry;
-  - every writable path, evidence directory and the export root exists or is
-    provisioned (systemd fails a missing writable path, and Harbor creates no
-    evidence directory);
+  - every writable path, evidence directory, the recovery backup root and the
+    export root exists or is provisioned (systemd fails a missing writable
+    path, and Harbor creates no evidence directory);
   - every directory postgres must traverse to reach these grants it search
     permission;
   - every writable sandbox path, the export root and the required mounts lie
@@ -396,8 +413,13 @@ Exclusion and recovery:
   publishers) runs `systemctl reset-failed` first, so repeated cycles never
   leave a unit down on its start limit. Clients, receivers and publishers are
   started without waiting for them to finish (`--no-block`; a oneshot backup
-  can run for an hour): the unit must then be running or have ended without
-  failing. Only the primary's start waits, for readiness and its setup units.
+  can run for an hour). Only a failed start is an error: a unit running, ended,
+  or still queued behind another unit's job after `setupSettleSeconds` counts as
+  started. A unit to restore that the running generation does not load (one
+  the candidate removed, or only it brings) is skipped, as the pause and the
+  primary's stop skip it, and listed in the journal's `unloaded`. A queued job
+  reads as an empty `Job` value; `0` (the D-Bus no-job id) counts as none.
+  Only the primary's start waits, for readiness and its setup units.
 - **Hard dependents.** Before every primary stop, the unsettled services in
   its reverse Requires/BindsTo closure (through targets such as
   `postgresql.target`) are recorded, as clients or as pending receivers, so the

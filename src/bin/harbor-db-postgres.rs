@@ -192,12 +192,19 @@ enum RolloutStep {
     Adopt,
     /// Record that the candidate generation is active under the fence.
     Activated,
+    /// After verifying the deployment, write the acceptance `thaw` checks
+    /// (root 0600 in the journal root) and print its path in `next`.
+    Accept,
     /// Release the fence with a deployment acceptance and restart clients.
     Thaw {
         #[arg(long)]
         acceptance: PathBuf,
     },
-    /// Back out before activation: close the fence and restart clients.
+    /// Archive a thawed or aborted rollout's journal and drop its GC root,
+    /// without starting a new rollout.
+    Archive,
+    /// Back out before activation, or after rolling back a failed deployment:
+    /// close the fence and restart clients.
     Abort {
         /// Explicitly adopt Harbor's live writer fence by its token: with no
         /// journal, or after an opening interrupted before its token was recorded.
@@ -233,7 +240,9 @@ fn operate(args: Args) -> Result<Option<Value>> {
             RolloutStep::Import { receipt, sha256 } => Action::Import { receipt, sha256 },
             RolloutStep::Adopt => Action::Adopt,
             RolloutStep::Activated => Action::Activated,
+            RolloutStep::Accept => Action::Accept,
             RolloutStep::Thaw { acceptance } => Action::Thaw { acceptance },
+            RolloutStep::Archive => Action::Archive,
             RolloutStep::Abort {
                 adopt_fence_token,
                 adopt_startup_token,
