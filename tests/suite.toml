@@ -1745,6 +1745,55 @@ dimension = "compatibility"
 evidence = "nix/test-postgres-writer-fence.nix native testScript executes tests/fixtures/writer_fence.rs across legacy and guarded generations. existing-client-condition-preserved checks the original /etc/os-release condition; legacy-generation-thaw-root-barrier and legacy-thaw-reboot-root-barrier retain primary/setup inhibition through unit replacement and reboot."
 
 [[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "positive"
+evidence = "nix/test-postgres-rollout.nix drives the real coordinator across two VMs: fence and prepare run the consumer backup, record snapshot, local restore certification and byte-reproducible export, stopping at Prepared; the executor's rollout certify restores the transported export, certifies off-host and prints the receipt digest import consumes; import is admitted, then adopt, activation of the guarded specialisation, activated, accept (which writes the acceptance thaw checks) and thaw restore application writes, clients (including one only the candidate brings), an undeclared hard dependent, receivers and paused publishers. Every step's stdout is exactly one JSON document."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "rejection"
+evidence = "nix/test-postgres-rollout.nix requires refusal, without side effects, of a fence while Harbor holds a fence this rollout did not open and of a second rollout over the previous window's evidence; abort without a journal or with a different fence or startup token; any step by a manifest other than the opener; import of a receipt whose retained SHA-256 differs, and of one Harbor does not admit; an import whose exporter rewrote the certified hand-off; real switch-to-configuration into the candidate or a generation without the coordinator while Fenced or Prepared; activated before the running generation carries the manifest; and abort of an activated rollout. Application SQL is rejected in every fenced phase."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "concurrency"
+evidence = "nix/test-postgres-rollout.nix holds the manifest's host execution lock from another process and requires a mutating step to be refused while status still answers, and requires a surviving harbor-db-rollout-prepare.service to block preparation before any receiver is quiesced."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "repetition"
+evidence = "nix/test-postgres-rollout.nix repeats fence on a fenced journal (idempotent resume); fence archives each finished abort and archive retires the thawed and aborted journals with their receipts under sequential ids (next never does), so the candidate is rolled out seven times; finished worker prepare and import outcomes are recovered without rerunning the exporter; the restored primary is re-verified after every unwind."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "interruption"
+evidence = "nix/test-postgres-rollout.nix interrupts acquisition after startup inhibition (a client refuses to stop) and loses that journal, fails fence-open after the coordinator recorded its intent (the fence lock is held) and then completes that fence-open out of band, loses the journal of a fenced rollout, rewinds journals whose worker finished unrecorded, and fails thaw after the fence closed (a client's start is refused); the journal or Harbor's live fence or inhibition retains what the explicit retry needs."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "recovery"
+evidence = "nix/test-postgres-rollout.nix aborts the interrupted acquisition, the fenced rollout, the journal-less rollouts (by adopting Harbor's startup or fence token) and an activated rollout rolled back to the legacy generation; resumes the interrupted opening only with its exact live token; settles the import once the certified export is restored; and reruns thaw without restarting the reopened primary (same MainPID). Each unwind closes the fence, releases startup inhibition, restarts recorded clients (and one whose start the fence skipped), hard dependents, quiesced receivers and the publishers the pause stopped or skipped, lists a recorded unit the running generation no longer loads as unloaded, and never restarts retired clients or a publisher whose own condition failed before the pause."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "compatibility"
+evidence = "nix/test-postgres-rollout.nix starts from the legacy unguarded PostgreSQL generation with a slow control-role setup unit, adopts it live, activates the guarded specialisation with its real switch-to-configuration under the retained fence before thaw, activates a Harbor generation without the coordinator after thaw (its rollout guard admits it), lets that generation roll a second activated rollout back, refuses abort while the candidate is still the system profile's boot default, and aborts once the legacy generation is switched to as the boot default."
+
+[[coverage]]
 case = "nix.x86_64-linux.cutover-eval"
 capability = "nixos"
 operation = "nixos.cutover"
@@ -2839,6 +2888,7 @@ operations = [
   "nixos.pg-backup",
   "nixos.postgres-lifecycle",
   "nixos.postgres-writer-fence",
+  "nixos.postgres-rollout",
   "nixos.cutover",
 ]
 required = [
@@ -4499,6 +4549,7 @@ names = [
   "native-postgres-crash-rollback",
   "native-postgres-interrupted-upgrade",
   "native-postgres-recovery-acceptance",
+  "native-postgres-rollout",
   "native-application-backup",
 ]
 profile = "vm"
