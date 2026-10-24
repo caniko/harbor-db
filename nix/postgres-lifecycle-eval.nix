@@ -138,6 +138,24 @@ in
         assertion = eval.pkgs.stdenv.hostPlatform.system == pkgs.stdenv.hostPlatform.system;
       }
       {
+        name = "rollout-transport-requires-one-immutable-hook";
+        message = "A root executor transport hook must be one immutable store executable, rendered only when set.";
+        assertion = let
+          hook = "${pkgs.writeShellScript "immutable-transport" "exit 0"}";
+          with' = transport: withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.executor.transport = lib.mkForce transport;}];};
+          accepted = transport:
+            lib.all (a: a.assertion || a.message != "The rollout's root executor transport hook must be one immutable store executable.")
+            (with' transport).config.assertions;
+          rendered = builtins.fromJSON (builtins.unsafeDiscardStringContext (with' hook).config.environment.etc."harbor-db/postgresql-rollout.json".source.text);
+        in
+          accepted hook
+          && accepted null
+          && !accepted "/run/current-system/sw/bin/transport"
+          && !accepted "transport"
+          && !accepted "/nix/store/invalid-transport"
+          && rendered.executor.transport == hook;
+      }
+      {
         name = "upgrade-requires-immutable-validator";
         message = "Worker-writable validator entrypoints cannot authorize staged upgrade publication.";
         assertion = let
@@ -354,6 +372,8 @@ in
           && rollout.paused_publishers == ["fixture-backup.service"]
           && rollout.import_slot == "/srv/import/off-host.json"
           && rollout.executor.command == ["/fixture/certify"]
+          # Unset, the hook is not written (older coordinators load the manifest).
+          && !(rollout.executor ? transport)
           && lib.last rollout.prepare.provision_directories
           == {
             path = "/srv/harbor-db/export";

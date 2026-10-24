@@ -493,3 +493,49 @@ Exclusion and recovery:
   `certify` itself takes) is what `rollout import --sha256` expects.
 - **Status.** `rollout status` needs read access to the root-owned journal; an
   unreadable journal is an error, never an idle rollout.
+
+### Executor transport hook
+
+With `rollout.executor.transport` set (one immutable store executable, checked
+by the module and again when the manifest loads; wrap arguments in a store
+script), `rollout next` from `prepared` performs the hand-off itself. Harbor
+runs the hook as the transient root unit `harbor-db-rollout-transport.service`
+(`KillMode=control-group`, bounded to eight hours) in `/`, with systemd's clean
+environment plus `HOME=/root`, `LANG=C` and the caller's `SSH_AUTH_SOCK`; the
+hook sets anything else, its `PATH` included. It appends:
+
+| Argument | Value |
+| --- | --- |
+| `--config` | the opening rollout manifest (a GC-rooted store path; the executor needs its closure) |
+| `--export` | the recorded export directory |
+| `--export-sha256` | the recorded SHA-256 of its `recovery-export.json` |
+| `--receipt-dir` | a fresh root-private directory for this attempt |
+
+The hook copies the manifest closure and the export to the executor, runs
+`rollout certify` there as the declared executor, writes the receipt to
+`<receipt-dir>/off-host-recovery.json` (mode `0600`) and prints on stdout only
+the `receipt_sha256` that certify printed on the executor, never a digest of the
+copy. Its stderr streams to the caller. Harbor holds the receipt to import's
+rules (a coordinator-owned private regular file, bounded, a JSON object equal to
+that digest), journals it with the export digest it certifies, then imports it
+exactly as `rollout import` does.
+
+- **Interruption.** Termination signals are deferred while the hook runs: an
+  interrupt or the deadline stops its unit (and every local descendant). While
+  that unit is active (an orphan of a killed coordinator) every step refuses,
+  and `status` names it.
+- **Remote work.** Stopping the unit ends only local processes: the hook must
+  end its executor-side work when it dies (for example `ssh -tt`, or a remote
+  `timeout`) and must not leave background processes behind. After any failure
+  Harbor starts a fresh attempt with a new `--receipt-dir`; a failed attempt's
+  directory is removed, and the last one once its receipt is imported.
+- **Resuming.** A journaled receipt that still certifies the recorded export is
+  imported again (import reuses identical staged bytes); a lost one whose
+  recorded receipt is staged is readmitted; otherwise the export is certified
+  again. Before a fresh hand-off the fence and the evidence binding are checked.
+- **Refused receipts.** If Harbor refuses the recorded receipt, `next` retries
+  its admission; `status` then names the manual route (`rollout certify` on the
+  executor, `rollout import` here, which sets the recorded receipt aside).
+- **Compatibility.** The manifest carries `transport` only when set; a manifest
+  with a hook needs a hook-aware coordinator to load or abort it. The journal's
+  `transported` entry is written only when present.
