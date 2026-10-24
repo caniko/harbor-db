@@ -1791,7 +1791,7 @@ case = "vm.x86_64-linux.native-postgres-rollout"
 capability = "nixos"
 operation = "nixos.postgres-rollout"
 dimension = "compatibility"
-evidence = "nix/test-postgres-rollout.nix starts from the legacy unguarded PostgreSQL generation with a slow control-role setup unit, adopts it live, activates the guarded specialisation with its real switch-to-configuration under the retained fence before thaw, activates a Harbor generation without the coordinator after thaw (its rollout guard admits it, and refuses it while a later rollout is activated), and rolls a second activated rollout back to the legacy generation before aborting it."
+evidence = "nix/test-postgres-rollout.nix starts from the legacy unguarded PostgreSQL generation with a slow control-role setup unit, adopts it live, activates the guarded specialisation with its real switch-to-configuration under the retained fence before thaw, activates a Harbor generation without the coordinator after thaw (its rollout guard admits it), lets that generation roll a second activated rollout back, refuses abort while the candidate is still the system profile's boot default, and aborts once the legacy generation is switched to as the boot default."
 
 [[coverage]]
 case = "nix.x86_64-linux.cutover-eval"

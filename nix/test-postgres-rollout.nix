@@ -603,13 +603,21 @@ in
           assert step("next")["phase"] == "prepared"
           assert step(certify(step("status")["export"], "second"))["phase"] == "imported"
           assert step("next")["phase"] == "adopted"
-          primary.succeed(f"{candidate}/bin/switch-to-configuration test")
+          # Activated as `nixos-rebuild switch` does: the candidate becomes the
+          # boot default too.
+          profile = "/nix/var/nix/profiles/system"
+          primary.succeed(f"nix-env -p {profile} --set {candidate}; {candidate}/bin/switch-to-configuration switch")
           assert step("activated")["phase"] == "activated"
-          # A generation without the coordinator would strand it.
-          switch_refused(f"{base}/specialisation/plain", "adopted under")
-          # Rolled back to the legacy generation: thaw is refused, abort unwinds.
-          primary.succeed(f"{base}/bin/switch-to-configuration test")
+          # A generation without the coordinator may roll it back; thaw is then
+          # refused, and abort too while the candidate would still boot next.
+          primary.succeed(f"{base}/specialisation/plain/bin/switch-to-configuration test")
           refused(f"thaw --acceptance {state}/acceptance.json", "is not this manifest")
+          refused("abort", "still the boot default")
+          # Rolled back to the legacy generation as the boot default (what
+          # `nixos-rebuild switch --rollback` does); the host booted it too.
+          primary.succeed(f"nix-env -p {profile} --set {base}; {base}/bin/switch-to-configuration switch")
+          assert primary.succeed(f"readlink -f {profile}").strip() == base
+          assert primary.succeed("readlink -f /run/booted-system").strip() == base
           assert step("abort")["phase"] == "aborted"
           reopened()
           assert step("archive")["phase"] == "idle"
