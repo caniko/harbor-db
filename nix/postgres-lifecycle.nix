@@ -138,7 +138,9 @@
         ];
     };
     import_slot = preparation.offHostReceiptImportFile;
-    executor = {inherit (rollout.executor) host user command;};
+    # Written only when set, so a coordinator predating the hook can still load
+    # (and abort under) a manifest without one.
+    executor = {inherit (rollout.executor) host user command;} // lib.optionalAttrs (rollout.executor.transport != null) {inherit (rollout.executor) transport;};
     inherit (rollout) cutover;
   });
   # Refuses activating a generation that would strand an open rollout.
@@ -408,6 +410,21 @@ in {
               type = types.listOf types.nonEmptyStr;
               description = "Independent restore/certify argv run as the executor user on the executor host; `--export/--export-sha256/--workspace` are appended, and it must write its receipt to `<workspace>/off-host-recovery.json`.";
             };
+            transport = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = ''
+                Optional executor hand-off hook: one immutable store executable (wrap
+                arguments in a store script). From `prepared`, `rollout next` runs it as
+                the transient root unit `harbor-db-rollout-transport.service`, in `/` with
+                systemd's clean environment plus `HOME`, `LANG` and the caller's
+                `SSH_AUTH_SOCK`, appending `--config/--export/--export-sha256/--receipt-dir`.
+                It copies the manifest closure and export to the executor, runs
+                `rollout certify` there, writes `<receipt-dir>/off-host-recovery.json`
+                (mode 0600) and prints only certify's `receipt_sha256`; Harbor imports it.
+                A manifest with a hook needs a hook-aware coordinator to load or abort it.
+              '';
+            };
           };
           cutover = mkOption {
             type = types.nullOr (types.submodule {
@@ -562,6 +579,10 @@ in {
       {
         assertion = rollout == null || (cfg.recovery != null && preparation != null && preparation.offHostReceiptImportFile != null && preparation.exportCommand != [] && rollout.clients != []);
         message = "The rollout coordinator needs recovery, recoveryPreparation with an off-host receipt import file and an export command (the executor hand-off), and an explicit client inventory.";
+      }
+      {
+        assertion = rollout == null || rollout.executor.transport == null || immutableFiles.storePath rollout.executor.transport;
+        message = "The rollout's root executor transport hook must be one immutable store executable.";
       }
       {
         # Mirrors the coordinator: each unit has one role (templates cover

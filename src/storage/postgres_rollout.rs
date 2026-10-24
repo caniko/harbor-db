@@ -41,6 +41,10 @@ const HARBOR_TIMEOUT: Duration = Duration::from_secs(1800);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(86400);
 const BUSY: &str = "a preparation worker (harbor-db-rollout-prepare.service) is still running; \
     wait for it (journalctl -u harbor-db-rollout-prepare.service) or stop it, then rerun";
+/// The executor transport hook's deterministic unit (see `transport`).
+const TRANSPORT_UNIT: &str = "harbor-db-rollout-transport.service";
+const TRANSPORT_BUSY: &str = "an executor transport hook (harbor-db-rollout-transport.service) is \
+    still running; wait for it (journalctl -u harbor-db-rollout-transport.service) or stop it, then rerun";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,6 +98,11 @@ pub struct Executor {
     pub user: String,
     /// Independent restore/certify argv; `--export/--export-sha256/--workspace` are appended.
     pub command: Vec<String>,
+    /// Optional hand-off hook `rollout next` runs from `prepared` (see
+    /// `postgres_rollout_transport.rs`); rendered only when set, so an older
+    /// coordinator can still load a manifest without one.
+    #[serde(default)]
+    pub transport: Option<PathBuf>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -172,6 +181,9 @@ pub struct Journal {
     /// unwind it (kept alive by a GC root until the journal is archived).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opening_config: Option<PathBuf>,
+    /// The executor transport's verified receipt, recorded before import stages it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transported: Option<transport::Transported>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -493,6 +505,19 @@ pub(crate) fn receipt_bytes(path: &Path) -> Result<Vec<u8>> {
         return Err(not_private());
     }
     Ok(bytes)
+}
+
+/// A transported receipt checked against its independently retained digest:
+/// read once through a pinned descriptor (the sender can still swap the path).
+fn verified_receipt(path: &Path, expected: &str) -> Result<(String, Vec<u8>)> {
+    let expected = sha_hex(expected)?;
+    let bytes = receipt_bytes(path)?;
+    if codec::digest(&bytes) != expected || !codec::decode(&bytes)?.is_object() {
+        return Err(invalid(
+            "transported receipt differs from the independently retained SHA-256",
+        ));
+    }
+    Ok((expected, bytes))
 }
 
 /// A directory opened without following a final symlink.
@@ -887,11 +912,12 @@ impl Rollout {
         // store file. The executor command runs on another host: lexical only.
         if !([&manifest.harbor, &manifest.systemctl, &manifest.systemd_run].into_iter())
             .chain(manifest.cutover.as_ref().map(|cutover| &cutover.checker))
+            .chain(manifest.executor.transport.as_ref())
             .all(|path| store_executable(path))
             || durable::immutable_store_reference(&manifest.preparation).is_err()
         {
             return Err(invalid(
-                "rollout harbor, systemctl, systemd-run and cutover checker must be executable regular store files and the preparation config a store file",
+                "rollout harbor, systemctl, systemd-run, cutover checker and transport hook must be executable regular store files and the preparation config a store file",
             ));
         }
         let executor = &manifest.executor;
@@ -969,6 +995,7 @@ impl Rollout {
             fence_opening: false,
             reopened: false,
             opening_config: Some(self.config.clone()),
+            transported: None,
         }
     }
 
@@ -1227,6 +1254,12 @@ impl Rollout {
     /// (systemctl still exits 0) and is idle; any other unknown state is busy.
     fn preparing(&self) -> Result<bool> {
         let (loaded, state) = self.unit_state(PREPARE_UNIT)?;
+        Ok(loaded && restorable(&state))
+    }
+
+    /// Likewise for the executor transport hook's unit.
+    fn transporting(&self) -> Result<bool> {
+        let (loaded, state) = self.unit_state(TRANSPORT_UNIT)?;
         Ok(loaded && restorable(&state))
     }
 
@@ -2194,7 +2227,26 @@ impl Rollout {
 
     /// Wait for the worker, stopping its unit on an interrupt or the deadline.
     fn await_worker(&self, import: bool, signals: &Deferred) -> Result<bool> {
-        let mut command = self.preparation_command(import);
+        let command = self.preparation_command(import);
+        self.await_unit(
+            command,
+            PREPARE_UNIT,
+            PREPARE_TIMEOUT,
+            "preparation",
+            signals,
+        )
+    }
+
+    /// Wait for a transient unit's `systemd-run --wait` client, stopping the
+    /// unit on an interrupt or the deadline.
+    fn await_unit(
+        &self,
+        mut command: Command,
+        unit: &str,
+        timeout: Duration,
+        what: &str,
+        signals: &Deferred,
+    ) -> Result<bool> {
         let original = signals.0;
         // SAFETY: sigprocmask is async-signal-safe and the saved mask is plain
         // data; the client must not inherit the coordinator's deferral.
@@ -2205,7 +2257,7 @@ impl Rollout {
             });
         }
         let mut child = process::spawn(&mut command)?;
-        let deadline = Instant::now() + PREPARE_TIMEOUT + Duration::from_secs(60);
+        let deadline = Instant::now() + timeout + Duration::from_secs(60);
         loop {
             let exited = child.try_wait()?;
             let interrupted = signals.pending();
@@ -2213,7 +2265,7 @@ impl Rollout {
                 // The unit may only now be starting: stop it until its client
                 // returns. A unit that outlives this stays `BUSY` for receivers.
                 for _ in 0..60 {
-                    let _ = self.systemctl(&["stop", "--", PREPARE_UNIT]);
+                    let _ = self.systemctl(&["stop", "--", unit]);
                     if child.try_wait()?.is_some() {
                         break;
                     }
@@ -2222,9 +2274,9 @@ impl Rollout {
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(invalid(if interrupted {
-                    "preparation interrupted; its worker was stopped"
+                    format!("{what} interrupted; its worker was stopped")
                 } else {
-                    "preparation exceeded its execution limit; its worker was stopped"
+                    format!("{what} exceeded its execution limit; its worker was stopped")
                 }));
             }
             if let Some(status) = exited {
@@ -2412,14 +2464,7 @@ impl Rollout {
     }
 
     fn import(&self, journal: &mut Journal, receipt: &Path, expected: &str) -> Result<()> {
-        let expected = sha_hex(expected)?;
-        // The sender can still swap the path: check and read one descriptor.
-        let bytes = receipt_bytes(receipt)?;
-        if codec::digest(&bytes) != expected || !codec::decode(&bytes)?.is_object() {
-            return Err(invalid(
-                "transported receipt differs from the independently retained SHA-256",
-            ));
-        }
+        let (expected, bytes) = verified_receipt(receipt, expected)?;
         // Stage the verified bytes, never a pathname the transport can still swap.
         // An interrupted import may already have staged these exact bytes:
         // reuse them. A recorded receipt that failed admission is set aside
@@ -2777,6 +2822,17 @@ impl Rollout {
             |seconds| format!("{seconds}s"),
         );
         match journal.phase {
+            Phase::Prepared if executor.transport.is_some() && journal.receipt_sha256.is_some() => {
+                json!(
+                    "the recorded receipt awaits admission: `rollout next` retries it (inspect \
+                     harbor-db-rollout-prepare.service if it is refused); to certify again, run \
+                     `rollout certify` on the executor and `rollout import` here, which sets the \
+                     recorded receipt aside"
+                )
+            }
+            Phase::Prepared if executor.transport.is_some() => {
+                json!("run `rollout next`; the executor transport hook certifies and imports")
+            }
             // The executor needs this manifest's store closure (Harbor and the
             // certify argv it names) as well as the export itself.
             Phase::Prepared => json!(format!(
@@ -2831,6 +2887,10 @@ impl Rollout {
         if self.preparing()? {
             value["preparation_worker"] = json!(PREPARE_UNIT);
             value["next"] = json!(BUSY);
+        }
+        if self.transporting()? {
+            value["transport_hook"] = json!(TRANSPORT_UNIT);
+            value["next"] = json!(TRANSPORT_BUSY);
         }
         let archived = self.archives()?;
         if !archived.is_empty() {
@@ -3209,6 +3269,10 @@ impl Rollout {
         if self.preparing()? {
             return Err(invalid(BUSY));
         }
+        // Likewise an orphaned transport hook may still be reading the export.
+        if self.transporting()? {
+            return Err(invalid(TRANSPORT_BUSY));
+        }
         if let Action::Abort {
             adopt_fence_token,
             adopt_startup_token,
@@ -3294,6 +3358,9 @@ impl Rollout {
             Action::Next { adopt_fence_token } => match phase {
                 Phase::Idle => self.fence(&mut journal, adopt_fence_token.as_deref())?,
                 Phase::Fenced => self.prepare(&mut journal)?,
+                Phase::Prepared if self.manifest.executor.transport.is_some() => {
+                    self.transport(&mut journal)?
+                }
                 // External hand-off: certification runs on the executor; `next`
                 // prints the exact commands.
                 Phase::Prepared => {}
@@ -3330,19 +3397,22 @@ fn group_id(group: &str) -> Result<u32> {
     }
     Ok(unsafe { (*entry).gr_gid })
 }
+#[path = "postgres_rollout_transport.rs"]
+mod transport;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
-    fn executable(path: &Path, script: &str) {
+    pub(super) fn executable(path: &Path, script: &str) {
         fs::write(path, format!("#!/bin/sh\n{script}\n")).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     /// An executable regular store file from PATH (coreutils' `true`).
-    fn store_tool() -> PathBuf {
+    pub(super) fn store_tool() -> PathBuf {
         std::env::split_paths(&std::env::var_os("PATH").unwrap())
             .filter(|directory| directory.starts_with("/nix/store"))
             .map(|directory| directory.join("true"))
@@ -3377,14 +3447,14 @@ mod tests {
             .expect("a non-executable store file in a PATH package")
     }
 
-    struct Fixture {
+    pub(super) struct Fixture {
         root: tempfile::TempDir,
     }
 
     impl Fixture {
         /// Fake systemd keeps one state file per unit; `setup.service` stays
         /// busy for `polls` show queries after every primary start.
-        fn new(polls: u32) -> Self {
+        pub(super) fn new(polls: u32) -> Self {
             let root = tempfile::tempdir().unwrap();
             let p = |name: &str| root.path().join(name);
             for dir in [
@@ -3496,7 +3566,7 @@ esac"#,
             fixture
         }
 
-        fn p(&self, name: &str) -> PathBuf {
+        pub(super) fn p(&self, name: &str) -> PathBuf {
             self.root.path().join(name)
         }
 
@@ -3527,7 +3597,7 @@ esac"#,
 
         /// The fixture's journal root and installed manifest stand in for the
         /// fixed host paths.
-        fn load(&self, path: &Path) -> Result<Rollout> {
+        pub(super) fn load(&self, path: &Path) -> Result<Rollout> {
             let mut rollout = Rollout::load(path)?;
             rollout.manifest.harbor = self.p("harbor");
             rollout.manifest.systemctl = self.p("systemctl");
@@ -4127,7 +4197,7 @@ esac"#,
     }
 
     /// Fake a ready hand-off export that preparation reported as `backup_id`.
-    fn reported(f: &Fixture, backup_id: &str) {
+    pub(super) fn reported(f: &Fixture, backup_id: &str) {
         fs::write(
             f.p("evidence/preparation.json"),
             json!({ "backup_id": backup_id }).to_string(),
