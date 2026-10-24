@@ -24,6 +24,10 @@ const MAX_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
 const STATE_ROOT: &str = "/var/lib/harbor-db/postgresql-rollout";
 /// The manifest the running generation carries.
 const INSTALLED: &str = "/etc/harbor-db/postgresql-rollout.json";
+/// The same for the system profile (the next boot's default) and the
+/// generation the host booted.
+const PROFILE: &str = "/nix/var/nix/profiles/system/etc/harbor-db/postgresql-rollout.json";
+const BOOTED: &str = "/run/booted-system/etc/harbor-db/postgresql-rollout.json";
 const GC_ROOTS: &str = "/nix/var/nix/gcroots";
 const GC_ROOT: &str = "harbor-db-postgresql-rollout";
 /// A staged receipt the finished rollout retired from the import slot.
@@ -227,6 +231,10 @@ pub struct Rollout {
     service_owner: Option<(u32, u32)>,
     /// Where the open journal's opening manifest is rooted against GC.
     gcroots: PathBuf,
+    /// The manifest the system profile (the next boot's default) carries.
+    profile: PathBuf,
+    /// The manifest the booted generation carries.
+    booted: PathBuf,
     /// Resolves a group name (`getgrnam` on hosts; tests stand in for
     /// service groups a build sandbox lacks).
     group: fn(&str) -> Result<u32>,
@@ -265,10 +273,16 @@ fn stranding(journal: &Journal, digest: Option<&str>) -> Result<()> {
         Phase::Aborted if !journal.reopened => {
             "an abort is still unwinding; rerun `rollout abort`".into()
         }
-        Phase::Adopted | Phase::Activated if digest != Some(journal.manifest_sha256.as_str()) => {
+        // A generation without the coordinator (`digest` None) only rolls
+        // back: abort unwinds an adopted or activated candidate once it is
+        // no longer installed, so only another rollout's manifest, or any
+        // other generation mid-unwind, would strand it.
+        Phase::Adopted | Phase::Activated
+            if digest.is_some_and(|digest| digest != journal.manifest_sha256)
+                || (journal.reopened && digest != Some(journal.manifest_sha256.as_str())) =>
+        {
             format!(
-                "the rollout was adopted under {opener}; activate that candidate and thaw it (or, \
-                 before activation, abort) first"
+                "the rollout was adopted under {opener}; thaw that candidate, or roll back and `rollout abort`, first"
             )
         }
         _ => return Ok(()),
@@ -520,6 +534,25 @@ fn c_name(name: &std::ffi::OsStr) -> std::io::Result<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(name.as_bytes())
         .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+}
+
+/// The directory just made as `name` in `parent`, opened no-follow and proved
+/// fresh before root adjusts it: root's and empty (read through its own
+/// descriptor). A writer of `parent` could rename another one onto the name
+/// in between; a non-empty or foreign one is refused.
+fn fresh_at(parent: &fs::File, name: &std::ffi::OsStr) -> Result<fs::File> {
+    use std::os::fd::AsRawFd;
+    let directory = open_at(parent, name, DIRECTORY)?;
+    let empty = (fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))?)
+        .next()
+        .is_none();
+    if directory.metadata()?.uid() != euid() || !empty {
+        return Err(invalid(format!(
+            "{} is not the directory just created",
+            name.to_string_lossy()
+        )));
+    }
+    Ok(directory)
 }
 
 /// `mkdirat` within the pinned directory `parent`.
@@ -892,6 +925,8 @@ impl Rollout {
             installed: PathBuf::from(INSTALLED),
             anchor: PathBuf::from("/"),
             service_owner: None,
+            profile: PathBuf::from(PROFILE),
+            booted: PathBuf::from(BOOTED),
         })
     }
 
@@ -1043,11 +1078,7 @@ impl Rollout {
                         };
                         let mode = if leaf { mode } else { 0o755 };
                         make_at(&directory, name, mode)?;
-                        let child = open_at(&directory, name, DIRECTORY)?;
-                        // Ours, not one substituted after the mkdir.
-                        if child.metadata()?.uid() != euid() {
-                            return Err(untrusted(&current));
-                        }
+                        let child = fresh_at(&directory, name).map_err(|_| untrusted(&current))?;
                         child.set_permissions(fs::Permissions::from_mode(mode))?;
                         child
                     }
@@ -1955,10 +1986,13 @@ impl Rollout {
     }
 
     /// Provision `path` inside its pinned `parent`. Published only once
-    /// complete: made, permissioned and owned under a private name, then
-    /// renamed into place without replacing anything, so a crash never leaves
-    /// it root-owned where a retry would accept it as provisioned.
-    // ponytail: an interrupted attempt leaves its empty private directory.
+    /// complete: made, permissioned and owned under a random private name
+    /// (no writer of `parent` can take it first, and no leftover is ever
+    /// reused), then renamed into place without replacing anything, so a
+    /// crash never leaves it root-owned where a retry would accept it as
+    /// provisioned.
+    // ponytail: an interrupted attempt leaves its empty staging directory
+    // (ignored); remove such leftovers by hand.
     fn provision_in(
         &self,
         parent: &fs::File,
@@ -1982,20 +2016,10 @@ impl Rollout {
         let staging = std::ffi::OsString::from(format!(
             ".{}.{}.provisioning",
             name.to_string_lossy(),
-            std::process::id()
+            writer_fence::token()?
         ));
-        // A leftover of this process's interrupted attempt is reused.
-        match make_at(parent, &staging, 0o700) {
-            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
-                return Err(error.into());
-            }
-            _ => {}
-        }
-        let directory = open_at(parent, &staging, DIRECTORY)?;
-        // Ours, not one the parent's owner substituted after the mkdir.
-        if directory.metadata()?.uid() != euid() {
-            return Err(untrusted());
-        }
+        make_at(parent, &staging, 0o700)?;
+        let directory = fresh_at(parent, &staging).map_err(|_| untrusted())?;
         directory.set_permissions(fs::Permissions::from_mode(mode))?;
         std::os::unix::fs::fchown(&directory, Some(uid), Some(gid))?;
         rename_at(parent, &staging, name)?;
@@ -2571,10 +2595,16 @@ impl Rollout {
         started.and(receivers).and(lifted)
     }
 
+    /// Whether the generation whose rollout manifest `path` names carries
+    /// exactly this one.
+    fn carries(&self, path: &Path) -> Result<bool> {
+        Ok(fs::canonicalize(path).ok() == Some(fs::canonicalize(&self.config)?))
+    }
+
     /// `activated` and `thaw` act on the deployed generation, so it must carry
     /// exactly this manifest.
     fn require_installed(&self) -> Result<()> {
-        if fs::canonicalize(&self.installed).ok() != Some(fs::canonicalize(&self.config)?) {
+        if !self.carries(&self.installed)? {
             return Err(invalid(format!(
                 "the running generation's {} is not this manifest; activate the candidate first",
                 self.installed.display()
@@ -2732,11 +2762,14 @@ impl Rollout {
         let executor = &self.manifest.executor;
         // Unwinding (reopened, unfinished): only the unwind itself continues.
         if journal.reopened && !matches!(journal.phase, Phase::Thawed | Phase::Aborted) {
-            return json!(if journal.phase == Phase::Activated {
-                "the thaw is unwinding; rerun `rollout thaw` with the same acceptance"
-            } else {
-                "the abort is unwinding; rerun `rollout abort`"
-            });
+            // Thaw needs the candidate installed, abort needs it gone.
+            return json!(
+                if journal.phase == Phase::Activated && self.require_installed().is_ok() {
+                    "the thaw is unwinding; rerun `rollout thaw` with the same acceptance"
+                } else {
+                    "the abort is unwinding; rerun `rollout abort`"
+                }
+            );
         }
         let acceptance = self.acceptance_path();
         let max_age = (self.maintenance["recovery"]["max_age_seconds"].as_u64()).map_or_else(
@@ -2768,7 +2801,7 @@ impl Rollout {
                 json!("activate the candidate generation, then run `rollout activated`")
             }
             Phase::Activated => json!(format!(
-                "verify the deployment, then run `rollout accept` (it writes {acceptance}) and `rollout thaw --acceptance {acceptance}`; if verification fails, or the recovery evidence ages past {max_age} after `prepare` so thaw cannot re-admit it, roll back to the previous generation, then run `rollout abort`",
+                "verify the deployment, then run `rollout accept` (it writes {acceptance}) and `rollout thaw --acceptance {acceptance}`; if verification fails, or the recovery evidence ages past {max_age} after `prepare` so thaw cannot re-admit it, roll back to the previous generation as the boot default (`nixos-rebuild switch --rollback`), then run `rollout abort`",
                 acceptance = acceptance.display()
             )),
             Phase::Thawed => json!(format!(
@@ -2809,8 +2842,10 @@ impl Rollout {
     /// Replaces the legacy pre-switch preparation for a rollout-enabled
     /// generation: the coordinator prepares and adopts under the fence, so
     /// activation is refused only while a rollout sits between fence and
-    /// adoption, or was adopted under another manifest. Recovery admission
-    /// (`inspect-recovery`) still gates the switch separately.
+    /// adoption, or was adopted under another rollout manifest. (A generation
+    /// without the coordinator may roll an adopted one back; abort then
+    /// unwinds it.) Recovery admission (`inspect-recovery`) still gates the
+    /// switch separately.
     fn activation_check(&self) -> Result<Value> {
         if let Some(journal) = self.journal()? {
             stranding(&journal, Some(&self.digest))?;
@@ -3077,6 +3112,20 @@ impl Rollout {
             } else {
                 "the candidate is activated; thaw with an acceptance, or roll back to the previous generation, then abort"
             }));
+        }
+        // Rolled back for now only (`nixos-rebuild test --rollback`), the
+        // candidate would boot next, unfenced and without thaw's checks.
+        if matches!(journal.phase, Phase::Adopted | Phase::Activated) {
+            if self.carries(&self.profile)? {
+                return Err(invalid(
+                    "the candidate is still the boot default; make the rolled-back generation the boot default first (`nixos-rebuild switch --rollback`, or `nixos-rebuild boot --rollback`), then abort",
+                ));
+            }
+            if self.carries(&self.booted)? {
+                return Err(invalid(
+                    "the host booted the candidate; boot the rolled-back generation first, then abort",
+                ));
+            }
         }
         if journal.phase != Phase::Aborted {
             self.reopen(&mut journal, opening.as_deref())?;
@@ -3494,6 +3543,8 @@ esac"#,
             rollout.anchor = self.root.path().to_owned();
             rollout.service_owner = Some((euid(), unsafe { libc::getegid() }));
             rollout.gcroots = self.p("gcroots");
+            rollout.profile = self.p("profile.json");
+            rollout.booted = self.p("booted.json");
             Ok(rollout)
         }
 
@@ -6057,9 +6108,15 @@ touch {admitted}"#,
                 "{phase:?}"
             );
         }
+        // Activated: an unwinding thaw needs the candidate installed, an
+        // unwinding abort (after a rollback) needs it gone.
         journal.phase = Phase::Activated;
         let hint = rollout.next_hint(&journal).to_string();
+        assert!(hint.contains("rerun `rollout abort`"), "{hint}");
+        std::os::unix::fs::symlink(f.p("rollout.json"), f.p("installed.json")).unwrap();
+        let hint = rollout.next_hint(&journal).to_string();
         assert!(hint.contains("rerun `rollout thaw`"), "{hint}");
+        fs::remove_file(f.p("installed.json")).unwrap();
         // Thawed: retire the rollout, never a fresh one.
         journal.phase = Phase::Thawed;
         let hint = rollout.next_hint(&journal).to_string();
@@ -6236,6 +6293,72 @@ touch {admitted}"#,
     }
 
     #[test]
+    fn abort_waits_until_the_candidate_is_no_longer_the_boot_default() {
+        let f = Fixture::new(0);
+        let rollout = f.rollout();
+        rollout.run(FENCE).unwrap();
+        for phase in [Phase::Adopted, Phase::Activated] {
+            let mut journal = rollout.journal().unwrap().unwrap();
+            journal.phase = phase;
+            rollout.save(&journal).unwrap();
+            // Rolled back with `test` only: the system profile still boots it.
+            std::os::unix::fs::symlink(f.p("rollout.json"), f.p("profile.json")).unwrap();
+            let error = rollout.run(NO_ADOPTION).unwrap_err().to_string();
+            assert!(
+                error.contains("still the boot default"),
+                "{phase:?}: {error}"
+            );
+            fs::remove_file(f.p("profile.json")).unwrap();
+            std::os::unix::fs::symlink(f.p("rollout.json"), f.p("booted.json")).unwrap();
+            let error = rollout.run(NO_ADOPTION).unwrap_err().to_string();
+            assert!(error.contains("booted the candidate"), "{phase:?}: {error}");
+            fs::remove_file(f.p("booted.json")).unwrap();
+            assert_eq!(f.unit("a.service"), "inactive", "{phase:?}");
+        }
+        // Neither running, booting next, nor booted: it unwinds.
+        assert_eq!(rollout.run(NO_ADOPTION).unwrap()["phase"], "aborted");
+    }
+
+    #[test]
+    fn provisioning_never_adopts_a_directory_planted_at_its_staging_name() {
+        let f = Fixture::new(0);
+        let rollout = edit_manifest(&f, |m| {
+            m["prepare"]["read_write_paths"] = json!([f.p("evidence"), f.p("backup")]);
+            m["prepare"]["provision_directories"] = json!([
+                {"path": f.p("backup"), "group": "postgres", "mode": 0o700},
+                {"path": f.p("backup/nested"), "group": "postgres", "mode": 0o700},
+            ]);
+        })
+        .unwrap();
+        rollout
+            .provision(&f.p("backup"), "postgres", 0o700)
+            .unwrap();
+        // The parent's writer renames a directory of root's to the staging
+        // name it predicts: it is never chmodded, owned or published.
+        let planted = f.p(&format!(
+            "backup/.nested.{}.provisioning",
+            std::process::id()
+        ));
+        fs::create_dir(&planted).unwrap();
+        fs::set_permissions(&planted, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(planted.join("kept"), "").unwrap();
+        rollout
+            .provision(&f.p("backup/nested"), "postgres", 0o700)
+            .unwrap();
+        assert_eq!(fs::read_dir(f.p("backup/nested")).unwrap().count(), 0);
+        assert!(planted.join("kept").exists());
+        assert_eq!(fs::metadata(&planted).unwrap().mode() & 0o7777, 0o755);
+        // A directory just made is adjusted only once proved fresh: root's
+        // and empty, through its own descriptor.
+        let parent = open_directory(&f.p("backup")).unwrap();
+        fs::create_dir(f.p("backup/fresh")).unwrap();
+        assert!(fresh_at(&parent, "fresh".as_ref()).is_ok());
+        assert!(fresh_at(&parent, planted.file_name().unwrap()).is_err());
+        std::os::unix::fs::symlink(f.p("backup/fresh"), f.p("backup/link")).unwrap();
+        assert!(fresh_at(&parent, "link".as_ref()).is_err());
+    }
+
+    #[test]
     fn harbor_never_creates_the_parents_of_its_inhibition_state() {
         let f = Fixture::new(0);
         let path = f.p("maintenance.json");
@@ -6396,15 +6519,14 @@ touch {admitted}"#,
             rollout.save(&journal).unwrap();
             guard_at(&state).is_err()
         };
-        for phase in [
-            Phase::Idle,
-            Phase::Fenced,
-            Phase::Prepared,
-            Phase::Imported,
-            Phase::Adopted,
-            Phase::Activated,
-        ] {
+        for phase in [Phase::Idle, Phase::Fenced, Phase::Prepared, Phase::Imported] {
             assert!(refused(phase, false), "{phase:?}");
+        }
+        // An adopted or activated rollout may be rolled back (abort then
+        // unwinds it), but not while it is already unwinding.
+        for phase in [Phase::Adopted, Phase::Activated] {
+            assert!(!refused(phase, false), "{phase:?}");
+            assert!(refused(phase, true), "unwinding {phase:?}");
         }
         assert!(refused(Phase::Aborted, false), "an unwinding abort");
         assert!(!refused(Phase::Aborted, true));

@@ -220,8 +220,11 @@ and `rollout archive` retires one without fencing.
 
 Thaw re-admits the recovery evidence, which must therefore still be within its
 `maxAgeSeconds` of `prepare`. If the deployment fails verification, or the
-evidence ages out first, roll back to the previous generation, then `rollout
-abort` (allowed once the candidate is no longer installed). After thaw, retire
+evidence ages out first, roll back to the previous generation as the boot
+default (`nixos-rebuild switch --rollback`, or `boot --rollback`), then `rollout
+abort`. Abort is allowed once the candidate is neither installed, nor the system
+profile's (the next boot's) generation, nor the booted one; a `test` rollback
+alone would boot the candidate next, unfenced and without thaw's checks. After thaw, retire
 the rollout within that same window: activate a generation without `rollout`
 (and `recoveryPreparation`) and with `recovery.requireWriterFence = false`, or
 the consumer's equivalent. A generation that still declares `rollout` requires
@@ -379,14 +382,15 @@ Exclusion and recovery:
     ACLs are not considered);
   - every directory postgres must traverse to reach these grants it search
     permission;
-  - every writable sandbox path, the export root and the required mounts lie
-    on a chain no other user can swap;
+  - every writable sandbox path, the required mounts and an export root outside
+    every writable root (one inside is written through that root) lie on a
+    chain no other user can swap;
   - the journal root, the startup inhibition state directory and the drop-in
     root are root's and writable by no one else, or creatable;
   - the import slot's directory is (or can be created) private to root, and
     the slot is empty;
-  - no record snapshot or `preparation.json` from another writer window (or
-    none) is present.
+  - no record snapshot, `preparation.json` or receipt from another writer
+    window (or none) is present.
 
   `fence` creates the inhibition state's missing parents searchable before
   Harbor would create them root-private, and `import` never creates the slot
@@ -477,10 +481,12 @@ Exclusion and recovery:
   module installs `00-0-0-harbor-db-postgresql-rollout-guard`, sorted before
   any preparation, which refuses activation that would strand an open rollout:
   one between fence and adoption, with an interrupted fence or unfinished
-  abort, or adopted or activated under another manifest. With `rollout` it runs
-  `rollout activation-check`; without it (for example after the rollout is
-  retired) it runs the manifest-free `rollout-guard`, which reads only the fixed
-  journal and lets in only a thawed, fully aborted or never-started rollout.
+  abort, adopted or activated under another rollout manifest, or still
+  unwinding. With `rollout` it runs `rollout activation-check`; without it (for
+  example after the rollout is retired, or a generation rolled back to) it runs
+  the manifest-free `rollout-guard`, which reads only the fixed journal. That
+  lets in a thawed, fully aborted or never-started rollout, and an adopted or
+  activated one being rolled back (abort then unwinds it).
   `00-harbor-db-postgresql-recovery` still requires accepted recovery evidence.
 - **Digests.** `certify` prints `receipt_sha256`, the digest of the receipt it
   produced, computed on the executor; that (not the export's SHA-256, which

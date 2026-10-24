@@ -6983,6 +6983,8 @@ selectors = [
   "a_retried_unwind_never_restarts_a_client_it_already_started",
   "receipts_take_the_recovery_importers_bound",
   "an_export_root_inside_a_writable_root_is_written_through_it",
+  "abort_waits_until_the_candidate_is_no_longer_the_boot_default",
+  "provisioning_never_adopts_a_directory_planted_at_its_staging_name",
   "activation_is_refused_between_fence_and_adoption",
   "a_never_loaded_or_collected_worker_is_idle_whatever_its_state_reads",
   "sandbox_and_provisioned_paths_never_resolve_through_a_swappable_component",

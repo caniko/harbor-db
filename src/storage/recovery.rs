@@ -1169,11 +1169,11 @@ pub fn live_check(config: &Value, socket: &Path, port: u16, now: Option<i64>) ->
     result["snapshot_sha256"] = json!(digest(&source_snapshot_path(config, settings)?)?);
     Ok(result)
 }
-/// Root pins a trusted transported receipt before systemd snapshots it. The
-/// destination is a fresh private root-controlled file, never a worker pathname.
 /// The largest off-host receipt staging (and the rollout coordinator) accepts.
 pub(crate) const MAX_OFF_HOST_RECEIPT_BYTES: u64 = 16 << 20;
 
+/// Root pins a trusted transported receipt before systemd snapshots it. The
+/// destination is a fresh private root-controlled file, never a worker pathname.
 pub fn stage_off_host_import(incoming: &Path, destination: &Path) -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         return Err(invalid("off-host receipt staging requires root"));
