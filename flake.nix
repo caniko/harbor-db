@@ -393,6 +393,8 @@
         };
       });
 
+    formatter = forAllSystems ({pkgs, ...}: pkgs.alejandra);
+
     # Simit prebuild publication on trunk (secret ATTIC_TOKEN) of the
     # packages Canix consumes.
     apps.x86_64-linux.push-flake-inputs = let
@@ -410,8 +412,6 @@
           };
         };
       };
-
-    formatter = forAllSystems ({pkgs, ...}: pkgs.alejandra);
 
     devShells = forAllSystems ({pkgs, ...}: let
       packages = [
