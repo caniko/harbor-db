@@ -436,11 +436,14 @@ fn store_executable(path: &Path) -> bool {
 
 /// The recovery directories the preparation worker writes: the record
 /// snapshot's (with its locks and binding), each receipt's, and the backup
-/// root the backup command fills.
+/// root the backup command fills. With an off-host executor there is no local
+/// drill, so the local receipt is never written.
 fn recovery_directories(maintenance: &Value) -> Vec<PathBuf> {
     let recovery = &maintenance["recovery"];
+    let local = recovery["off_host_receipt_file"].is_null();
     ["snapshot_file", "receipt_file", "off_host_receipt_file"]
         .iter()
+        .filter(|key| local || **key != "receipt_file")
         .filter_map(|key| recovery[key].as_str())
         .filter_map(|file| Path::new(file).parent().map(Path::to_owned))
         .chain(recovery["backup_root"].as_str().map(PathBuf::from))
@@ -6701,6 +6704,18 @@ touch {admitted}"#,
         assert_eq!(certified["receipt_sha256"], receipt);
         let next = certified["next"].as_str().unwrap();
         assert!(next.contains(&format!("--sha256 {receipt}")), "{next}");
+    }
+
+    #[test]
+    fn an_executor_policy_never_claims_the_unused_local_receipt_directory() {
+        let mut maintenance = json!({"recovery": {"snapshot_file": "/evidence/records.json",
+            "receipt_file": "/local/recovery.json", "off_host_receipt_file": null}});
+        assert!(recovery_directories(&maintenance).contains(&PathBuf::from("/local")));
+        maintenance["recovery"]["off_host_receipt_file"] = json!("/evidence/off-host.json");
+        assert_eq!(
+            recovery_directories(&maintenance),
+            [PathBuf::from("/evidence"), PathBuf::from("/evidence")]
+        );
     }
 
     /// Steps print exactly one status document, so worker and executor output
