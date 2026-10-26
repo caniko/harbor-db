@@ -545,6 +545,19 @@ fn records(
             }
         }
     });
+    // A primary with fewer free connections than workers fails a concurrent
+    // pass. The checks are read-only, so repeat any that did not succeed one
+    // at a time: one free connection still suffices, as before.
+    for (slot, item) in digests.iter_mut().zip(checks) {
+        if !matches!(slot, Some(Ok(_))) {
+            let retried = digest(item);
+            let failed = retried.is_err();
+            *slot = Some(retried);
+            if failed {
+                break;
+            }
+        }
+    }
     let mut result = serde_json::Map::new();
     for (item, digest) in checks.iter().zip(digests) {
         let digest = digest.ok_or_else(|| invalid("record check was not executed"))??;

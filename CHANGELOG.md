@@ -28,8 +28,10 @@
   `--skip-checksums`. Admission checks its receipts before verifying the
   backup, so a preparation still waiting for its off-host receipt fails
   without reading it. Record checks run on up to four concurrent `psql`
-  workers with unchanged per-query bounds and results, and the rollout's
-  preparation unit keeps the default CPU weight instead of `CPUWeight=10`.
+  workers with unchanged per-query bounds and results; checks that fail are
+  repeated one at a time, so a primary with one free connection still
+  passes. The rollout's preparation unit keeps the default CPU weight
+  instead of `CPUWeight=10`.
 - With `offHostReceiptFile` configured, the independent executor's
   certification is the single restore proof. Preparation no longer runs the
   local `restoreCommand` drill, and admission (including preparation's import

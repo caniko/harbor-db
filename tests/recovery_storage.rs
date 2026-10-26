@@ -1079,6 +1079,37 @@ fn concurrent_record_checks_keep_each_digest_with_its_check() {
 }
 
 #[test]
+fn record_checks_still_complete_with_a_single_free_connection() {
+    let _workers = WORKERS.lock().unwrap();
+    let mut f = Fixture::new();
+    f.config["recovery"]["record_checks"] = json!(
+        (0..6)
+            .map(|n| json!({"name": format!("c{n}"), "database": "app", "sql": format!("SELECT check {n}")}))
+            .collect::<Vec<_>>()
+    );
+    // A primary with one free connection refuses every concurrent session.
+    let psql = f.p("package/bin/psql");
+    let script = fs::read_to_string(&psql).unwrap();
+    executable(
+        &psql,
+        &format!(
+            "for arg in \"$@\"; do case \"$arg\" in 'PREPARE harbor_db_recovery_query AS SELECT check '*) mkdir '{}' 2>/dev/null || exit 2; sleep 0.1; echo \"${{arg##* }}\"; rmdir '{}'; exit;; esac; done\n{}",
+            f.p("connection").display(),
+            f.p("connection").display(),
+            script.strip_prefix("#!/bin/sh\n").unwrap()
+        ),
+    );
+    let records = f.snapshot()["records"].clone();
+    for n in 0..6 {
+        assert_eq!(
+            records[format!("c{n}")],
+            json!(codec::digest(format!("{n}\n").as_bytes())),
+            "{records}"
+        );
+    }
+}
+
+#[test]
 fn executor_certification_replaces_the_local_drill_only_when_configured() {
     let _workers = WORKERS.lock().unwrap();
     let mut f = Fixture::new();

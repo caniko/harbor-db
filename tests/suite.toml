@@ -3322,6 +3322,7 @@ selectors = [
   "preparation_rejects_stale_snapshot_and_stale_backup_without_replacement",
   "preparation_validates_all_argv_and_required_fence_before_commands",
   "queries_are_local_read_only_normalized_and_workers_retain_explicit_leases",
+  "record_checks_still_complete_with_a_single_free_connection",
   "redirected_snapshot_receipt_and_backup_ancestors_are_rejected",
   "required_fence_binds_snapshots_certifiers_and_retained_authority_window",
   "required_fence_live_inspection_rejects_other_writers_before_capture",
