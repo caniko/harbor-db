@@ -74,6 +74,25 @@ pub struct Manifest {
     pub import_slot: PathBuf,
     pub executor: Executor,
     pub cutover: Option<Cutover>,
+    /// Ancestors of the cluster, backup or state paths owned by a named
+    /// non-root user (for example a home-like data root); empty when none.
+    pub trusted_ancestors: Vec<TrustedAncestor>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedAncestor {
+    pub path: PathBuf,
+    pub uid: u32,
+}
+
+/// An ancestor the manifest names as trusted: that exact directory, owned by
+/// the declared uid and writable by no one else. Trusting its owner is the
+/// operator's explicit choice; anyone else still cannot swap a component.
+fn trusted_ancestor(trusted: &[TrustedAncestor], at: &Path, uid: u32, mode: u32) -> bool {
+    mode & 0o022 == 0
+        && trusted
+            .iter()
+            .any(|ancestor| ancestor.path == at && ancestor.uid == uid)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -920,6 +939,22 @@ impl Rollout {
                 "rollout harbor, systemctl, systemd-run, cutover checker and transport hook must be executable regular store files and the preparation config a store file",
             ));
         }
+        // A trusted ancestor names one exact, absolute, normalized directory
+        // below `/` and a non-root owner (root-owned ones need no entry).
+        if manifest.trusted_ancestors.iter().any(|ancestor| {
+            ancestor.uid == 0
+                || !ancestor.path.is_absolute()
+                || ancestor.path.parent().is_none()
+                || !ancestor
+                    .path
+                    .components()
+                    .skip(1)
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+        }) {
+            return Err(invalid(
+                "rollout trusted ancestors must be absolute normalized directories below / with a non-root owner",
+            ));
+        }
         let executor = &manifest.executor;
         // Certification is independent only on another host, and `certify`
         // refuses root there: both are refused before the fence.
@@ -1123,9 +1158,16 @@ impl Rollout {
             let shared = metadata.mode() & 0o022 != 0;
             let sticky = metadata.mode() & 0o1000 != 0;
             let holder = holders.contains(&current.as_path());
+            let trusted = !leaf
+                && trusted_ancestor(
+                    &self.manifest.trusted_ancestors,
+                    &current,
+                    metadata.uid(),
+                    metadata.mode(),
+                );
             if !metadata.is_dir()
                 || (parent_shared && !owned)
-                || (!leaf && (!(owned || holder) || (shared && !sticky)))
+                || (!leaf && (!(owned || holder || trusted) || (shared && !sticky)))
             {
                 return Err(untrusted(&current));
             }
@@ -3406,6 +3448,29 @@ mod tests {
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
+    #[test]
+    fn trusted_ancestor_needs_exact_path_declared_owner_and_no_shared_write() {
+        let trusted = [TrustedAncestor {
+            path: PathBuf::from("/data/nvme0/can"),
+            uid: 1000,
+        }];
+        let at = Path::new("/data/nvme0/can");
+        assert!(trusted_ancestor(&trusted, at, 1000, 0o40755));
+        // Another owner, a group/world-writable mode, or another directory
+        // (even a child of the trusted one) stays untrusted.
+        assert!(!trusted_ancestor(&trusted, at, 1001, 0o40755));
+        assert!(!trusted_ancestor(&trusted, at, 1000, 0o40775));
+        assert!(!trusted_ancestor(&trusted, at, 1000, 0o40757));
+        assert!(!trusted_ancestor(&trusted, at, 1000, 0o41777));
+        assert!(!trusted_ancestor(
+            &trusted,
+            Path::new("/data/nvme0/can/x"),
+            1000,
+            0o40755
+        ));
+        assert!(!trusted_ancestor(&[], at, 1000, 0o40755));
+    }
+
     pub(super) fn executable(path: &Path, script: &str) {
         fs::write(path, format!("#!/bin/sh\n{script}\n")).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -3584,7 +3649,7 @@ esac"#,
                     "required_mounts": [], "supplementary_groups": [], "provision_directories": []},
                 "import_slot": self.p("import/receipt.json"),
                 "executor": {"host": "executor", "user": "can", "command": ["/bin/true"]},
-                "cutover": null,
+                "cutover": null, "trusted_ancestors": [],
             });
             let path = self.p(name);
             fs::write(&path, manifest.to_string()).unwrap();
@@ -3836,6 +3901,29 @@ esac"#,
         edit(&mut manifest);
         fs::write(&path, manifest.to_string()).unwrap();
         f.load(&path)
+    }
+
+    #[test]
+    fn load_accepts_only_normalized_non_root_trusted_ancestors() {
+        let f = Fixture::new(0);
+        let with = |path: &str, uid: u32| {
+            edit_manifest(&f, |m| {
+                m["trusted_ancestors"] = json!([{"path": path, "uid": uid}])
+            })
+        };
+        assert!(with("/data/nvme0/can", 1000).is_ok());
+        for (path, uid) in [
+            ("/data/nvme0/can", 0),
+            ("data/nvme0/can", 1000),
+            ("/", 1000),
+            ("/data/../etc", 1000),
+        ] {
+            let error = with(path, uid)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(error.contains("trusted ancestors"), "{path} {uid}: {error}");
+        }
     }
 
     #[test]

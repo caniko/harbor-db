@@ -371,6 +371,8 @@ in
           && rollout.setup_units == ["postgresql-setup.service"]
           && rollout.paused_publishers == ["fixture-backup.service"]
           && rollout.import_slot == "/srv/import/off-host.json"
+          # Always rendered (required by the coordinator), empty unless declared.
+          && rollout.trusted_ancestors == []
           && rollout.executor.command == ["/fixture/certify"]
           # Unset, the hook is not written (older coordinators load the manifest).
           && !(rollout.executor ? transport)

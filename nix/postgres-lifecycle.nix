@@ -142,6 +142,7 @@
     # (and abort under) a manifest without one.
     executor = {inherit (rollout.executor) host user command;} // lib.optionalAttrs (rollout.executor.transport != null) {inherit (rollout.executor) transport;};
     inherit (rollout) cutover;
+    trusted_ancestors = rollout.trustedAncestors;
   });
   # Refuses activating a generation that would strand an open rollout.
   activationGuard =
@@ -392,6 +393,23 @@ in {
             type = types.listOf types.nonEmptyStr;
             default = [];
             description = "Backup/evidence publishers skipped (via a drop-in condition) for the whole rollout.";
+          };
+          trustedAncestors = mkOption {
+            type = types.listOf (types.submodule {
+              options = {
+                path = mkOption {type = types.strMatching "/[^/]+(/[^/]+)*";};
+                uid = mkOption {type = types.ints.positive;};
+              };
+            });
+            default = [];
+            description = ''
+              Exact ancestor directories of the cluster, backup or state paths that a
+              non-root user owns (for example a home-like data root), each with that
+              owner's uid. The rollout's ancestry walk accepts such a directory only
+              when it has that owner and no group or world write bit; every other
+              ancestor must stay root-owned. Listing one trusts its owner not to swap
+              the path, so name only the operator's own data root.
+            '';
           };
           setupSettleSeconds = mkOption {
             type = types.ints.positive;
