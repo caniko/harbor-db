@@ -397,7 +397,8 @@ in {
           trustedAncestors = mkOption {
             type = types.listOf (types.submodule {
               options = {
-                path = mkOption {type = types.strMatching "/[^/]+(/[^/]+)*";};
+                # Normal components only, as the loader requires: no `.` or `..`.
+                path = mkOption {type = types.strMatching "(/([^/.][^/]*|\\.[^/.][^/]*|\\.\\.[^/]+))+";};
                 uid = mkOption {type = types.ints.positive;};
               };
             });

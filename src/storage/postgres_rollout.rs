@@ -2047,8 +2047,16 @@ impl Rollout {
         // renaming paths can never redirect a root mkdir, chown or rename.
         let (parent, metadata) = (self.walk(parent_path, &holders, Some(0o755))?)
             .ok_or_else(|| invalid("provisioned directory has no parent"))?;
-        // Created only in a directory no one else can write, or a declared one.
-        if !([0, euid()].contains(&metadata.uid()) || holders.contains(&parent_path))
+        // Created only in a directory no one else can write, a declared one, or
+        // a trusted user-owned ancestor (the same predicate the walk applied).
+        if !([0, euid()].contains(&metadata.uid())
+            || holders.contains(&parent_path)
+            || trusted_ancestor(
+                &self.manifest.trusted_ancestors,
+                parent_path,
+                metadata.uid(),
+                metadata.mode(),
+            ))
             || metadata.mode() & 0o022 != 0
         {
             return Err(invalid(format!(
