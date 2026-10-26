@@ -63,10 +63,10 @@ nix_builds = [
 
 # cargo-test already realizes all-targets/all-features native storage and harness tests.
 # Native ARM rows qualify both packages and all eight original non-VM gates.
-# Generated with Simit c5336e2d65441893da314117916f64ad6aa05da8 (caniko/simit#96,
-# which lets [ci.nix_build].only coexist with [prebuild]), realized from
-# github:caniko/simit/c5336e2d65441893da314117916f64ad6aa05da8#default.
-# Generator SHA-256: 24fd2ce3adfb3ba7082ddb3f022ee806a4a22fdbb7304cd8e6766c175be61b6f.
+# Generated with Simit 1691a26f5e5d70a0763dd5d60c9fd638cd321d5e (trunk; includes
+# caniko/simit#96, which lets [ci.nix_build].only coexist with [prebuild]),
+# realized from github:caniko/simit/1691a26f5e5d70a0763dd5d60c9fd638cd321d5e#default.
+# Generator SHA-256: c1c872817d2830ec027f2e8bc27b1fe5dbf82c8a525b128ca05c76aa58cd270a.
 # Grouped jobs provision the engine from the repository variable
 # SIMIT_CI_ENGINE_REVISION (still enrolled at de3325be17104fbdb0d70f1da38149d4016f1790).
 # Regenerate: simit init ci --platform github --ci-provider actions --runtime nix
