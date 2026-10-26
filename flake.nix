@@ -395,6 +395,24 @@
 
     formatter = forAllSystems ({pkgs, ...}: pkgs.alejandra);
 
+    # Simit prebuild publication on trunk (secret ATTIC_TOKEN) of the
+    # packages Canix consumes.
+    apps.x86_64-linux.push-flake-inputs = let
+      pkgs = nixpkgs.legacyPackages.x86_64-linux;
+    in
+      harbor-rs.lib.mkAtticPush {
+        inherit pkgs;
+        flake = ".";
+        paths = with self.packages.x86_64-linux; [harbor-db storage-lifecycle];
+        adapter = harbor-rs.lib.mkAdapter {
+          attic = {
+            endpoint = "https://attic.candee.baby";
+            cache = "canix";
+            tokenEnvVar = "ATTIC_TOKEN";
+          };
+        };
+      };
+
     devShells = forAllSystems ({pkgs, ...}: let
       packages = [
         pkgs.alejandra
