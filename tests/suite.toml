@@ -6997,6 +6997,7 @@ selectors = [
   "untrusted_state_directory_ancestry_is_refused",
   "trusted_ancestor_needs_exact_path_declared_owner_and_no_shared_write",
   "load_accepts_only_normalized_non_root_trusted_ancestors",
+  "root_only_walks_never_honor_a_trusted_ancestor",
   "every_quiesced_receiver_is_restarted_even_if_one_restart_fails",
   "abort_unwinds_an_acquisition_interrupted_before_fence_open",
   "the_state_directory_is_never_created_below_an_absent_mount",

@@ -408,8 +408,10 @@ in {
               Exact ancestor directories of the cluster, backup or state paths that a
               non-root user owns (for example a home-like data root), each with that
               owner's uid. The rollout's ancestry walk accepts such a directory only
-              when it has that owner and no group or world write bit; every other
-              ancestor must stay root-owned. Listing one trusts its owner not to swap
+              for data, provisioning, export and sandbox paths, and only when it has
+              that owner and no group or world write bit; root-only state (journal,
+              startup, import slot, execution lock) and every other ancestor must
+              stay root-owned. Listing one trusts its owner not to swap
               the path, so name only the operator's own data root.
             '';
           };
