@@ -3448,29 +3448,6 @@ mod tests {
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
-    #[test]
-    fn trusted_ancestor_needs_exact_path_declared_owner_and_no_shared_write() {
-        let trusted = [TrustedAncestor {
-            path: PathBuf::from("/data/nvme0/can"),
-            uid: 1000,
-        }];
-        let at = Path::new("/data/nvme0/can");
-        assert!(trusted_ancestor(&trusted, at, 1000, 0o40755));
-        // Another owner, a group/world-writable mode, or another directory
-        // (even a child of the trusted one) stays untrusted.
-        assert!(!trusted_ancestor(&trusted, at, 1001, 0o40755));
-        assert!(!trusted_ancestor(&trusted, at, 1000, 0o40775));
-        assert!(!trusted_ancestor(&trusted, at, 1000, 0o40757));
-        assert!(!trusted_ancestor(&trusted, at, 1000, 0o41777));
-        assert!(!trusted_ancestor(
-            &trusted,
-            Path::new("/data/nvme0/can/x"),
-            1000,
-            0o40755
-        ));
-        assert!(!trusted_ancestor(&[], at, 1000, 0o40755));
-    }
-
     pub(super) fn executable(path: &Path, script: &str) {
         fs::write(path, format!("#!/bin/sh\n{script}\n")).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -3901,6 +3878,29 @@ esac"#,
         edit(&mut manifest);
         fs::write(&path, manifest.to_string()).unwrap();
         f.load(&path)
+    }
+
+    #[test]
+    fn trusted_ancestor_needs_exact_path_declared_owner_and_no_shared_write() {
+        let trusted = [TrustedAncestor {
+            path: PathBuf::from("/data/nvme0/can"),
+            uid: 1000,
+        }];
+        let at = Path::new("/data/nvme0/can");
+        assert!(trusted_ancestor(&trusted, at, 1000, 0o40755));
+        // Another owner, a group/world-writable mode, or another directory
+        // (even a child of the trusted one) stays untrusted.
+        assert!(!trusted_ancestor(&trusted, at, 1001, 0o40755));
+        assert!(!trusted_ancestor(&trusted, at, 1000, 0o40775));
+        assert!(!trusted_ancestor(&trusted, at, 1000, 0o40757));
+        assert!(!trusted_ancestor(&trusted, at, 1000, 0o41777));
+        assert!(!trusted_ancestor(
+            &trusted,
+            Path::new("/data/nvme0/can/x"),
+            1000,
+            0o40755
+        ));
+        assert!(!trusted_ancestor(&[], at, 1000, 0o40755));
     }
 
     #[test]
