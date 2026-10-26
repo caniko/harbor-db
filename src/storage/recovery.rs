@@ -11,6 +11,7 @@ use std::{
         unix::fs::{MetadataExt, PermissionsExt},
     },
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use writer_fence::{exists, major, path};
@@ -364,16 +365,29 @@ fn verify_timeout(config: &Value) -> Result<Duration> {
         .ok_or_else(|| invalid("invalid backup verification timeout"))?;
     Duration::try_from_secs_f64(seconds).map_err(|_| invalid("invalid backup verification timeout"))
 }
-fn verify_backup(config: &Value, directory: &Path, leases: &[RawFd]) -> Result<()> {
+/// The record snapshot's producer (and an off-host certifier, whose copy
+/// crossed hosts) recomputes every file checksum against the manifest. Every
+/// later verification of that same local backup passes `checksums = false`:
+/// the manifest, file set and sizes are still checked, the bytes not re-read.
+fn verify_backup(
+    config: &Value,
+    directory: &Path,
+    leases: &[RawFd],
+    checksums: bool,
+) -> Result<()> {
     let timeout = verify_timeout(config)?;
-    let mut spec = process::CommandSpec::new(vec![
+    let mut argv = vec![
         path(config, "package")?
             .join("bin/pg_verifybackup")
             .to_string_lossy()
             .into_owned(),
         "--no-parse-wal".into(),
-        directory.to_string_lossy().into_owned(),
-    ]);
+    ];
+    if !checksums {
+        argv.push("--skip-checksums".into());
+    }
+    argv.push(directory.to_string_lossy().into_owned());
+    let mut spec = process::CommandSpec::new(argv);
     spec.timeout = timeout;
     spec.leases = leases.to_vec();
     process::execute(&spec)?;
@@ -482,6 +496,8 @@ pub(super) fn query_argv(
         "BEGIN READ ONLY; SET LOCAL TimeZone = 'UTC'; SET LOCAL DateStyle = 'ISO,YMD'; SET LOCAL bytea_output = 'hex'; EXECUTE harbor_db_recovery_query; COMMIT;".into(),
     ])
 }
+/// Concurrent record-check queries (each its own psql backend).
+const RECORD_WORKERS: usize = 4;
 fn records(
     config: &Value,
     settings: &Value,
@@ -489,25 +505,50 @@ fn records(
     port: u16,
     leases: &[RawFd],
 ) -> Result<Value> {
-    let mut result = serde_json::Map::new();
-    for item in settings["record_checks"]
+    let checks = settings["record_checks"]
         .as_array()
-        .ok_or_else(|| invalid("invalid record checks"))?
-    {
-        result.insert(
-            string(item, "name")?.into(),
-            json!(codec::digest(
-                record_query_leased(
-                    config,
-                    socket,
-                    port,
-                    string(item, "database")?,
-                    string(item, "sql")?,
-                    leases
-                )?
-                .as_bytes()
-            )),
-        );
+        .ok_or_else(|| invalid("invalid record checks"))?;
+    let digest = |item: &Value| -> Result<String> {
+        let rows = record_query_leased(
+            config,
+            socket,
+            port,
+            string(item, "database")?,
+            string(item, "sql")?,
+            leases,
+        )?;
+        Ok(codec::digest(rows.as_bytes()))
+    };
+    // Workers take checks in order and stop taking new ones after a failure;
+    // results are matched back to their checks by index.
+    let (next, failed) = (AtomicUsize::new(0), AtomicBool::new(false));
+    let mut digests: Vec<Option<Result<String>>> = checks.iter().map(|_| None).collect();
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..checks.len().min(RECORD_WORKERS))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    while !failed.load(Ordering::Relaxed) {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = checks.get(index) else { break };
+                        let result = digest(item);
+                        failed.fetch_or(result.is_err(), Ordering::Relaxed);
+                        done.push((index, result));
+                    }
+                    done
+                })
+            })
+            .collect();
+        for worker in workers {
+            for (index, result) in worker.join().expect("record check worker panicked") {
+                digests[index] = Some(result);
+            }
+        }
+    });
+    let mut result = serde_json::Map::new();
+    for (item, digest) in checks.iter().zip(digests) {
+        let digest = digest.ok_or_else(|| invalid("record check was not executed"))??;
+        result.insert(string(item, "name")?.into(), json!(digest));
     }
     Ok(Value::Object(result))
 }
@@ -730,7 +771,7 @@ pub fn snapshot_leased(
         port,
         &leases,
     )?;
-    verify_backup(config, &directory, &leases)?;
+    verify_backup(config, &directory, &leases, true)?;
     let mut result = result(&binding)?;
     result["completed_at"] = json!(now);
     result["record_contract_sha256"] = json!(contract(settings)?);
@@ -898,13 +939,12 @@ pub fn certify(
     )?;
     let source = snapshot_evidence(config, settings, &binding, now)?;
     source_fence(settings, &source)?;
-    machine_acceptance(
-        &source,
-        &json!(executor_machine),
-        settings["source_hostname"].as_str() != Some(executor.as_str())
-            || settings["receipt_file"] == settings["off_host_receipt_file"],
-    )?;
-    verify_backup(config, &directory, &leases)?;
+    let off_host = settings["source_hostname"].as_str() != Some(executor.as_str())
+        || settings["receipt_file"] == settings["off_host_receipt_file"];
+    machine_acceptance(&source, &json!(executor_machine), off_host)?;
+    // Off host this is the end-to-end check of the transported bytes against
+    // the primary's manifest; a local drill reads the snapshot's own backup.
+    verify_backup(config, &directory, &leases, off_host)?;
     let observed =
         verify_restored_endpoint(config, settings, &binding, &restored, socket, port, &leases)?;
     let actual = records(config, settings, socket, port, &leases)?;
@@ -1085,9 +1125,6 @@ fn check_evidence(
     {
         return Err(invalid("record snapshot is incomplete"));
     }
-    if verify_contents {
-        verify_backup(config, directory, leases)?;
-    }
     let mut result = binding.clone();
     result["status"] = json!(if verify_contents {
         "ready"
@@ -1108,6 +1145,10 @@ fn check_evidence(
         if label.starts_with("off-host") {
             result["off_host"] = receipt["executor_host"].clone();
         }
+    }
+    // Receipts are cheap: a missing one fails before the backup is re-read.
+    if verify_contents {
+        verify_backup(config, directory, leases, false)?;
     }
     Ok(result)
 }
@@ -1409,7 +1450,7 @@ fn verify_prepared_snapshot(
             "record snapshot writer fence differs from the retained window",
         ));
     }
-    verify_backup(config, &directory, &held)
+    verify_backup(config, &directory, &held, false)
 }
 
 fn accept_prepared_restore(

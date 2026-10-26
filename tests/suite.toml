@@ -3296,7 +3296,9 @@ argv_suffix = ["--", "--exact"]
 maturity = "crystallized"
 selectors = [
   "backup_and_evidence_leases_exclude_mutation_through_authority_publication",
+  "backup_checksums_run_once_per_snapshot_and_again_off_host",
   "backup_manifest_metadata_identity_and_completed_identifier_changes_invalidate_evidence",
+  "concurrent_record_checks_keep_each_digest_with_its_check",
   "disposable_certifier_rejects_missing_or_invalid_copied_fence_tokens",
   "disposable_restore_must_be_distinct_read_only_primary_at_recovery_point",
   "fractional_verification_timeout_runs_backup_verification",

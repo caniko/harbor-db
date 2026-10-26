@@ -437,7 +437,7 @@ impl Fixture {
         executable(
             &root.path().join("package/bin/pg_verifybackup"),
             &format!(
-                "printf 'verify\\n' >> '{}'; test ! -e '{}'",
+                "case \" $* \" in *' --skip-checksums '*) printf 'skip\\n';; *) printf 'verify\\n';; esac >> '{}'; test ! -e '{}'",
                 root.path().join("verify.log").display(),
                 root.path().join("corrupt").display()
             ),
@@ -1021,6 +1021,61 @@ fn verification_timeout_retains_source_for_explicit_retry() {
     assert!(f.p("backup/base/base-1/backup_manifest").exists());
     executable(&f.p("package/bin/pg_verifybackup"), "exit 0");
     assert_eq!(f.snapshot()["backup_id"], "base-1");
+}
+
+#[test]
+fn backup_checksums_run_once_per_snapshot_and_again_off_host() {
+    let _workers = WORKERS.lock().unwrap();
+    let f = Fixture::new();
+    // The snapshot verifies the bytes; the local drill and admission reuse them.
+    f.accepted();
+    recovery::check(&f.config, Some(f.now)).unwrap();
+    // An off-host certifier's copy crossed hosts: full checksums again.
+    let mut source = f.source();
+    source["source_machine_sha256"] = json!("0".repeat(64));
+    durable::write_json(&f.p("backup/evidence/records.json"), &source).unwrap();
+    recovery::certify(
+        &f.config,
+        &f.p("restored"),
+        Path::new("/restore/socket"),
+        55432,
+        Some(f.now),
+        Some("independent-host"),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(f.p("verify.log")).unwrap(),
+        "verify\nskip\nskip\nverify\n"
+    );
+}
+
+#[test]
+fn concurrent_record_checks_keep_each_digest_with_its_check() {
+    let _workers = WORKERS.lock().unwrap();
+    let mut f = Fixture::new();
+    f.config["recovery"]["record_checks"] = json!(
+        (0..6)
+            .map(|n| json!({"name": format!("c{n}"), "database": "app", "sql": format!("SELECT check {n}")}))
+            .collect::<Vec<_>>()
+    );
+    // Earlier checks answer later, so completion order is not check order.
+    let psql = f.p("package/bin/psql");
+    let script = fs::read_to_string(&psql).unwrap();
+    executable(
+        &psql,
+        &format!(
+            "for arg in \"$@\"; do case \"$arg\" in 'PREPARE harbor_db_recovery_query AS SELECT check '*) n=${{arg##* }}; sleep 0.$((6 - n)); echo \"$n\"; exit;; esac; done\n{}",
+            script.strip_prefix("#!/bin/sh\n").unwrap()
+        ),
+    );
+    let records = f.snapshot()["records"].clone();
+    for n in 0..6 {
+        assert_eq!(
+            records[format!("c{n}")],
+            json!(codec::digest(format!("{n}\n").as_bytes())),
+            "{records}"
+        );
+    }
 }
 
 #[test]

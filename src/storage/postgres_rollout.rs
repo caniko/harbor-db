@@ -2130,7 +2130,6 @@ impl Rollout {
                 "--property=NoNewPrivileges=true",
                 "--property=UMask=0077",
                 "--property=KillMode=control-group",
-                "--property=CPUWeight=10",
             ])
             .arg(format!(
                 "--property=TimeoutStartSec={}",
