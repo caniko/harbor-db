@@ -74,6 +74,8 @@ nix_builds = [
 # The ten native VM checks are exported only on x86_64-linux and require KVM.
 [ci.nix_build]
 only = true
+# Fork-safe fallback for vars.SIMIT_CI_ENGINE_REVISION; an enrolled variable wins.
+engine_revision = "de3325be17104fbdb0d70f1da38149d4016f1790"
 # Pull requests qualify their exact head once; trunk keeps its push run.
 push_branches = ["trunk"]
 timeout_minutes = 90
