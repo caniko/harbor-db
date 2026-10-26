@@ -110,6 +110,9 @@
     lib.applicationBackup = 2;
     lib.applicationBackendTransition = 1;
     lib.cutoverPreflight = 3;
+    # `harbor-db-postgres rollout` and `services.harbor-db.postgresql.rollout`.
+    # 3 adds the optional `executor.transport` hand-off hook.
+    lib.postgresRollout = 3;
     lib.timezone = harbor-meta.lib.timezone;
     lib.testing.mkBtrfsCrashTest = import ./nix/testing/btrfs-crash.nix;
     nixosModules.harbor-db = {
@@ -362,6 +365,7 @@
         };
         native-postgres-interrupted-upgrade = pkgs.callPackage ./nix/test-postgres-upgrade.nix {inherit nativePackage;};
         native-postgres-recovery-acceptance = pkgs.callPackage ./nix/test-postgres-recovery.nix {inherit nativePackage;};
+        native-postgres-rollout = pkgs.callPackage ./nix/test-postgres-rollout.nix {inherit nativePackage;};
         native-postgres-writer-fence = pkgs.callPackage ./nix/test-postgres-writer-fence.nix {
           inherit nativePackage;
           interop = true;
@@ -390,6 +394,24 @@
       });
 
     formatter = forAllSystems ({pkgs, ...}: pkgs.alejandra);
+
+    # Simit prebuild publication on trunk (secret ATTIC_TOKEN) of the
+    # packages Canix consumes.
+    apps.x86_64-linux.push-flake-inputs = let
+      pkgs = nixpkgs.legacyPackages.x86_64-linux;
+    in
+      harbor-rs.lib.mkAtticPush {
+        inherit pkgs;
+        flake = ".";
+        paths = with self.packages.x86_64-linux; [harbor-db storage-lifecycle];
+        adapter = harbor-rs.lib.mkAdapter {
+          attic = {
+            endpoint = "https://attic.candee.baby";
+            cache = "canix";
+            tokenEnvVar = "ATTIC_TOKEN";
+          };
+        };
+      };
 
     devShells = forAllSystems ({pkgs, ...}: let
       packages = [

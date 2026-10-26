@@ -138,8 +138,124 @@ enum Operation {
         #[arg(long)]
         retry_incomplete: bool,
     },
+    /// Coordinate a guarded first rollout from one rollout manifest (`--config`).
+    Rollout {
+        #[command(subcommand)]
+        step: RolloutStep,
+    },
+    /// Pre-switch guard of a generation without the rollout coordinator: reads
+    /// only the fixed rollout journal (`--config` is not consulted).
+    #[command(hide = true)]
+    RolloutGuard,
+}
+#[derive(Subcommand)]
+enum RolloutStep {
+    /// Show the journal phase and the next action (needs read access to the
+    /// root-owned journal; takes no lease).
+    Status,
+    /// Pre-switch guard: refuse activation while a rollout sits between fence
+    /// and adoption (installed by the module in place of legacy preparation).
+    #[command(hide = true)]
+    ActivationCheck,
+    /// Perform the next local step, or print the external action.
+    Next {
+        /// As for `fence`.
+        #[arg(long)]
+        adopt_fence_token: Option<String>,
+    },
+    /// Pause publishers, stop clients and open the writer fence.
+    Fence {
+        /// After an opening interrupted before its token was recorded, adopt
+        /// Harbor's live fence by its token (once no other coordinator ran).
+        #[arg(long)]
+        adopt_fence_token: Option<String>,
+    },
+    /// Run recovery preparation; stops at the independent-certification hand-off.
+    Prepare,
+    /// On the executor: restore and certify a transported export.
+    Certify {
+        #[arg(long)]
+        export: PathBuf,
+        #[arg(long)]
+        export_sha256: String,
+        #[arg(long)]
+        workspace: PathBuf,
+    },
+    /// Stage the independent receipt and admit it.
+    Import {
+        #[arg(long)]
+        receipt: PathBuf,
+        #[arg(long)]
+        sha256: String,
+    },
+    /// Re-verify live records and adopt the primary's authority.
+    Adopt,
+    /// Record that the candidate generation is active under the fence.
+    Activated,
+    /// After verifying the deployment, write the acceptance `thaw` checks
+    /// (root 0600 in the journal root) and print its path in `next`.
+    Accept,
+    /// Release the fence with a deployment acceptance and restart clients.
+    Thaw {
+        #[arg(long)]
+        acceptance: PathBuf,
+    },
+    /// Archive a thawed or aborted rollout's journal and drop its GC root,
+    /// without starting a new rollout.
+    Archive,
+    /// Back out before activation, or after rolling back a failed deployment:
+    /// close the fence and restart clients.
+    Abort {
+        /// Explicitly adopt Harbor's live writer fence by its token: with no
+        /// journal, or after an opening interrupted before its token was recorded.
+        #[arg(long)]
+        adopt_fence_token: Option<String>,
+        /// With no journal and no live fence, explicitly adopt Harbor's held
+        /// startup inhibition by its token.
+        #[arg(long, conflicts_with = "adopt_fence_token")]
+        adopt_startup_token: Option<String>,
+    },
 }
 fn operate(args: Args) -> Result<Option<Value>> {
+    if let Operation::RolloutGuard = args.command {
+        return Ok(Some(storage::postgres_rollout::activation_guard()?));
+    }
+    if let Operation::Rollout { step } = args.command {
+        use storage::postgres_rollout::Action;
+        let action = match step {
+            RolloutStep::Status => Action::Status,
+            RolloutStep::ActivationCheck => Action::ActivationCheck,
+            RolloutStep::Next { adopt_fence_token } => Action::Next { adopt_fence_token },
+            RolloutStep::Fence { adopt_fence_token } => Action::Fence { adopt_fence_token },
+            RolloutStep::Prepare => Action::Prepare,
+            RolloutStep::Certify {
+                export,
+                export_sha256,
+                workspace,
+            } => Action::Certify {
+                export,
+                export_sha256,
+                workspace,
+            },
+            RolloutStep::Import { receipt, sha256 } => Action::Import { receipt, sha256 },
+            RolloutStep::Adopt => Action::Adopt,
+            RolloutStep::Activated => Action::Activated,
+            RolloutStep::Accept => Action::Accept,
+            RolloutStep::Thaw { acceptance } => Action::Thaw { acceptance },
+            RolloutStep::Archive => Action::Archive,
+            RolloutStep::Abort {
+                adopt_fence_token,
+                adopt_startup_token,
+            } => Action::Abort {
+                adopt_fence_token,
+                adopt_startup_token,
+            },
+        };
+        return Ok(Some(storage::postgres_rollout::operate(
+            &args.config,
+            action,
+        )?));
+    }
     let config = durable::read_config_json(&args.config)?;
     let result = match args.command {
         Operation::StageOffHostReceipt {
@@ -255,6 +371,9 @@ fn operate(args: Args) -> Result<Option<Value>> {
             socket_dir,
             port,
         } => storage::recovery::certify(&config, &data_dir, &socket_dir, port, None, None)?,
+        Operation::Rollout { .. } | Operation::RolloutGuard => {
+            unreachable!("handled before policy loading")
+        }
     };
     Ok(Some(result))
 }

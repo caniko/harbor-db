@@ -71,6 +71,23 @@
       }
     ];
   };
+  withRollout = withPreparation.extendModules {
+    modules = [
+      {
+        # The rollout hands the executor this export; it is required.
+        services.harbor-db.postgresql.recoveryPreparation.exportCommand = ["/fixture/export"];
+        services.harbor-db.postgresql.rollout = {
+          exportRoot = "/srv/harbor-db/export";
+          pausedPublishers = ["fixture-backup.service"];
+          executor = {
+            host = "executor";
+            user = "operator";
+            command = ["/fixture/certify"];
+          };
+        };
+      }
+    ];
+  };
   preparationHook = pkgs.writeText "recovery-preparation-hook" withPreparation.config.system.preSwitchChecks."00-0-harbor-db-postgresql-prepare";
   sourceLocalPolicy = {
     prepare,
@@ -119,6 +136,24 @@ in
         name = "lifecycle-configuration-matches-check-platform";
         message = "Lifecycle configuration and preparation dependencies must use the check's native platform.";
         assertion = eval.pkgs.stdenv.hostPlatform.system == pkgs.stdenv.hostPlatform.system;
+      }
+      {
+        name = "rollout-transport-requires-one-immutable-hook";
+        message = "A root executor transport hook must be one immutable store executable, rendered only when set.";
+        assertion = let
+          hook = "${pkgs.writeShellScript "immutable-transport" "exit 0"}";
+          with' = transport: withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.executor.transport = lib.mkForce transport;}];};
+          accepted = transport:
+            lib.all (a: a.assertion || a.message != "The rollout's root executor transport hook must be one immutable store executable.")
+            (with' transport).config.assertions;
+          rendered = builtins.fromJSON (builtins.unsafeDiscardStringContext (with' hook).config.environment.etc."harbor-db/postgresql-rollout.json".source.text);
+        in
+          accepted hook
+          && accepted null
+          && !accepted "/run/current-system/sw/bin/transport"
+          && !accepted "transport"
+          && !accepted "/nix/store/invalid-transport"
+          && rendered.executor.transport == hook;
       }
       {
         name = "upgrade-requires-immutable-validator";
@@ -322,13 +357,141 @@ in
         message = "Persistent startup inhibition must cover setup so a legacy switch cannot run setup SQL against the inhibited primary.";
       }
       {
+        name = "rollout-coordinator-manifest";
+        assertion = let
+          etc = withRollout.config.environment.etc;
+          rollout = builtins.fromJSON (builtins.unsafeDiscardStringContext etc."harbor-db/postgresql-rollout.json".source.text);
+        in
+          !(eval.config.environment.etc ? "harbor-db/postgresql-rollout.json")
+          && rollout.version == 2
+          && rollout.execution_lock == null
+          && !(rollout ? state_dir || rollout ? runuser)
+          && rollout.system_identifier == "12345"
+          && rollout.clients == ["fixture-client.service"]
+          && rollout.setup_units == ["postgresql-setup.service"]
+          && rollout.paused_publishers == ["fixture-backup.service"]
+          && rollout.import_slot == "/srv/import/off-host.json"
+          && rollout.executor.command == ["/fixture/certify"]
+          # Unset, the hook is not written (older coordinators load the manifest).
+          && !(rollout.executor ? transport)
+          && lib.last rollout.prepare.provision_directories
+          == {
+            path = "/srv/harbor-db/export";
+            group = "users";
+            mode = 488;
+          }
+          && rollout.maintenance == builtins.unsafeDiscardStringContext (toString etc."harbor-db/postgresql.json".source);
+        message = "The opt-in rollout manifest must bind the fenced primary, client inventory, setup units, publishers and executor.";
+      }
+      {
+        name = "rollout-replaces-legacy-preparation-and-rejects-split-properties";
+        assertion = let
+          checks = withRollout.config.system.preSwitchChecks;
+          accepted = overrides:
+            lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout systemd property" entry.message))
+            (withRollout.extendModules {modules = [overrides];}).config.assertions;
+          rollout = value: {services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce value;};
+          preparation = name: value: {services.harbor-db.postgresql.recoveryPreparation.${name} = lib.mkForce value;};
+        in
+          !(checks ? "00-0-harbor-db-postgresql-prepare")
+          && lib.hasInfix "rollout activation-check" checks."00-0-0-harbor-db-postgresql-rollout-guard"
+          # Without a rollout, a manifest-free guard still protects an open one.
+          && lib.all (selected: lib.hasInfix " rollout-guard" selected.config.system.preSwitchChecks."00-0-0-harbor-db-postgresql-rollout-guard") [eval withPreparation]
+          && accepted {}
+          && lib.all (path: !accepted (rollout path)) ["/srv/harbor-db/ex port" "/srv/harbor-db/ex\tport" "/srv/harbor-db/ex%h" "/srv/harbor-db/ex\\port" "/srv/harbor-db/ex'port"]
+          && !accepted (preparation "readWritePaths" ["/srv/backups /srv/postgres/18" "/srv/disposable"])
+          && !accepted (preparation "supplementaryGroups" ["users wheel"])
+          && !accepted (preparation "offHostReceiptImportFile" "/srv/import/off:host.json")
+          # Each unit has one role: a retired client is never a paused publisher.
+          && lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout units must each have one role" entry.message)) withRollout.config.assertions
+          && lib.any (entry: !entry.assertion && lib.hasPrefix "Rollout units must each have one role" entry.message)
+          (withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.retiredClients = ["fixture-backup.service"];}];}).config.assertions
+          && lib.any (entry: !entry.assertion && lib.hasPrefix "Rollout units must each have one role" entry.message)
+          (withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.receiverUnits = ["postgresql.service"];}];}).config.assertions
+          # Only clients may be templates; the export root has one contract.
+          && lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout paused publishers, receivers" entry.message)) withRollout.config.assertions
+          && lib.all (module:
+            lib.any (entry: !entry.assertion && lib.hasPrefix "Rollout paused publishers, receivers" entry.message)
+            (withRollout.extendModules {modules = [module];}).config.assertions) [
+            {services.harbor-db.postgresql.rollout.pausedPublishers = lib.mkForce ["fixture-backup@.service"];}
+            {services.harbor-db.postgresql.rollout.receiverUnits = ["fixture-receiver@.service"];}
+            {services.harbor-db.postgresql.recoveryPreparation.provisionDirectories = ["/srv/harbor-db/export"];}
+          ]
+          # What the coordinator's load refuses fails evaluation too.
+          && lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout coordinator:" entry.message)) withRollout.config.assertions
+          && lib.all (module:
+            lib.any (entry: !entry.assertion && lib.hasPrefix "Rollout coordinator:" entry.message)
+            (withRollout.extendModules {modules = [module];}).config.assertions) [
+            {services.harbor-db.postgresql.recovery.requireWriterFence = lib.mkForce false;}
+            {services.harbor-db.postgresql.recovery.repositoryProtocol = "source-local-v1";}
+            {services.harbor-db.postgresql.rollout.pausedPublishers = lib.mkForce ["fixture-backup.timer"];}
+            {services.harbor-db.postgresql.rollout.executor.command = lib.mkForce [];}
+            {services.harbor-db.postgresql.rollout.executor.command = lib.mkForce ["certify"];}
+            {
+              networking.hostName = "primary";
+              services.harbor-db.postgresql.rollout.executor.host = lib.mkForce "primary";
+            }
+            {services.harbor-db.postgresql.rollout.executor.user = lib.mkForce "root";}
+          ]
+          # The roots post-fence steps write are disjoint but for the intended nestings.
+          && lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout roots:" entry.message)) withRollout.config.assertions
+          && lib.all (module:
+            lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout roots:" entry.message))
+            (withRollout.extendModules {modules = [module];}).config.assertions) [
+            {services.harbor-db.postgresql.recoveryPreparation.provisionDirectories = ["/srv/backups" "/srv/backups/evidence"];}
+            {services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce "/srv/disposable/export";}
+          ]
+          && lib.all (module:
+            lib.any (entry: !entry.assertion && lib.hasPrefix "Rollout roots:" entry.message)
+            (withRollout.extendModules {modules = [module];}).config.assertions) [
+            {services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce "/var/lib/harbor-db/postgresql-rollout/export";}
+            {services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce "/var/lib/harbor-db/postgresql-startup/export";}
+            {
+              services.harbor-db.postgresql.recoveryPreparation.provisionDirectories = ["/srv/disposable/work"];
+              services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce "/srv/disposable/work/export";
+            }
+            {services.harbor-db.postgresql.writerFence.startupStateDir = lib.mkForce "/var/lib/harbor-db/postgresql-rollout/startup";}
+            {services.harbor-db.postgresql.recoveryPreparation.offHostReceiptImportFile = lib.mkForce "/srv/backups/import.json";}
+            {services.harbor-db.postgresql.recoveryPreparation.readWritePaths = lib.mkForce ["/srv/backups" "/srv/backups/nested"];}
+            {services.harbor-db.postgresql.recoveryPreparation.readWritePaths = lib.mkForce ["/srv/disposable"];}
+            # The backup command fills the backup root from the worker.
+            {services.harbor-db.postgresql.recovery.backupRoot = lib.mkForce "/srv/repository";}
+          ];
+        message = "A rollout replaces the legacy pre-switch preparation with its activation guard and refuses systemd property values that split into extra entries.";
+      }
+      {
+        name = "rollout-guards-render-from-its-maintenance";
+        assertion = let
+          custom = pkgs.writeText "custom-maintenance.json" "{}";
+          plain = value: builtins.unsafeDiscardStringContext (toString value);
+          default = plain eval.config.environment.etc."harbor-db/postgresql.json".source;
+          guards = selected: let
+            inherit (selected.config) system systemd;
+          in [
+            system.preSwitchChecks."00-harbor-db-postgresql-recovery"
+            system.preSwitchChecks.harbor-db-postgresql-adoption
+            systemd.services.postgresql.preStart
+            systemd.services.postgresql.serviceConfig.ExecStart
+            systemd.services.harbor-db-postgresql-recovery-check.serviceConfig.ExecStart
+          ];
+          renders = path: selected: lib.all (text: lib.hasInfix "--config ${path} " (plain text)) (guards selected);
+          customized = withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.maintenance = custom;}];};
+        in
+          renders (plain custom) customized
+          && renders default withRollout
+          && renders default withPreparation
+          # The upgrade keeps the module's own (upgrade-bound) manifest.
+          && lib.hasInfix default (plain customized.config.systemd.services.harbor-db-postgresql-upgrade.serviceConfig.ExecStart);
+        message = "With a rollout, every guard inspecting recovery, fence or startup state must render from the rollout's maintenance manifest, so activation after adoption agrees with the coordinator.";
+      }
+      {
         name = "managed-preactivation-preparation";
         assertion = let
           checks = withPreparation.config.system.preSwitchChecks;
           hook = checks."00-0-harbor-db-postgresql-prepare";
         in
           !(eval.config.system.preSwitchChecks ? "00-0-harbor-db-postgresql-prepare")
-          && builtins.head (builtins.attrNames checks) == "00-0-harbor-db-postgresql-prepare"
+          && lib.take 2 (builtins.attrNames checks) == ["00-0-0-harbor-db-postgresql-rollout-guard" "00-0-harbor-db-postgresql-prepare"]
           && lib.hasInfix "prepare-recovery --preparation-config" hook
           && lib.hasInfix "--property=User=postgres" hook
           && lib.hasInfix "--property=LoadCredential=recovery-off-host:" hook

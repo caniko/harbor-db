@@ -231,7 +231,7 @@ fn committed_inventory_is_individual_and_migration_bound() {
             .iter()
             .filter(|case| case.id.starts_with("vm."))
             .count(),
-        30
+        31
     );
     for profile in [
         Profile::Fast,
@@ -335,7 +335,9 @@ prefixes = {'src/planner/tests.rs': 'tests::',
              'src/storage/recovery.rs': 'storage::recovery::tests::',
              'src/storage/application_transition.rs': 'storage::application_transition::tests::',
               'src/storage/recovery_capture.rs': 'storage::recovery_capture::tests::',
-              'src/storage/application_publication.rs': 'storage::application_publication::tests::'}
+              'src/storage/application_publication.rs': 'storage::application_publication::tests::',
+              'src/storage/postgres_rollout.rs': 'storage::postgres_rollout::tests::',
+              'src/storage/postgres_rollout_transport.rs': 'storage::postgres_rollout::transport::tests::'}
 sources += [pathlib.Path(path) for path in prefixes]
 tests = []
 for source in sources:

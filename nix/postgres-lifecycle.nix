@@ -74,7 +74,14 @@
     if cfg.upgrade == null
     then rawManifest
     else immutableFiles.checkedManifest "Harbor DB PostgreSQL upgrade" (cfg.upgrade.executableFiles ++ lib.optional (cfg.upgrade.validateCommand != []) (lib.head cfg.upgrade.validateCommand)) rawManifest;
-  command = "${lib.getExe cfg.package} --config ${manifest}";
+  # With a rollout, every guard and service that inspects recovery, fence or
+  # startup state renders from the maintenance manifest the coordinator fences,
+  # prepares and adopts under, so the candidate's activation agrees with it.
+  command = "${lib.getExe cfg.package} --config ${
+    if cfg.rollout != null
+    then cfg.rollout.maintenance
+    else manifest
+  }";
   liveArgs = lib.optionalString (cfg.switchAdoption != null) (lib.escapeShellArgs [
     "--system-identifier"
     cfg.switchAdoption.systemIdentifier
@@ -91,6 +98,56 @@
     restore_command = preparation.restoreCommand;
     export_command = preparation.exportCommand;
   });
+  inherit (cfg) rollout;
+  rolloutManifest = pkgs.writeText "harbor-db-postgresql-rollout.json" (builtins.toJSON {
+    version = 2;
+    host = config.networking.hostName;
+    system_identifier = cfg.recovery.systemIdentifier;
+    harbor = lib.getExe cfg.package;
+    systemctl = "${pkgs.systemd}/bin/systemctl";
+    systemd_run = "${pkgs.systemd}/bin/systemd-run";
+    maintenance = toString rollout.maintenance;
+    preparation = toString preparationManifest;
+    execution_lock = rollout.executionLock;
+    socket_dir = preparation.socketDir;
+    inherit (preparation) port;
+    inherit (rollout) clients;
+    retired_clients = rollout.retiredClients;
+    setup_units = cfg.writerFence.setupUnits;
+    receiver_units = rollout.receiverUnits;
+    paused_publishers = rollout.pausedPublishers;
+    setup_settle_seconds = rollout.setupSettleSeconds;
+    prepare = {
+      export_root = rollout.exportRoot;
+      read_write_paths = preparation.readWritePaths;
+      required_mounts = cfg.requiredMounts ++ preparation.requiredMounts;
+      supplementary_groups = preparation.supplementaryGroups;
+      provision_directories =
+        map (path: {
+          inherit path;
+          group = "postgres";
+          mode = 448;
+        })
+        preparation.provisionDirectories
+        ++ [
+          {
+            path = rollout.exportRoot;
+            group = rollout.exportGroup;
+            mode = 488;
+          }
+        ];
+    };
+    import_slot = preparation.offHostReceiptImportFile;
+    # Written only when set, so a coordinator predating the hook can still load
+    # (and abort under) a manifest without one.
+    executor = {inherit (rollout.executor) host user command;} // lib.optionalAttrs (rollout.executor.transport != null) {inherit (rollout.executor) transport;};
+    inherit (rollout) cutover;
+  });
+  # Refuses activating a generation that would strand an open rollout.
+  activationGuard =
+    if rollout != null
+    then "${lib.getExe cfg.package} --config ${rolloutManifest} rollout activation-check"
+    else "${lib.getExe cfg.package} --config ${manifest} rollout-guard";
 in {
   imports = [./postgres-writer-clients.nix ./storage-package-argument.nix];
   options.services.harbor-db.postgresql = {
@@ -287,6 +344,102 @@ in {
         };
       });
     };
+    rollout = mkOption {
+      default = null;
+      description = ''
+        Opt-in first-rollout coordinator manifest for `harbor-db-postgres
+        --config /etc/harbor-db/postgresql-rollout.json rollout ...`. It sequences
+        the writer fence, preparation, independent certification hand-off,
+        adoption and thaw (or abort) from one resumable journal.
+      '';
+      type = types.nullOr (types.submodule {
+        options = {
+          maintenance = mkOption {
+            type = types.path;
+            default = manifest;
+            defaultText = "the module's PostgreSQL manifest";
+            description = "Fenced maintenance manifest; its recovery must require the writer fence.";
+          };
+          # The journal lives at the fixed /var/lib/harbor-db/postgresql-rollout,
+          # so no manifest can relocate (and lose) an open rollout.
+          executionLock = mkOption {
+            type = types.nullOr (types.strMatching "/[^/.][^/]*/[^/.][^/]*/[^/.][^/]*(/[^/.][^/]*)*");
+            default = null;
+            example = "/run/lock/canix/switch.lock";
+            description = ''
+              Existing host lock file every mutating rollout step holds (a
+              non-blocking exclusive flock), shared with the consumer's
+              activations and other database coordinators.
+            '';
+          };
+          clients = mkOption {
+            type = types.listOf types.nonEmptyStr;
+            default = cfg.writerFence.blockedUnits;
+            defaultText = "services.harbor-db.postgresql.writerFence.blockedUnits";
+            description = "Writer services stopped by the fence and restarted by thaw/abort (template `name@.service` allowed).";
+          };
+          retiredClients = mkOption {
+            type = types.listOf types.nonEmptyStr;
+            default = [];
+            description = "Legacy writers that are stopped but never restarted.";
+          };
+          receiverUnits = mkOption {
+            type = types.listOf types.nonEmptyStr;
+            default = [];
+            description = "Installed WAL receivers stopped around preparation and restored afterwards.";
+          };
+          pausedPublishers = mkOption {
+            type = types.listOf types.nonEmptyStr;
+            default = [];
+            description = "Backup/evidence publishers skipped (via a drop-in condition) for the whole rollout.";
+          };
+          setupSettleSeconds = mkOption {
+            type = types.ints.positive;
+            default = 120;
+            description = "Bound for setup units to finish after a primary start before fence inspection.";
+          };
+          exportRoot = mkOption {type = types.strMatching "/[^/.][^/]*/[^/.][^/]*/[^/.][^/]*(/[^/.][^/]*)*";};
+          exportGroup = mkOption {
+            type = types.nonEmptyStr;
+            default = "users";
+          };
+          executor = {
+            host = mkOption {type = types.nonEmptyStr;};
+            user = mkOption {type = types.nonEmptyStr;};
+            command = mkOption {
+              type = types.listOf types.nonEmptyStr;
+              description = "Independent restore/certify argv run as the executor user on the executor host; `--export/--export-sha256/--workspace` are appended, and it must write its receipt to `<workspace>/off-host-recovery.json`.";
+            };
+            transport = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = ''
+                Optional executor hand-off hook: one immutable store executable (wrap
+                arguments in a store script). From `prepared`, `rollout next` runs it as
+                the transient root unit `harbor-db-rollout-transport.service`, in `/` with
+                systemd's clean environment plus `HOME`, `LANG` and the caller's
+                `SSH_AUTH_SOCK`, appending `--config/--export/--export-sha256/--receipt-dir`.
+                It copies the manifest closure and export to the executor, runs
+                `rollout certify` there, writes `<receipt-dir>/off-host-recovery.json`
+                (mode 0600) and prints only certify's `receipt_sha256`; Harbor imports it.
+                A manifest with a hook needs a hook-aware coordinator to load or abort it.
+              '';
+            };
+          };
+          cutover = mkOption {
+            type = types.nullOr (types.submodule {
+              options = {
+                # Thaw runs the checker as root: immutable store inputs only.
+                checker = mkOption {type = types.strMatching "/nix/store/[^/]+/.+";};
+                contract = mkOption {type = types.strMatching "/nix/store/[^/]+/.+";};
+              };
+            });
+            default = null;
+            description = "Optional cutover checker run in `certify` phase before thaw.";
+          };
+        };
+      });
+    };
     upgrade = mkOption {
       default = null;
       description = "Explicit offline copy upgrade contract. Never runs automatically at boot.";
@@ -424,15 +577,133 @@ in {
         message = "Managed recovery preparation requires normalized absolute writable, provisioned and protected paths before containment checks.";
       }
       {
+        assertion = rollout == null || (cfg.recovery != null && preparation != null && preparation.offHostReceiptImportFile != null && preparation.exportCommand != [] && rollout.clients != []);
+        message = "The rollout coordinator needs recovery, recoveryPreparation with an off-host receipt import file and an export command (the executor hand-off), and an explicit client inventory.";
+      }
+      {
+        assertion = rollout == null || rollout.executor.transport == null || immutableFiles.storePath rollout.executor.transport;
+        message = "The rollout's root executor transport hook must be one immutable store executable.";
+      }
+      {
+        # Mirrors the coordinator: each unit has one role (templates cover
+        # their instances), e.g. a retired client must not be a paused
+        # publisher, which the lifted pause would restart.
+        assertion = let
+          template = pattern: unit:
+            lib.hasSuffix "@.service" pattern
+            && unit != pattern
+            && lib.hasSuffix ".service" unit
+            && lib.hasPrefix (lib.removeSuffix ".service" pattern) unit;
+          overlap = a: b: a == b || template a b || template b a;
+          roles = [
+            (rollout.clients ++ rollout.retiredClients)
+            rollout.pausedPublishers
+            rollout.receiverUnits
+            cfg.writerFence.setupUnits
+            ["postgresql.service"]
+          ];
+          disjoint = xs: ys: lib.all (x: lib.all (y: !(overlap x y)) ys) xs;
+          pairs = lib.concatLists (lib.imap0 (i: xs: map (ys: disjoint xs ys) (lib.drop (i + 1) roles)) roles);
+        in
+          rollout == null || lib.all lib.id pairs;
+        message = "Rollout units must each have one role: clients and retired clients, paused publishers, receivers, setup units and postgresql.service may not overlap (templates included).";
+      }
+      {
+        # Mirrors the coordinator: only clients are enumerated from active
+        # units, and the export root gets its own owner and mode contract.
+        assertion = let
+          named = rollout.pausedPublishers ++ rollout.receiverUnits ++ cfg.writerFence.setupUnits;
+          valid = lib.all (unit: !(lib.hasSuffix "@.service" unit)) named && !(lib.elem rollout.exportRoot preparation.provisionDirectories);
+        in
+          rollout == null || preparation == null || valid;
+        message = "Rollout paused publishers, receivers and setup units must name units, not templates, and the export root must not also be a recoveryPreparation provision directory.";
+      }
+      {
+        # Mirrors the coordinator's manifest load, so a generation it cannot
+        # run fails at evaluation instead of at activation.
+        assertion = let
+          units = rollout.clients ++ rollout.retiredClients ++ rollout.receiverUnits ++ rollout.pausedPublishers ++ cfg.writerFence.setupUnits;
+          validUnit = unit: builtins.match "[A-Za-z0-9_@.:-]+[.]service" unit != null;
+          valid =
+            cfg.recovery.requireWriterFence
+            && cfg.recovery.repositoryProtocol == "legacy"
+            && lib.all validUnit units
+            && rollout.executor.command != []
+            # The executor command runs on another host: checked lexically.
+            && lib.hasPrefix "/" (lib.head rollout.executor.command)
+            # Certification is independent only on another host, never as root.
+            && rollout.executor.host != config.networking.hostName
+            && rollout.executor.user != "root";
+        in
+          rollout == null || cfg.recovery == null || valid;
+        message = "Rollout coordinator: recovery must require the writer fence over the legacy repository protocol, units must be `.service` names, and the executor must be another host, a non-root user and an absolute program with arguments.";
+      }
+      {
+        # Mirrors the coordinator's load: the roots post-fence steps write are
+        # pairwise disjoint (the writer fence lives in the identity state
+        # directory), except a provisioned directory inside a writable path or
+        # another provisioned one (evidence in its backup root) and the export
+        # root inside a writable path; the worker's evidence directories lie
+        # inside its writable paths.
+        assertion = let
+          contains = root: path: root == path || lib.hasPrefix "${root}/" path;
+          slot = preparation.offHostReceiptImportFile;
+          root = kind: path: {inherit kind path;};
+          roots =
+            map (root "control") ([pg.dataDir cfg.stateDir cfg.writerFence.startupStateDir "/var/lib/harbor-db/postgresql-rollout"] ++ lib.optional (slot != null) (builtins.dirOf slot))
+            ++ [(root "export" rollout.exportRoot)]
+            ++ map (root "writable") preparation.readWritePaths
+            ++ map (root "provisioned") preparation.provisionDirectories;
+          intended = inner: outer:
+            contains outer.path inner.path
+            && (inner.kind == "provisioned" && lib.elem outer.kind ["writable" "provisioned"] || inner.kind == "export" && outer.kind == "writable");
+          apart = a: b: !(contains a.path b.path || contains b.path a.path) || intended a b || intended b a;
+          pairs = lib.concatLists (lib.imap0 (i: a: map (apart a) (lib.drop (i + 1) roots)) roots);
+          # The worker writes the evidence directories and the backup root.
+          evidence = map builtins.dirOf ([cfg.recovery.snapshotFile cfg.recovery.receiptFile] ++ lib.optional (cfg.recovery.offHostReceiptFile != null) cfg.recovery.offHostReceiptFile) ++ [cfg.recovery.backupRoot];
+          writable = path: lib.any (root: contains root path) preparation.readWritePaths;
+        in
+          rollout == null || preparation == null || cfg.recovery == null || (lib.all lib.id pairs && lib.all writable evidence);
+        message = "Rollout roots: the PostgreSQL data directory, identity (writer-fence) state, startup inhibition state, journal root (/var/lib/harbor-db/postgresql-rollout), import slot directory, export root, writable paths and provisioned directories must be pairwise disjoint (a provisioned directory may lie in a writable path or another provisioned one, the export root in a writable path), and the recovery evidence directories and backup root inside the writable paths.";
+      }
+      {
+        # Mirrors the coordinator: systemd splits these property values on
+        # whitespace (LoadCredential on `:`).
+        assertion = let
+          plain = extra: value: builtins.match ".*[[:space:][:cntrl:]\"'%\\\\${extra}].*" value == null;
+          values = [rollout.exportRoot] ++ preparation.readWritePaths ++ cfg.requiredMounts ++ preparation.requiredMounts ++ preparation.provisionDirectories ++ preparation.supplementaryGroups;
+          slot = preparation.offHostReceiptImportFile;
+          valid = lib.all (plain "") values && (slot == null || plain ":" slot);
+        in
+          rollout == null || preparation == null || valid;
+        message = "Rollout systemd property values (writable paths, mounts, export root, groups, import file) must not contain whitespace, quotes, `\\`, `%` or (in the import file) `:`.";
+      }
+      {
         assertion = preparation == null || lib.all (path: lib.any (writable: path == writable || lib.hasPrefix "${writable}/" path) preparation.readWritePaths) preparation.provisionDirectories;
         message = "Managed recovery provisioning must stay within the explicit writable preparation paths.";
       }
     ];
     environment.systemPackages = [cfg.package];
     environment.etc."harbor-db/postgresql.json".source = manifest;
+    environment.etc."harbor-db/postgresql-rollout.json" = mkIf (rollout != null) {source = rolloutManifest;};
     systemd.tmpfiles.rules = ["d ${cfg.stateDir} 0700 postgres postgres -"];
     system.preSwitchChecks = lib.mkMerge [
-      (lib.mkIf (preparation != null) {
+      # Every generation refuses activation while a rollout it would strand is
+      # open, sorted before any preparation. With a rollout, the coordinator
+      # prepares, imports and adopts under the fence (re-running preparation and
+      # the exporter at activation would bypass its locks and receiver
+      # quiescence and could mutate the certified hand-off); without one, only
+      # the fixed journal is read, so removing `rollout` cannot strand one.
+      {
+        "00-0-0-harbor-db-postgresql-rollout-guard" = ''
+          case "''${2-}" in
+            switch|test)
+              ${activationGuard} >/dev/null || exit $?
+              ;;
+          esac
+        '';
+      }
+      (lib.mkIf (preparation != null && rollout == null) {
         "00-0-harbor-db-postgresql-prepare" = ''
           case "''${2-}" in
             switch|test)
@@ -559,7 +830,7 @@ in {
         Type = "oneshot";
         User = "postgres";
         Group = "postgres";
-        ExecStart = "${command} upgrade";
+        ExecStart = "${lib.getExe cfg.package} --config ${manifest} upgrade";
         TimeoutStartSec = "infinity";
         UMask = "0077";
         PrivateTmp = true;

@@ -1746,6 +1746,55 @@ dimension = "compatibility"
 evidence = "nix/test-postgres-writer-fence.nix native testScript executes tests/fixtures/writer_fence.rs across legacy and guarded generations. existing-client-condition-preserved checks the original /etc/os-release condition; legacy-generation-thaw-root-barrier and legacy-thaw-reboot-root-barrier retain primary/setup inhibition through unit replacement and reboot."
 
 [[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "positive"
+evidence = "nix/test-postgres-rollout.nix drives the real coordinator across two VMs: fence and prepare run the consumer backup, record snapshot, local restore certification and byte-reproducible export, stopping at Prepared; the executor's rollout certify restores the transported export, certifies off-host and prints the receipt digest import consumes; import is admitted, then adopt, activation of the guarded specialisation, activated, accept (which writes the acceptance thaw checks) and thaw restore application writes, clients (including one only the candidate brings), an undeclared hard dependent, receivers and paused publishers. Every step's stdout is exactly one JSON document."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "rejection"
+evidence = "nix/test-postgres-rollout.nix requires refusal, without side effects, of a fence while Harbor holds a fence this rollout did not open and of a second rollout over the previous window's evidence; abort without a journal or with a different fence or startup token; any step by a manifest other than the opener; import of a receipt whose retained SHA-256 differs, and of one Harbor does not admit; an import whose exporter rewrote the certified hand-off; real switch-to-configuration into the candidate or a generation without the coordinator while Fenced or Prepared; activated before the running generation carries the manifest; and abort of an activated rollout. Application SQL is rejected in every fenced phase."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "concurrency"
+evidence = "nix/test-postgres-rollout.nix holds the manifest's host execution lock from another process and requires a mutating step to be refused while status still answers, and requires a surviving harbor-db-rollout-prepare.service to block preparation before any receiver is quiesced."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "repetition"
+evidence = "nix/test-postgres-rollout.nix repeats fence on a fenced journal (idempotent resume); fence archives each finished abort and archive retires the thawed and aborted journals with their receipts under sequential ids (next never does), so the candidate is rolled out seven times; finished worker prepare and import outcomes are recovered without rerunning the exporter; the restored primary is re-verified after every unwind."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "interruption"
+evidence = "nix/test-postgres-rollout.nix interrupts acquisition after startup inhibition (a client refuses to stop) and loses that journal, fails fence-open after the coordinator recorded its intent (the fence lock is held) and then completes that fence-open out of band, loses the journal of a fenced rollout, rewinds journals whose worker finished unrecorded, and fails thaw after the fence closed (a client's start is refused); the journal or Harbor's live fence or inhibition retains what the explicit retry needs."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "recovery"
+evidence = "nix/test-postgres-rollout.nix aborts the interrupted acquisition, the fenced rollout, the journal-less rollouts (by adopting Harbor's startup or fence token) and an activated rollout rolled back to the legacy generation; resumes the interrupted opening only with its exact live token; settles the import once the certified export is restored; and reruns thaw without restarting the reopened primary (same MainPID). Each unwind closes the fence, releases startup inhibition, restarts recorded clients (and one whose start the fence skipped), hard dependents, quiesced receivers and the publishers the pause stopped or skipped, lists a recorded unit the running generation no longer loads as unloaded, and never restarts retired clients or a publisher whose own condition failed before the pause."
+
+[[coverage]]
+case = "vm.x86_64-linux.native-postgres-rollout"
+capability = "nixos"
+operation = "nixos.postgres-rollout"
+dimension = "compatibility"
+evidence = "nix/test-postgres-rollout.nix starts from the legacy unguarded PostgreSQL generation with a slow control-role setup unit, adopts it live, activates the guarded specialisation with its real switch-to-configuration under the retained fence before thaw, activates a Harbor generation without the coordinator after thaw (its rollout guard admits it), lets that generation roll a second activated rollout back, refuses abort while the candidate is still the system profile's boot default, and aborts once the legacy generation is switched to as the boot default."
+
+[[coverage]]
 case = "nix.x86_64-linux.cutover-eval"
 capability = "nixos"
 operation = "nixos.cutover"
@@ -2840,6 +2889,7 @@ operations = [
   "nixos.pg-backup",
   "nixos.postgres-lifecycle",
   "nixos.postgres-writer-fence",
+  "nixos.postgres-rollout",
   "nixos.cutover",
 ]
 required = [
@@ -4500,6 +4550,7 @@ names = [
   "native-postgres-crash-rollback",
   "native-postgres-interrupted-upgrade",
   "native-postgres-recovery-acceptance",
+  "native-postgres-rollout",
   "native-application-backup",
 ]
 profile = "vm"
@@ -6918,6 +6969,139 @@ selectors = [
   "missing_wal_preserves_old_selection_and_pin_then_complete_carrier_allows_retry",
   "interrupted_capture_scratch_preserves_its_inode_and_allows_publication",
   "expiry_after_carrier_sync_preserves_previous_selection_and_frozen_attempt",
+]
+
+[[inventories]]
+origin = "rust"
+id_prefix = "native.postgres-rollout."
+selector_prefix = "storage::postgres_rollout::tests::"
+source = "src/storage/postgres_rollout.rs"
+argv_prefix = ["cargo", "test", "--locked", "--all-features", "--lib"]
+argv_suffix = ["--", "--exact"]
+profile = "integration"
+maturity = "crystallized"
+platforms = ["x86_64-linux", "aarch64-linux"]
+deadline_seconds = 120
+resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
+selectors = [
+  "fence_waits_for_setup_units_then_abort_restores_the_primary_and_clients",
+  "unsettled_setup_units_keep_the_fence_unverified",
+  "fence_resumes_idempotently_and_steps_stay_bound_to_their_manifest",
+  "activated_rollouts_refuse_abort_and_receipts_are_digest_bound",
+  "next_hands_off_external_steps_with_exact_commands",
+  "preparation_quiesces_transitional_receivers_and_may_write_its_export",
+  "interrupted_import_reuses_its_staged_receipt_but_never_replaces_another",
+  "load_rejects_shared_overlapping_or_mutable_rollout_inputs",
+  "an_existing_shared_state_directory_is_refused_not_repermissioned",
+  "receivers_are_restored_when_a_later_receiver_cannot_be_stopped",
+  "preparation_refuses_an_unrecorded_import_slot",
+  "untrusted_state_directory_ancestry_is_refused",
+  "every_quiesced_receiver_is_restarted_even_if_one_restart_fails",
+  "abort_unwinds_an_acquisition_interrupted_before_fence_open",
+  "the_state_directory_is_never_created_below_an_absent_mount",
+  "missing_journal_components_are_never_created_below_a_writable_directory",
+  "a_fence_this_rollout_did_not_open_is_refused_not_adopted",
+  "mutating_steps_hold_the_shared_execution_lock_but_status_does_not",
+  "an_active_preparation_worker_blocks_preparation_receivers_and_the_pause",
+  "an_interrupted_preparation_stops_its_worker_and_restores_receivers",
+  "subprocesses_are_bounded_and_report_their_diagnostics",
+  "an_unwinding_retry_never_restarts_the_reopened_primary",
+  "activated_and_thaw_require_the_running_generation_to_carry_the_manifest",
+  "a_lost_journal_is_aborted_only_by_explicitly_adopting_the_live_fence",
+  "deliberate_starts_clear_the_systemd_start_limit",
+  "a_finished_abort_is_archived_so_the_candidate_can_start_again",
+  "paused_publishers_that_were_running_are_restarted_after_the_pause",
+  "systemd_property_values_never_split_into_extra_entries",
+  "preparation_never_provisions_below_an_absent_mount",
+  "every_static_contract_of_a_post_fence_step_is_refused_before_the_fence",
+  "rollout_roots_are_pairwise_disjoint_but_for_intended_nestings",
+  "harbor_never_creates_the_parents_of_its_inhibition_state",
+  "import_never_creates_its_slot_directory_below_an_absent_mount",
+  "local_executables_and_inputs_are_checked_at_load",
+  "every_name_and_endpoint_a_post_fence_step_uses_is_resolved_before_the_fence",
+  "the_opening_manifests_gc_root_is_synced_around_the_journal",
+  "read_only_actions_are_dispatched_before_steps_require_root",
+  "provisioning_stays_in_its_pinned_parent_when_the_parent_is_swapped",
+  "an_import_never_admits_over_a_rewritten_certified_export",
+  "publishers_whose_start_the_pause_skipped_are_started_when_it_lifts",
+  "a_zero_job_id_means_no_queued_job",
+  "units_the_running_generation_does_not_load_are_skipped_not_wedging_the_unwind",
+  "a_start_still_queued_behind_another_job_counts_as_started",
+  "a_rolled_back_activation_can_be_aborted",
+  "accept_writes_the_acceptance_thaw_checks",
+  "hints_never_offer_a_step_the_journal_refuses",
+  "clients_whose_start_the_fence_skipped_are_started_when_it_reopens",
+  "a_finished_rollout_is_archived_only_explicitly_and_never_refenced_by_next",
+  "a_retried_unwind_never_restarts_a_client_it_already_started",
+  "receipts_take_the_recovery_importers_bound",
+  "an_export_root_inside_a_writable_root_is_written_through_it",
+  "abort_waits_until_the_candidate_is_no_longer_the_boot_default",
+  "provisioning_never_adopts_a_directory_planted_at_its_staging_name",
+  "activation_is_refused_between_fence_and_adoption",
+  "a_never_loaded_or_collected_worker_is_idle_whatever_its_state_reads",
+  "sandbox_and_provisioned_paths_never_resolve_through_a_swappable_component",
+  "pre_fence_completion_never_adopts_another_coordinators_fence",
+  "an_interrupted_fence_opening_adopts_a_live_fence_only_explicitly",
+  "declared_parents_are_provisioned_before_nested_children",
+  "a_reported_export_is_one_identifier_below_the_export_root",
+  "a_finished_rollouts_staged_receipt_is_archived_not_left_in_the_slot",
+  "an_inhibition_left_without_its_token_is_recovered_by_abort",
+  "a_journal_less_inhibition_is_reported_and_adopted_explicitly",
+  "a_failed_ownership_change_never_publishes_a_provisioned_directory",
+  "files_other_writers_control_are_read_through_one_pinned_descriptor",
+  "a_newer_coordinators_journal_still_loads_and_aborts",
+  "long_running_starts_are_queued_not_awaited",
+  "one_failing_client_never_keeps_the_rest_of_the_unwind_down",
+  "a_slot_not_holding_the_recorded_receipt_is_set_aside_not_wedging_abort",
+  "prepared_evidence_must_be_bound_to_this_rollouts_fence",
+  "an_installed_adopted_candidate_is_thawed_not_aborted",
+  "static_failures_of_the_hand_off_are_refused_before_the_fence",
+  "source_local_recovery_is_refused_at_load",
+  "a_recorded_receipt_that_failed_admission_is_replaced",
+  "publishers_the_running_generation_lacks_are_not_stopped",
+  "units_the_primary_stop_takes_down_are_restored",
+  "units_still_deactivating_when_stopped_are_recorded_and_restored",
+  "a_hand_off_finished_before_it_was_journaled_is_recovered_not_rerun",
+  "an_admission_finished_before_it_was_journaled_is_recovered_not_rerun",
+  "a_completed_preparation_is_journaled_before_receivers_restart",
+  "templates_and_conflicting_provisions_are_refused_at_load",
+  "a_failed_setup_unit_fails_the_fence_and_can_be_retried",
+  "the_execution_lock_must_sit_in_a_directory_only_root_can_modify",
+  "another_manifest_is_refused_and_named",
+  "the_opening_manifest_is_rooted_while_its_journal_is_open",
+  "rollout_units_each_have_one_role",
+  "a_static_preparation_failure_is_refused_before_the_fence",
+  "archives_finished_in_the_same_second_never_overwrite_each_other",
+  "a_generation_without_the_coordinator_never_strands_an_open_rollout",
+  "certify_reports_the_receipt_digest_import_checks",
+  "a_thawed_journal_is_archived_so_a_new_generation_can_roll_out",
+  "worker_and_executor_output_never_reaches_step_stdout",
+  "an_unreadable_journal_is_an_error_not_an_idle_rollout",
+]
+
+[[inventories]]
+origin = "rust"
+id_prefix = "native.postgres-rollout-transport."
+selector_prefix = "storage::postgres_rollout::transport::tests::"
+source = "src/storage/postgres_rollout_transport.rs"
+argv_prefix = ["cargo", "test", "--locked", "--all-features", "--lib"]
+argv_suffix = ["--", "--exact"]
+profile = "integration"
+maturity = "crystallized"
+platforms = ["x86_64-linux", "aarch64-linux"]
+deadline_seconds = 120
+resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
+selectors = [
+  "transport_imports_the_receipt_the_executor_retained",
+  "failed_or_mismatched_transport_imports_nothing",
+  "a_receipt_failing_import_preconditions_is_never_journaled",
+  "an_import_interrupted_while_staging_resumes_the_import_not_preparation",
+  "a_staged_receipt_whose_copy_is_lost_is_readmitted_without_certifying",
+  "a_hand_off_of_another_export_is_certified_again",
+  "the_hook_runs_only_under_this_rollouts_bound_evidence",
+  "a_running_transport_unit_blocks_every_step_and_shows_in_status",
+  "a_refused_receipt_points_at_manual_certification",
+  "transport_hooks_are_store_executables_and_journals_stay_lenient",
 ]
 
 [[inventories]]
