@@ -399,7 +399,8 @@ in {
               options = {
                 # Normal components only, as the loader requires: no `.` or `..`.
                 path = mkOption {type = types.strMatching "(/([^/.][^/]*|\\.[^/.][^/]*|\\.\\.[^/]+))+";};
-                uid = mkOption {type = types.ints.positive;};
+                # The coordinator reads a non-root u32 uid.
+                uid = mkOption {type = types.ints.between 1 4294967295;};
               };
             });
             default = [];
