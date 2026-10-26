@@ -1086,6 +1086,13 @@ pub fn validate_receipt(
     }
     Ok(())
 }
+/// With an off-host receipt configured, the executor's certification is the
+/// single restore proof: preparation runs no local drill and admission needs no
+/// local receipt. Read from the policy itself, so callers that defer the
+/// off-host receipt (by clearing it in their settings) keep this answer.
+fn executor_certifies(config: &Value) -> bool {
+    !config["recovery"]["off_host_receipt_file"].is_null()
+}
 fn check_evidence(
     config: &Value,
     settings: &Value,
@@ -1132,7 +1139,10 @@ fn check_evidence(
         "preflight-ready"
     });
     result["off_host"] = Value::Null;
-    let mut paths = vec![(path(settings, "receipt_file")?, "restore acceptance")];
+    let mut paths = Vec::new();
+    if !executor_certifies(config) {
+        paths.push((path(settings, "receipt_file")?, "restore acceptance"));
+    }
     if let Some(remote) = settings["off_host_receipt_file"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -1465,11 +1475,9 @@ fn accept_prepared_restore(
     let mut held = fds(fence, &backup_lease, &evidence_lease);
     held.extend_from_slice(outer);
     let (directory, binding) = backup(config, settings, now, &held)?;
-    let mut local = settings.clone();
-    local["off_host_receipt_file"] = Value::Null;
     check_evidence(
         config,
-        &local,
+        settings,
         (&directory, &binding),
         now,
         true,
@@ -1578,10 +1586,13 @@ pub fn prepare_at(
     } else {
         verify_prepared_snapshot(config, settings, now, &fence, &leases)?;
     }
-    if !exists(&path(settings, "receipt_file")?) {
-        preparation_command(&commands.restore, &leases)?;
+    // Without an executor the local drill and its receipt stay required.
+    if !executor_certifies(config) {
+        if !exists(&path(settings, "receipt_file")?) {
+            preparation_command(&commands.restore, &leases)?;
+        }
+        accept_prepared_restore(config, settings, now, &fence, &leases)?;
     }
-    accept_prepared_restore(config, settings, now, &fence, &leases)?;
     if let Some(export) = &commands.export {
         preparation_command(export, &leases)?;
     }

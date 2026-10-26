@@ -3301,6 +3301,7 @@ selectors = [
   "concurrent_record_checks_keep_each_digest_with_its_check",
   "disposable_certifier_rejects_missing_or_invalid_copied_fence_tokens",
   "disposable_restore_must_be_distinct_read_only_primary_at_recovery_point",
+  "executor_certification_replaces_the_local_drill_only_when_configured",
   "fractional_verification_timeout_runs_backup_verification",
   "hostile_receipts_cannot_claim_record_level_acceptance",
   "incomplete_or_malformed_snapshot_records_never_admit",

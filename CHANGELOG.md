@@ -30,6 +30,14 @@
   without reading it. Record checks run on up to four concurrent `psql`
   workers with unchanged per-query bounds and results, and the rollout's
   preparation unit keeps the default CPU weight instead of `CPUWeight=10`.
+- With `offHostReceiptFile` configured, the independent executor's
+  certification is the single restore proof. Preparation no longer runs the
+  local `restoreCommand` drill, and admission (including preparation's import
+  and final checks) requires the off-host receipt but no local receipt. A
+  policy without an off-host receipt still requires the local drill and its
+  receipt. Consumers that copied the local receipt into their export (such as
+  an `accepted-local.json`) or ran a local-only `inspect-recovery` with the
+  off-host path cleared must stop doing so.
 
 ### Fixed
 

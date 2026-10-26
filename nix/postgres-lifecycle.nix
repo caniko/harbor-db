@@ -274,12 +274,12 @@ in {
           };
           restoreCommand = mkOption {
             type = types.listOf types.nonEmptyStr;
-            description = "Absolute executable argv restoring and certifying the selected backup at a disposable read-only endpoint.";
+            description = "Absolute executable argv restoring and certifying the selected backup at a disposable read-only endpoint. Not run when recovery.offHostReceiptFile is set: the independent executor's certification is then the single restore proof.";
           };
           exportCommand = mkOption {
             type = types.listOf types.nonEmptyStr;
             default = [];
-            description = "Optional absolute executable argv publishing the bound backup/WAL/snapshot copy for consumer-owned independent transport. Runs after local acceptance and before off-host admission.";
+            description = "Optional absolute executable argv publishing the bound backup/WAL/snapshot copy for consumer-owned independent transport. Runs after local acceptance (with an off-host executor, after snapshot verification) and before off-host admission.";
           };
           supplementaryGroups = mkOption {
             type = types.listOf types.nonEmptyStr;

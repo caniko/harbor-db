@@ -270,8 +270,8 @@ fn local_and_off_host_receipt_paths_cannot_alias_in_admission() {
     remote["executor_machine_sha256"] = json!("0".repeat(64));
     durable::write_json(&f.p("backup/evidence/recovery.json"), &remote).unwrap();
     assert!(recovery::check(&f.config, Some(f.now)).is_err());
-    // Shared output selection belongs only to certification. Admission still
-    // requires independent and local executions retained under separate paths.
+    // Shared output selection belongs only to certification. Admission reads
+    // the independent execution from its own, distinct path.
     f.config["recovery"]["receipt_file"] = json!(f.p("backup/evidence/local.json"));
     f.certify();
     assert_eq!(
@@ -1079,6 +1079,41 @@ fn concurrent_record_checks_keep_each_digest_with_its_check() {
 }
 
 #[test]
+fn executor_certification_replaces_the_local_drill_only_when_configured() {
+    let _workers = WORKERS.lock().unwrap();
+    let mut f = Fixture::new();
+    f.accepted();
+    let mut independent = f.receipt();
+    independent["executor_host"] = json!("independent-host");
+    independent["executor_machine_sha256"] = json!("0".repeat(64));
+    fs::remove_file(f.p("backup/evidence/recovery.json")).unwrap();
+    let prep = f.preparation();
+    executable(
+        &f.p("restore-command"),
+        &format!(
+            "printf 'restore\\n' >> '{}'",
+            f.p("preparation.log").display()
+        ),
+    );
+    // Without an executor the local drill runs and its receipt is required.
+    assert!(f.prepare(&prep).is_err());
+    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    // With one, its certification alone admits: no drill, no local receipt.
+    f.config["recovery"]["off_host_receipt_file"] = json!(f.p("backup/evidence/off-host.json"));
+    durable::write_json(&f.p("backup/evidence/off-host.json"), &independent).unwrap();
+    assert_eq!(f.prepare(&prep).unwrap()["off_host"], "independent-host");
+    assert_eq!(
+        recovery::check(&f.config, Some(f.now)).unwrap()["off_host"],
+        "independent-host"
+    );
+    assert_eq!(
+        fs::read_to_string(f.p("preparation.log")).unwrap(),
+        "readiness\nrestore\nreadiness\n"
+    );
+    assert!(!f.p("backup/evidence/recovery.json").exists());
+}
+
+#[test]
 fn managed_preparation_retains_local_evidence_across_missing_off_host_retry() {
     let _workers = WORKERS.lock().unwrap();
     let mut f = Fixture::new();
@@ -1763,27 +1798,24 @@ fn preparation_captures_first_snapshot_and_reuses_exact_evidence_on_retry() {
     f.seed_template();
     let prep = f.preparation();
     f.config["recovery"]["off_host_receipt_file"] = json!(f.p("backup/evidence/off-host.json"));
+    // The executor's certification replaces the local drill.
     assert!(f.prepare(&prep).is_err());
     assert_eq!(
         fs::read_to_string(f.p("preparation.log")).unwrap(),
-        "readiness\nbackup\nrestore\n"
+        "readiness\nbackup\n"
     );
     let source = fs::read(f.p("backup/evidence/records.json")).unwrap();
-    let receipt = fs::read(f.p("backup/evidence/recovery.json")).unwrap();
     assert!(f.p("backup/evidence/preparation.json").exists());
     assert!(f.prepare(&prep).is_err());
     assert_eq!(
         fs::read_to_string(f.p("preparation.log")).unwrap(),
-        "readiness\nbackup\nrestore\nreadiness\n"
+        "readiness\nbackup\nreadiness\n"
     );
     assert_eq!(
         fs::read(f.p("backup/evidence/records.json")).unwrap(),
         source
     );
-    assert_eq!(
-        fs::read(f.p("backup/evidence/recovery.json")).unwrap(),
-        receipt
-    );
+    assert!(!f.p("backup/evidence/recovery.json").exists());
     assert_eq!(
         fs::read_to_string(f.p("backup/LAST_SUCCESS")).unwrap(),
         "base-1\n"
