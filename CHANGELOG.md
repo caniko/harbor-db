@@ -4,6 +4,12 @@
 
 ### Added
 
+- PostgreSQL rollout `trusted_ancestors` (module option `rollout.trustedAncestors`):
+  exact non-root-owned ancestor directories, each with its owner's uid, that the
+  ancestry walk accepts when they have that owner and no group or world write
+  bit. The manifest field is required; manifests from earlier coordinators no
+  longer load.
+
 - Reusable compressed-Btrfs RAID1 crash-test builder with ordinary asynchronous
   mounts, measured compression and crash receipts, and a standalone KVM gate.
 - Rust-default storage lifecycle commands with durable fencing, recovery,

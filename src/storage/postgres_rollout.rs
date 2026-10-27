@@ -74,6 +74,36 @@ pub struct Manifest {
     pub import_slot: PathBuf,
     pub executor: Executor,
     pub cutover: Option<Cutover>,
+    /// Ancestors of the cluster, backup or state paths owned by a named
+    /// non-root user (for example a home-like data root); empty when none.
+    pub trusted_ancestors: Vec<TrustedAncestor>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustedAncestor {
+    pub path: PathBuf,
+    pub uid: u32,
+}
+
+/// An ancestor the manifest names as trusted: that exact directory, owned by
+/// the declared uid and writable by no one else. Trusting its owner is the
+/// operator's explicit choice; anyone else still cannot swap a component.
+/// A declared trusted ancestor counts only for walks that opt in (`trust`).
+fn ancestor_trusted(
+    trust: bool,
+    trusted: &[TrustedAncestor],
+    at: &Path,
+    uid: u32,
+    mode: u32,
+) -> bool {
+    trust && trusted_ancestor(trusted, at, uid, mode)
+}
+
+fn trusted_ancestor(trusted: &[TrustedAncestor], at: &Path, uid: u32, mode: u32) -> bool {
+    mode & 0o022 == 0
+        && trusted
+            .iter()
+            .any(|ancestor| ancestor.path == at && ancestor.uid == uid)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -920,6 +950,22 @@ impl Rollout {
                 "rollout harbor, systemctl, systemd-run, cutover checker and transport hook must be executable regular store files and the preparation config a store file",
             ));
         }
+        // A trusted ancestor names one exact, absolute, normalized directory
+        // below `/` and a non-root owner (root-owned ones need no entry).
+        if manifest.trusted_ancestors.iter().any(|ancestor| {
+            ancestor.uid == 0
+                || !ancestor.path.is_absolute()
+                || ancestor.path.parent().is_none()
+                || !ancestor
+                    .path
+                    .components()
+                    .skip(1)
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+        }) {
+            return Err(invalid(
+                "rollout trusted ancestors must be absolute normalized directories below / with a non-root owner",
+            ));
+        }
         let executor = &manifest.executor;
         // Certification is independent only on another host, and `certify`
         // refuses root there: both are refused before the fence.
@@ -1059,7 +1105,12 @@ impl Rollout {
     /// one that only root or the coordinator can modify (or one of `holders`);
     /// below a sticky directory a component must be theirs too, since its owner
     /// may rename it. So no other user can swap a component for a symlink
-    /// before systemd or a root write resolves the path. The walk itself never
+    /// before systemd or a root write resolves the path. With `trust`, a
+    /// declared `trusted_ancestors` entry also passes; its owner can then rename
+    /// what lies below it, so only data, provisioning, export and sandbox paths
+    /// (the cluster, backup and state roots the operator placed there) opt in,
+    /// never root-only state (journal, startup, import slot, execution lock and
+    /// root-written directories). The walk itself never
     /// re-resolves a pathname: each component is opened (`openat`, no-follow)
     /// from its parent's descriptor and checked through its own (`fstat`).
     /// With `create` (the leaf's mode), a missing component is made by one
@@ -1072,6 +1123,7 @@ impl Rollout {
         path: &Path,
         holders: &[&Path],
         create: Option<u32>,
+        trust: bool,
     ) -> Result<Option<(fs::File, fs::Metadata)>> {
         let untrusted = |at: &Path| {
             invalid(format!(
@@ -1123,9 +1175,17 @@ impl Rollout {
             let shared = metadata.mode() & 0o022 != 0;
             let sticky = metadata.mode() & 0o1000 != 0;
             let holder = holders.contains(&current.as_path());
+            let trusted = !leaf
+                && ancestor_trusted(
+                    trust,
+                    &self.manifest.trusted_ancestors,
+                    &current,
+                    metadata.uid(),
+                    metadata.mode(),
+                );
             if !metadata.is_dir()
                 || (parent_shared && !owned)
-                || (!leaf && (!(owned || holder) || (shared && !sticky)))
+                || (!leaf && (!(owned || holder || trusted) || (shared && !sticky)))
             {
                 return Err(untrusted(&current));
             }
@@ -1141,7 +1201,7 @@ impl Rollout {
         // Never create the journal on the root filesystem below an absent mount.
         self.require_covering_mounts(&self.state)?;
         let (_, leaf) = self
-            .walk(&self.state, &[], Some(0o700))?
+            .walk(&self.state, &[], Some(0o700), false)?
             .ok_or_else(|| invalid("rollout journal root is missing"))?;
         if leaf.uid() != euid() || leaf.mode() & 0o077 != 0 {
             return Err(invalid(
@@ -1177,7 +1237,7 @@ impl Rollout {
             .chain(self.export_sandboxed().then_some(&prepare.export_root))
             .chain(&prepare.required_mounts)
         {
-            self.walk(path, &[], None)?;
+            self.walk(path, &[], None, true)?;
         }
         Ok(())
     }
@@ -1851,7 +1911,7 @@ impl Rollout {
             .chain([(authority, "postgres", 0o700, &harbor)]);
         for (path, group, mode, identity) in provisioned {
             let (uid, gid) = self.provision_owner(group)?;
-            if let Some((_, metadata)) = self.walk(path, &roots, None)?
+            if let Some((_, metadata)) = self.walk(path, &roots, None, true)?
                 && (metadata.uid(), metadata.gid(), metadata.mode() & 0o7777) != (uid, gid, mode)
             {
                 return Err(invalid(format!(
@@ -1870,7 +1930,7 @@ impl Rollout {
             .chain([prepare.export_root.clone()])
         {
             self.require_traversable(&path, &worker)?;
-            match self.walk(&path, &roots, None)? {
+            match self.walk(&path, &roots, None, true)? {
                 Some((_, metadata)) => require_writable(&metadata, &path, &worker)?,
                 // Provisioned with the worker as owner before it starts.
                 None if holders.contains(&path.as_path()) => {}
@@ -1889,7 +1949,7 @@ impl Rollout {
     /// an existing one owned by root and writable by no one else (`mask`, as
     /// the writing step checks), a missing one creatable.
     fn check_root_directory(&self, path: &Path, mask: u32, owned: &str) -> Result<()> {
-        if let Some((_, metadata)) = self.walk(path, &[], None)?
+        if let Some((_, metadata)) = self.walk(path, &[], None, false)?
             && (metadata.uid() != euid() || metadata.mode() & mask != 0)
         {
             return Err(invalid(format!("{} must be {owned}", path.display())));
@@ -2003,10 +2063,18 @@ impl Rollout {
         // Pin the parent once; everything after is relative to its descriptor,
         // so a parent's owner (postgres, for evidence in its backup root)
         // renaming paths can never redirect a root mkdir, chown or rename.
-        let (parent, metadata) = (self.walk(parent_path, &holders, Some(0o755))?)
+        let (parent, metadata) = (self.walk(parent_path, &holders, Some(0o755), true)?)
             .ok_or_else(|| invalid("provisioned directory has no parent"))?;
-        // Created only in a directory no one else can write, or a declared one.
-        if !([0, euid()].contains(&metadata.uid()) || holders.contains(&parent_path))
+        // Created only in a directory no one else can write, a declared one, or
+        // a trusted user-owned ancestor (the same predicate the walk applied).
+        if !([0, euid()].contains(&metadata.uid())
+            || holders.contains(&parent_path)
+            || trusted_ancestor(
+                &self.manifest.trusted_ancestors,
+                parent_path,
+                metadata.uid(),
+                metadata.mode(),
+            ))
             || metadata.mode() & 0o022 != 0
         {
             return Err(invalid(format!(
@@ -2092,7 +2160,7 @@ impl Rollout {
         self.provision(authority, "postgres", 0o700)?;
         // Harbor would create missing parents of its inhibition state private
         // to root, where a sibling postgres path could no longer be searched.
-        self.walk(startup, &[], Some(0o700))?;
+        self.walk(startup, &[], Some(0o700), false)?;
         self.inhibit(journal)?;
         self.pause_publishers(journal)?;
         self.stop_clients(journal)?;
@@ -2357,6 +2425,7 @@ impl Rollout {
             &export,
             &[self.writable_roots(), vec![root.as_path()]].concat(),
             None,
+            true,
         )?)
         .ok_or_else(unavailable)?;
         let mut plan = open_at(
@@ -2476,7 +2545,7 @@ impl Rollout {
             .parent()
             .ok_or_else(|| invalid("import slot has no directory"))?;
         self.require_covering_mounts(directory)?;
-        self.walk(directory, &[], Some(0o700))?;
+        self.walk(directory, &[], Some(0o700), false)?;
         if let Ok(metadata) = fs::symlink_metadata(slot) {
             trusted_file(&metadata, slot, euid())?;
             let staged = read_pinned(slot, super::recovery::MAX_OFF_HOST_RECEIPT_BYTES)?.1;
@@ -3072,7 +3141,7 @@ impl Rollout {
         let parent = path
             .parent()
             .ok_or_else(|| invalid("execution lock has no directory"))?;
-        match self.walk(parent, &[], None)? {
+        match self.walk(parent, &[], None, false)? {
             Some((_, metadata))
                 if [0, euid()].contains(&metadata.uid()) && metadata.mode() & 0o022 == 0 => {}
             _ => {
@@ -3584,7 +3653,7 @@ esac"#,
                     "required_mounts": [], "supplementary_groups": [], "provision_directories": []},
                 "import_slot": self.p("import/receipt.json"),
                 "executor": {"host": "executor", "user": "can", "command": ["/bin/true"]},
-                "cutover": null,
+                "cutover": null, "trusted_ancestors": [],
             });
             let path = self.p(name);
             fs::write(&path, manifest.to_string()).unwrap();
@@ -3836,6 +3905,63 @@ esac"#,
         edit(&mut manifest);
         fs::write(&path, manifest.to_string()).unwrap();
         f.load(&path)
+    }
+
+    #[test]
+    fn trusted_ancestor_needs_exact_path_declared_owner_and_no_shared_write() {
+        let trusted = [TrustedAncestor {
+            path: PathBuf::from("/data/nvme0/can"),
+            uid: 1000,
+        }];
+        let at = Path::new("/data/nvme0/can");
+        assert!(trusted_ancestor(&trusted, at, 1000, 0o40755));
+        // Another owner, a group/world-writable mode, or another directory
+        // (even a child of the trusted one) stays untrusted.
+        assert!(!trusted_ancestor(&trusted, at, 1001, 0o40755));
+        assert!(!trusted_ancestor(&trusted, at, 1000, 0o40775));
+        assert!(!trusted_ancestor(&trusted, at, 1000, 0o40757));
+        assert!(!trusted_ancestor(&trusted, at, 1000, 0o41777));
+        assert!(!trusted_ancestor(
+            &trusted,
+            Path::new("/data/nvme0/can/x"),
+            1000,
+            0o40755
+        ));
+        assert!(!trusted_ancestor(&[], at, 1000, 0o40755));
+    }
+
+    #[test]
+    fn root_only_walks_never_honor_a_trusted_ancestor() {
+        let trusted = [TrustedAncestor {
+            path: PathBuf::from("/data/nvme0/can"),
+            uid: 1000,
+        }];
+        let at = Path::new("/data/nvme0/can");
+        assert!(ancestor_trusted(true, &trusted, at, 1000, 0o40755));
+        assert!(!ancestor_trusted(false, &trusted, at, 1000, 0o40755));
+    }
+
+    #[test]
+    fn load_accepts_only_normalized_non_root_trusted_ancestors() {
+        let f = Fixture::new(0);
+        let with = |path: &str, uid: u32| {
+            edit_manifest(&f, |m| {
+                m["trusted_ancestors"] = json!([{"path": path, "uid": uid}])
+            })
+        };
+        assert!(with("/data/nvme0/can", 1000).is_ok());
+        for (path, uid) in [
+            ("/data/nvme0/can", 0),
+            ("data/nvme0/can", 1000),
+            ("/", 1000),
+            ("/data/../etc", 1000),
+        ] {
+            let error = with(path, uid)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(error.contains("trusted ancestors"), "{path} {uid}: {error}");
+        }
     }
 
     #[test]
@@ -5885,7 +6011,10 @@ exit 1"#,
         rollout.provision(&backup, "postgres", 0o700).unwrap();
         // The walk pins the parent; then its owner (postgres on a host)
         // swaps it for a symlink to a directory of its choosing.
-        let (parent, _) = (rollout.walk(&backup, &[&backup], Some(0o755)).unwrap()).unwrap();
+        let (parent, _) = (rollout
+            .walk(&backup, &[&backup], Some(0o755), true)
+            .unwrap())
+        .unwrap();
         fs::create_dir(f.p("outside")).unwrap();
         fs::set_permissions(f.p("outside"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::rename(&backup, f.p("backup.moved")).unwrap();
