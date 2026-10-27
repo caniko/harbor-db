@@ -142,6 +142,7 @@
     # (and abort under) a manifest without one.
     executor = {inherit (rollout.executor) host user command;} // lib.optionalAttrs (rollout.executor.transport != null) {inherit (rollout.executor) transport;};
     inherit (rollout) cutover;
+    trusted_ancestors = rollout.trustedAncestors;
   });
   # Refuses activating a generation that would strand an open rollout.
   activationGuard =
@@ -274,12 +275,12 @@ in {
           };
           restoreCommand = mkOption {
             type = types.listOf types.nonEmptyStr;
-            description = "Absolute executable argv restoring and certifying the selected backup at a disposable read-only endpoint.";
+            description = "Absolute executable argv restoring and certifying the selected backup at a disposable read-only endpoint. Not run when recovery.offHostReceiptFile is set: the independent executor's certification is then the single restore proof.";
           };
           exportCommand = mkOption {
             type = types.listOf types.nonEmptyStr;
             default = [];
-            description = "Optional absolute executable argv publishing the bound backup/WAL/snapshot copy for consumer-owned independent transport. Runs after local acceptance and before off-host admission.";
+            description = "Optional absolute executable argv publishing the bound backup/WAL/snapshot copy for consumer-owned independent transport. Runs after local acceptance (with an off-host executor, after snapshot verification) and before off-host admission.";
           };
           supplementaryGroups = mkOption {
             type = types.listOf types.nonEmptyStr;
@@ -392,6 +393,27 @@ in {
             type = types.listOf types.nonEmptyStr;
             default = [];
             description = "Backup/evidence publishers skipped (via a drop-in condition) for the whole rollout.";
+          };
+          trustedAncestors = mkOption {
+            type = types.listOf (types.submodule {
+              options = {
+                # Normal components only, as the loader requires: no `.` or `..`.
+                path = mkOption {type = types.strMatching "(/([^/.][^/]*|\\.[^/.][^/]*|\\.\\.[^/]+))+";};
+                # The coordinator reads a non-root u32 uid.
+                uid = mkOption {type = types.ints.between 1 4294967295;};
+              };
+            });
+            default = [];
+            description = ''
+              Exact ancestor directories of the cluster, backup or state paths that a
+              non-root user owns (for example a home-like data root), each with that
+              owner's uid. The rollout's ancestry walk accepts such a directory only
+              for data, provisioning, export and sandbox paths, and only when it has
+              that owner and no group or world write bit; root-only state (journal,
+              startup, import slot, execution lock) and every other ancestor must
+              stay root-owned. Listing one trusts its owner not to swap
+              the path, so name only the operator's own data root.
+            '';
           };
           setupSettleSeconds = mkOption {
             type = types.ints.positive;
@@ -660,7 +682,13 @@ in {
           apart = a: b: !(contains a.path b.path || contains b.path a.path) || intended a b || intended b a;
           pairs = lib.concatLists (lib.imap0 (i: a: map (apart a) (lib.drop (i + 1) roots)) roots);
           # The worker writes the evidence directories and the backup root.
-          evidence = map builtins.dirOf ([cfg.recovery.snapshotFile cfg.recovery.receiptFile] ++ lib.optional (cfg.recovery.offHostReceiptFile != null) cfg.recovery.offHostReceiptFile) ++ [cfg.recovery.backupRoot];
+          # With an off-host executor no local receipt is written (as in the
+          # coordinator's filter), so only the receipt actually used counts.
+          receipt =
+            if cfg.recovery.offHostReceiptFile != null
+            then cfg.recovery.offHostReceiptFile
+            else cfg.recovery.receiptFile;
+          evidence = map builtins.dirOf [cfg.recovery.snapshotFile receipt] ++ [cfg.recovery.backupRoot];
           writable = path: lib.any (root: contains root path) preparation.readWritePaths;
         in
           rollout == null || preparation == null || cfg.recovery == null || (lib.all lib.id pairs && lib.all writable evidence);

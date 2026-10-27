@@ -556,13 +556,10 @@ class RecoveryReadinessTest(unittest.TestCase):
         off_host = self.backup / "evidence/off-host.json"
         self.config["recovery"]["off_host_receipt_file"] = str(off_host)
 
-        def run(argv):
-            if argv == preparation["restore_command"]:
-                self.certify()
-
+        # The executor's certification replaces the local drill.
         with (
             patch.object(recovery.time, "time", return_value=self.now),
-            patch.object(postgres, "run", side_effect=run) as execute,
+            patch.object(postgres, "run") as execute,
         ):
             with self.assertRaisesRegex(ValueError, "off-host"):
                 recovery.prepare(self.config, preparation, "/run/postgresql", 5432)
@@ -571,7 +568,6 @@ class RecoveryReadinessTest(unittest.TestCase):
                 [
                     preparation["readiness_command"],
                     preparation["backup_command"],
-                    preparation["restore_command"],
                 ],
             )
             execute.reset_mock()

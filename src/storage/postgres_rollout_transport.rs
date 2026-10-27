@@ -92,7 +92,7 @@ impl Rollout {
             .map_err(|_| invalid("clock precedes the epoch"))?
             .as_nanos();
         let attempt = self.attempts().join(nanos.to_string());
-        self.walk(&attempt, &[], Some(0o700))?;
+        self.walk(&attempt, &[], Some(0o700), false)?;
         let result = self.run_hook(hook, journal, export, export_sha256, &attempt);
         if result.is_err() {
             let _ = fs::remove_dir_all(&attempt);

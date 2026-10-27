@@ -393,16 +393,21 @@ backup/evidence and disposable paths; the module rejects primary/authority trees
 The candidate pre-switch hook runs these commands as `postgres` before any unit
 replacement or adoption. Boot/dry/check actions cannot execute preparation.
 The consumer must hold its writer consistency window for backup through snapshot.
+With `offHostReceiptFile` set, the independent executor's certification is the
+single restore proof: preparation skips `restoreCommand`, and admission requires
+the off-host receipt but no local one. With it null, the local drill and its
+receipt stay required.
 
-An optional consumer `exportCommand` runs only after local acceptance, before
-the missing off-host receipt abort. It may publish the selected immutable
+An optional consumer `exportCommand` runs after local acceptance (or, with an
+executor, after the snapshot is verified), before the missing off-host receipt
+abort. It may publish the selected immutable
 backup/WAL/metadata/snapshot copy for independent transport. Its writable paths
 and `supplementaryGroups` are explicitly declared; Harbor does not perform
 transport or restore orchestration. Receipts bind the exact metadata bytes as
 well as the base manifest, replay target and record contract.
 
-Missing independent evidence aborts that activation after retaining local
-evidence. On retry, the preparation journal and source snapshot retain the same
+Missing independent evidence aborts that activation after retaining the
+snapshot (and any local receipt). On retry, the preparation journal and source snapshot retain the same
 backup; stale, changed or incomplete existing evidence fails rather than starting
 a replacement backup. A consumer may transport the independently executed
 receipt to `offHostReceiptImportFile`. The next managed activation privately loads

@@ -703,14 +703,14 @@ def check_evidence(
         for value in source["records"].values()
     ):
         raise ValueError("record snapshot is incomplete")
-    if verify_contents:
-        verify_backup(config, directory)
     result = {
         "status": "ready" if verify_contents else "preflight-ready",
         **binding,
         "off_host": None,
     }
-    paths = [(settings["receipt_file"], "restore acceptance")]
+    paths = []
+    if not executor_certifies(config):
+        paths.append((settings["receipt_file"], "restore acceptance"))
     if settings.get("off_host_receipt_file"):
         paths.append((settings["off_host_receipt_file"], "off-host restore acceptance"))
     for path, label in paths:
@@ -718,7 +718,15 @@ def check_evidence(
         validate_receipt(config, settings, source, binding, receipt, label)
         if label.startswith("off-host"):
             result["off_host"] = receipt["executor_host"]
+    # Receipts are cheap: a missing one fails before the backup is re-read.
+    if verify_contents:
+        verify_backup(config, directory)
     return result
+
+
+def executor_certifies(config):
+    """An off-host executor's certification is then the single restore proof."""
+    return config["recovery"].get("off_host_receipt_file") is not None
 
 
 def machine_acceptance(source, executor, off_host):
@@ -923,22 +931,17 @@ def _prepare_fenced(config, preparation, socket_dir, port, settings, anchor, fen
                         "record snapshot writer fence differs from the retained window"
                     )
                 verify_backup(config, directory)
-        if not Path(settings["receipt_file"]).exists():
-            postgres.run(preparation["restore_command"])
-        with (
-            lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True),
-            evidence_lease(settings, inspect=True),
-        ):
-            now = int(time.time())
-            directory, binding = backup(config, settings, now)
-            check_evidence(
-                config,
-                settings | {"off_host_receipt_file": None},
-                directory,
-                binding,
-                now,
-                fence=fence,
-            )
+        # Without an executor the local drill and its receipt stay required.
+        if not executor_certifies(config):
+            if not Path(settings["receipt_file"]).exists():
+                postgres.run(preparation["restore_command"])
+            with (
+                lock(absolute(settings["backup_root"]) / "locks/mutate", shared=True),
+                evidence_lease(settings, inspect=True),
+            ):
+                now = int(time.time())
+                directory, binding = backup(config, settings, now)
+                check_evidence(config, settings, directory, binding, now, fence=fence)
         # Transport orchestration belongs to the consumer. Its explicit export
         # command may publish a service-user-owned immutable copy for the
         # independent executor even when final off-host admission will abort.

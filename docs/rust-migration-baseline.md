@@ -147,6 +147,8 @@ Their shared bridge contains only the transport module and keeps fixture-owned
 verdicts, acceptance filenames, descriptor inheritance and cleanup deadlines.
 Recovery preparation validates every command before acquiring leases, reuses
 its admitted argv and retains local acceptance before export or off-host import.
+With an off-host receipt configured, the executor's certification is the single
+restore proof and preparation runs no local drill.
 
 The native lease engine coordinates authority acquisition with worker fork/exec
 handshakes. This prevents unrelated children from temporarily retaining an

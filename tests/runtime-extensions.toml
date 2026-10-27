@@ -29,7 +29,9 @@ sha256 = "4ee1b3b4ab3dae479b2d5cc01fccb23db3b0916dc40970ae6ff993a1f4b3d51b"
 path = "python/harbor_db/recovery.py"
 # Record checks honour recovery.verify_timeout_seconds while auxiliary queries
 # keep 60 s; only an independent executor may skip an unsearchable source path.
-sha256 = "d64c1e1431a59346f129be63f680b79742d92dc7e0823987316f4438397f9bb1"
+# Admission checks receipts before the backup; an off-host executor's
+# certification replaces the local drill and its receipt.
+sha256 = "9b8e29c57249a7d00fb95b0749415f08e6953247ed898d43ef8ed2cac7edb3f7"
 
 [[extensions]]
 path = "python/harbor_db/application_transition.py"
@@ -128,7 +130,8 @@ sha256 = "c35296544ff95df18bcdeda7dcee6e197724ecba066b3379590ec37a7055eeed"
 
 [[extensions]]
 path = "tests/test_recovery_readiness.py"
-sha256 = "557364171b4cc5124fd3a6966e1bb5462eb7b5c5ce51fca1a5aa22938cf30d59"
+# Managed preparation with an off-host executor runs no local restore drill.
+sha256 = "6db05ad8923927aaf1cfafda2fe66753131df66c60a657aa813593debcc1cdfa"
 
 [[extensions]]
 path = "tests/test_resource_lifecycle.py"

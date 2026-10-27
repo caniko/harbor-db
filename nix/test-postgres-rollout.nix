@@ -596,7 +596,8 @@ in
           active("fixture-daemon.service", "fixture-dependent.service")
           primary.succeed("install -d -m 0700 /root/stale; mv /srv/evidence/records.json /srv/evidence/preparation.json /root/stale/")
           refused("fence", "/srv/evidence/off-host.json")
-          primary.succeed("mv /srv/evidence/recovery.json /srv/evidence/off-host.json /root/stale/")
+          # The executor's certification replaced the local drill: no local receipt.
+          primary.succeed("test ! -e /srv/evidence/recovery.json; mv /srv/evidence/off-host.json /root/stale/")
           assert primary_pid() == running
           assert step("fence")["phase"] == "fenced"
           fenced()

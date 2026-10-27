@@ -371,6 +371,8 @@ in
           && rollout.setup_units == ["postgresql-setup.service"]
           && rollout.paused_publishers == ["fixture-backup.service"]
           && rollout.import_slot == "/srv/import/off-host.json"
+          # Always rendered (required by the coordinator), empty unless declared.
+          && rollout.trusted_ancestors == []
           && rollout.executor.command == ["/fixture/certify"]
           # Unset, the hook is not written (older coordinators load the manifest).
           && !(rollout.executor ? transport)
@@ -384,11 +386,60 @@ in
         message = "The opt-in rollout manifest must bind the fenced primary, client inventory, setup units, publishers and executor.";
       }
       {
+        name = "rollout-trusted-ancestors-match-the-loader";
+        assertion = let
+          accepted = ancestor:
+            (builtins.tryEval (builtins.deepSeq
+              (withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.trustedAncestors = [ancestor];}];}).config.services.harbor-db.postgresql.rollout.trustedAncestors
+              true)).success;
+        in
+          lib.all accepted [
+            {
+              path = "/data/nvme0/can";
+              uid = 1000;
+            }
+            {
+              path = "/data/.state/..x";
+              uid = 4294967295;
+            }
+          ]
+          && lib.all (ancestor: !accepted ancestor) [
+            {
+              path = "/data/../etc";
+              uid = 1000;
+            }
+            {
+              path = "/data/./can";
+              uid = 1000;
+            }
+            {
+              path = "/data/";
+              uid = 1000;
+            }
+            {
+              path = "/";
+              uid = 1000;
+            }
+            {
+              path = "/data";
+              uid = 0;
+            }
+            {
+              path = "/data";
+              uid = 4294967296;
+            }
+          ];
+        message = "Trusted ancestors must evaluate only where the coordinator loads them: normalized non-root paths with a non-root u32 uid.";
+      }
+      {
         name = "rollout-replaces-legacy-preparation-and-rejects-split-properties";
         assertion = let
           checks = withRollout.config.system.preSwitchChecks;
           accepted = overrides:
             lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout systemd property" entry.message))
+            (withRollout.extendModules {modules = [overrides];}).config.assertions;
+          rootsAccepted = overrides:
+            lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout roots" entry.message))
             (withRollout.extendModules {modules = [overrides];}).config.assertions;
           rollout = value: {services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce value;};
           preparation = name: value: {services.harbor-db.postgresql.recoveryPreparation.${name} = lib.mkForce value;};
@@ -398,6 +449,13 @@ in
           # Without a rollout, a manifest-free guard still protects an open one.
           && lib.all (selected: lib.hasInfix " rollout-guard" selected.config.system.preSwitchChecks."00-0-0-harbor-db-postgresql-rollout-guard") [eval withPreparation]
           && accepted {}
+          # The unused local receipt's directory need not be writable when an
+          # executor certifies; without one it must be.
+          && rootsAccepted {services.harbor-db.postgresql.recovery.receiptFile = lib.mkForce "/srv/elsewhere/recovery.json";}
+          && !rootsAccepted {
+            services.harbor-db.postgresql.recovery.receiptFile = lib.mkForce "/srv/elsewhere/recovery.json";
+            services.harbor-db.postgresql.recovery.offHostReceiptFile = lib.mkForce null;
+          }
           && lib.all (path: !accepted (rollout path)) ["/srv/harbor-db/ex port" "/srv/harbor-db/ex\tport" "/srv/harbor-db/ex%h" "/srv/harbor-db/ex\\port" "/srv/harbor-db/ex'port"]
           && !accepted (preparation "readWritePaths" ["/srv/backups /srv/postgres/18" "/srv/disposable"])
           && !accepted (preparation "supplementaryGroups" ["users wheel"])
