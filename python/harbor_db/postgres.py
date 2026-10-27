@@ -615,8 +615,6 @@ def main():
     )
     recovery_inspection.add_argument("--socket-dir")
     recovery_inspection.add_argument("--port", type=int)
-    # Parser parity with the Rust CLI; this retained engine always checks evidence.
-    recovery_inspection.add_argument("--evidence", action="store_true")
     fence_open = commands.add_parser(
         "fence-open", help="prepare a durable writer fence while the primary is stopped"
     )

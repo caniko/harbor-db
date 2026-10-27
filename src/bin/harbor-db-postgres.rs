@@ -53,10 +53,9 @@ enum Operation {
         socket_dir: Option<PathBuf>,
         #[arg(long)]
         port: Option<u16>,
-        /// Also require the record-certified evidence a transition needs.
-        #[arg(long)]
-        evidence: bool,
     },
+    /// Routine admission: backup health without record-certified evidence.
+    InspectBackup,
     FenceOpen {
         #[arg(long)]
         system_identifier: String,
@@ -328,13 +327,9 @@ fn operate(args: Args) -> Result<Option<Value>> {
                 phase.text(),
             )?
         }
-        Operation::InspectRecovery {
-            socket_dir,
-            port,
-            evidence,
-        } => match (socket_dir, port) {
-            (None, None) if evidence => storage::recovery::evidence_check(&config, None)?,
-            (None, None) => storage::recovery::check(&config, None)?,
+        Operation::InspectBackup => storage::recovery::check(&config, None)?,
+        Operation::InspectRecovery { socket_dir, port } => match (socket_dir, port) {
+            (None, None) => storage::recovery::evidence_check(&config, None)?,
             (Some(socket), Some(port)) => {
                 storage::recovery::live_check(&config, &socket, port, None)?
             }

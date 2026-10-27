@@ -563,6 +563,7 @@ in
           service = eval.config.systemd.services.harbor-db-postgresql-recovery-check;
         in
           lib.hasInfix "inspect-recovery" checks."00-harbor-db-postgresql-recovery"
+          && lib.hasInfix "inspect-backup" withoutAdoption.config.system.preSwitchChecks."00-harbor-db-postgresql-recovery"
           && service.wantedBy == []
           && service.serviceConfig.ReadWritePaths == []
           && service.serviceConfig.User == "postgres"

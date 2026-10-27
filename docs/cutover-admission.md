@@ -17,13 +17,13 @@ without `services.harbor-db.postgresql.recovery`, because every non-startup phas
 requires recovery admission. Existing PostgreSQL
 identity, staged-upgrade, recovery snapshot and independent restore acceptance
 engines remain authoritative. Routine admission (`preflight`, `activate`, and
-`inspect-recovery` without a socket) checks backup health only: the backup named
+`inspect-backup`) checks backup health only: the backup named
 by `LAST_SUCCESS` must match the declared primary, be fresh, and, at `activate`,
 pass byte verification. It does not read record snapshots or receipts, so the
 nightly base backup advancing `LAST_SUCCESS` never blocks a host rebuild.
-Transitions (`certify`, adoption, preparation/import and upgrades) still require
-fresh record-certified evidence bound to the selected backup. Renew evidence only
-before a transition.
+`inspect-recovery`, `certify`, adoption, preparation/import and rollout thaw
+still require fresh record-certified evidence bound to the selected backup.
+Renew evidence only before one of these.
 
 Candidate-owned `postgresCompatibilityChecks` run cheap read-only SQL against
 the live primary before building. Each query must return exactly one true value;

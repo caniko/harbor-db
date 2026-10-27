@@ -795,8 +795,13 @@ in {
       })
       (lib.mkIf (cfg.recovery != null) {
         # Lexical ordering rejects missing recovery evidence before any adoption.
+        # Without an adoption request, routine switches gate on backup health.
         "00-harbor-db-postgresql-recovery" = ''
-          ${serviceUserCommand} inspect-recovery
+          ${serviceUserCommand} ${
+            if cfg.switchAdoption != null
+            then "inspect-recovery"
+            else "inspect-backup"
+          }
         '';
       })
       (lib.mkIf (cfg.switchAdoption != null) {
@@ -814,13 +819,13 @@ in {
     ];
 
     systemd.services.harbor-db-postgresql-recovery-check = mkIf (cfg.recovery != null) {
-      description = "Read-only PostgreSQL backup and recovery admission";
+      description = "Read-only PostgreSQL backup admission";
       unitConfig.RequiresMountsFor = [cfg.recovery.backupRoot];
       serviceConfig = {
         Type = "oneshot";
         User = "postgres";
         Group = "postgres";
-        ExecStart = "${command} inspect-recovery";
+        ExecStart = "${command} inspect-backup";
         TimeoutStartSec = cfg.recovery.verifyTimeoutSeconds + 60;
         ProtectSystem = "strict";
         ReadWritePaths = [];
