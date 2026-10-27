@@ -390,6 +390,9 @@ in
           accepted = overrides:
             lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout systemd property" entry.message))
             (withRollout.extendModules {modules = [overrides];}).config.assertions;
+          rootsAccepted = overrides:
+            lib.all (entry: entry.assertion || !(lib.hasPrefix "Rollout roots" entry.message))
+            (withRollout.extendModules {modules = [overrides];}).config.assertions;
           rollout = value: {services.harbor-db.postgresql.rollout.exportRoot = lib.mkForce value;};
           preparation = name: value: {services.harbor-db.postgresql.recoveryPreparation.${name} = lib.mkForce value;};
         in
@@ -398,6 +401,13 @@ in
           # Without a rollout, a manifest-free guard still protects an open one.
           && lib.all (selected: lib.hasInfix " rollout-guard" selected.config.system.preSwitchChecks."00-0-0-harbor-db-postgresql-rollout-guard") [eval withPreparation]
           && accepted {}
+          # The unused local receipt's directory need not be writable when an
+          # executor certifies; without one it must be.
+          && rootsAccepted {services.harbor-db.postgresql.recovery.receiptFile = lib.mkForce "/srv/elsewhere/recovery.json";}
+          && !rootsAccepted {
+            services.harbor-db.postgresql.recovery.receiptFile = lib.mkForce "/srv/elsewhere/recovery.json";
+            services.harbor-db.postgresql.recovery.offHostReceiptFile = lib.mkForce null;
+          }
           && lib.all (path: !accepted (rollout path)) ["/srv/harbor-db/ex port" "/srv/harbor-db/ex\tport" "/srv/harbor-db/ex%h" "/srv/harbor-db/ex\\port" "/srv/harbor-db/ex'port"]
           && !accepted (preparation "readWritePaths" ["/srv/backups /srv/postgres/18" "/srv/disposable"])
           && !accepted (preparation "supplementaryGroups" ["users wheel"])

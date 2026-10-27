@@ -660,7 +660,13 @@ in {
           apart = a: b: !(contains a.path b.path || contains b.path a.path) || intended a b || intended b a;
           pairs = lib.concatLists (lib.imap0 (i: a: map (apart a) (lib.drop (i + 1) roots)) roots);
           # The worker writes the evidence directories and the backup root.
-          evidence = map builtins.dirOf ([cfg.recovery.snapshotFile cfg.recovery.receiptFile] ++ lib.optional (cfg.recovery.offHostReceiptFile != null) cfg.recovery.offHostReceiptFile) ++ [cfg.recovery.backupRoot];
+          # With an off-host executor no local receipt is written (as in the
+          # coordinator's filter), so only the receipt actually used counts.
+          receipt =
+            if cfg.recovery.offHostReceiptFile != null
+            then cfg.recovery.offHostReceiptFile
+            else cfg.recovery.receiptFile;
+          evidence = map builtins.dirOf [cfg.recovery.snapshotFile receipt] ++ [cfg.recovery.backupRoot];
           writable = path: lib.any (root: contains root path) preparation.readWritePaths;
         in
           rollout == null || preparation == null || cfg.recovery == null || (lib.all lib.id pairs && lib.all writable evidence);
