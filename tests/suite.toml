@@ -168,6 +168,7 @@ selectors = [
   "untrusted_supervisor_bases_and_ancestors_reject_before_publication",
   "bound_inputs_restored_inside_a_case_still_reject_qualification",
   "bound_inputs_are_checked_before_the_next_case_can_restore_them",
+  "restored_directory_swap_cannot_hide_execution_against_replacement_inputs",
 ]
 
 [[inventories]]

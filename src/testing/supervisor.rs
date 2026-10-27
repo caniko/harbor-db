@@ -786,12 +786,10 @@ fn execute_case(
     // Bind each execution, not just worker startup or terminal verification.
     // Inode/ctime continuity also rejects edits whose original bytes are restored
     // before the case exits, which a second content hash alone would miss.
-    let inputs = match bound_input_identities(spec).and_then(|inputs| {
+    let inputs = match InputContinuity::capture(spec).and_then(|inputs| {
         validate_spec(spec)?;
         validate_service_executable(run)?;
-        if bound_input_identities(spec)? != inputs {
-            return Err(error("source/input changed during case admission"));
-        }
+        inputs.check(spec)?;
         Ok(inputs)
     }) {
         Ok(inputs) => inputs,
@@ -915,9 +913,7 @@ fn execute_case(
     started.child = None;
     if let Err(e) = validate_spec(spec).and_then(|()| {
         validate_service_executable(run)?;
-        if bound_input_identities(spec)? != inputs {
-            return Err(error("source/input changed during case execution"));
-        }
+        inputs.check(spec)?;
         Ok(())
     }) {
         result.evidence_errors.push(e.to_string());
@@ -1052,11 +1048,106 @@ pub fn worker(run: &Path) -> Result<()> {
 }
 type FileIdentity = (u64, u64, i64, i64, i64, i64, u64);
 
-fn bound_input_identities(spec: &RunSpec) -> Result<Vec<FileIdentity>> {
-    spec.inputs
-        .iter()
-        .map(|input| artifact_identity(&input.path))
-        .collect()
+struct InputContinuity {
+    identities: BTreeMap<PathBuf, FileIdentity>,
+    namespace: File,
+}
+
+impl InputContinuity {
+    fn capture(spec: &RunSpec) -> Result<Self> {
+        // Watch ancestor moves as well: renaming an ancestor leaves all of its
+        // descendants' metadata intact. Ignore sibling entry churn outside the
+        // retained namespace, including the worker's own result publications.
+        let namespace = namespace_watch(spec)?;
+        let identities = bound_input_identities(spec)?;
+        Ok(Self {
+            identities,
+            namespace,
+        })
+    }
+
+    fn check(&self, spec: &RunSpec) -> Result<()> {
+        use std::io::Read;
+        if bound_input_identities(spec)? != self.identities {
+            return Err(error(
+                "source/input changed during case admission or execution",
+            ));
+        }
+        // Any watched move/delete, unmount, removed watch or queue overflow
+        // invalidates continuity. Never accept a lossy event queue as evidence.
+        match (&self.namespace).read(&mut [0u8; 4096]) {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+            Err(e) => Err(e.into()),
+            Ok(_) => Err(error(
+                "source/input namespace changed during case admission or execution",
+            )),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn namespace_watch(spec: &RunSpec) -> Result<File> {
+    use std::{ffi::CString, os::fd::FromRawFd};
+    // SAFETY: inotify_init1 has no pointer arguments; File owns a successful fd.
+    let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let watcher = unsafe { File::from_raw_fd(fd) };
+    let mut paths = BTreeSet::new();
+    for path in std::iter::once(spec.source_root.as_path())
+        .chain(spec.inputs.iter().filter_map(|input| input.path.parent()))
+    {
+        paths.extend(path.ancestors().map(Path::to_path_buf));
+    }
+    for path in paths {
+        let directory = evidence::open(&path, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+        let pinned = CString::new(format!("/proc/self/fd/{}", directory.as_raw_fd()))?;
+        // SAFETY: pinned is NUL-terminated and the descriptor pins this directory
+        // while the kernel registers its watch. The watcher retains the watch.
+        if unsafe {
+            libc::inotify_add_watch(
+                fd,
+                pinned.as_ptr(),
+                libc::IN_MOVE_SELF | libc::IN_DELETE_SELF | libc::IN_UNMOUNT,
+            )
+        } < 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    Ok(watcher)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn namespace_watch(_: &RunSpec) -> Result<File> {
+    Err(error(
+        "supervisor namespace continuity requires Linux inotify",
+    ))
+}
+
+fn bound_input_identities(spec: &RunSpec) -> Result<BTreeMap<PathBuf, FileIdentity>> {
+    fn directories(path: &Path, identities: &mut BTreeMap<PathBuf, FileIdentity>) -> Result<()> {
+        let directory = evidence::open(path, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+        identities.insert(path.to_path_buf(), artifact_identity(path)?);
+        for entry in fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                directories(&path.join(entry.file_name()), identities)?;
+            }
+        }
+        Ok(())
+    }
+    // Renaming a directory leaves descendant file identities unchanged. Include
+    // the full retained namespace, even empty directories. External input
+    // containers may also hold executor output; namespace_watch detects their
+    // moves without treating legitimate output publication as source mutation.
+    let mut identities = BTreeMap::new();
+    directories(&spec.source_root, &mut identities)?;
+    for input in &spec.inputs {
+        identities.insert(input.path.clone(), artifact_identity(&input.path)?);
+    }
+    Ok(identities)
 }
 
 fn artifact_identity(path: &Path) -> Result<FileIdentity> {
