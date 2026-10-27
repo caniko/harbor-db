@@ -1247,8 +1247,9 @@ fn admission_with_outer(
         )?;
         (result, Some(lease))
     } else {
+        // No certified restore proves these bytes, so check data-file checksums.
         if verify_contents {
-            verify_backup(config, &directory, &leases, false)?;
+            verify_backup(config, &directory, &leases, true)?;
         }
         let mut result = result(&binding)?;
         result["status"] = json!(if verify_contents {

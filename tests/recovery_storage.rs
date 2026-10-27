@@ -1270,12 +1270,16 @@ fn routine_admission_survives_a_newer_base_but_transitions_require_its_evidence(
     fs::write(base.join("backup_manifest"), "{\"WAL-Ranges\": [1]}\n").unwrap();
     durable::write_json(&f.p("backup/base/base-2.meta.json"),&json!({"backup_id":"base-2","system_identifier":"12345","pg_major":18,"epoch_id":"epoch-2","backup_stop_lsn":"0/300","post_backup_lsn":"0/400"})).unwrap();
     fs::write(f.p("backup/LAST_SUCCESS"), "base-2\n").unwrap();
+    let _ = fs::remove_file(f.p("verify.log"));
     for admitted in [
         recovery::check(&f.config, Some(f.now)).unwrap(),
         recovery::preflight(&f.config, Some(f.now)).unwrap(),
     ] {
         assert_eq!(admitted["backup_id"], "base-2");
     }
+    // Without certified evidence, routine verification must check checksums;
+    // preflight defers byte verification entirely.
+    assert_eq!(fs::read_to_string(f.p("verify.log")).unwrap(), "verify\n");
     for err in [
         recovery::evidence_check(&f.config, Some(f.now)).unwrap_err(),
         evidence_preflight(&f.config, Some(f.now)).unwrap_err(),
