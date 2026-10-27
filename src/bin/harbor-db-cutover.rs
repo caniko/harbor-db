@@ -82,6 +82,21 @@ enum Command {
         argv: Vec<String>,
     },
 }
+fn sudo_contract(path: &std::path::Path) -> bool {
+    let Some(path) = path.to_str() else {
+        return false;
+    };
+    let bundle = path
+        .strip_prefix("/nix/store/")
+        .and_then(|rest| rest.strip_suffix("-harbor-db-cutover-contract/manifest.json"))
+        .is_some_and(|hash| {
+            hash.len() == 32
+                && hash
+                    .bytes()
+                    .all(|b| b"0123456789abcdfghijklmnpqrsvwxyz".contains(&b))
+        });
+    path == "/etc/harbor-db/cutover.json" || bundle
+}
 fn run(cli: Cli) -> Result<i32> {
     let contract = match &cli.command {
         Command::Check { contract, .. }
@@ -89,6 +104,12 @@ fn run(cli: Cli) -> Result<i32> {
         | Command::CertifyWorker { contract, .. }
         | Command::Serve { contract, .. } => contract,
     };
+    // Operator sudo rules glob store bundles, and sudo's `*` also matches `/`.
+    if std::env::var_os("SUDO_UID").is_some() && !sudo_contract(&contract.contract) {
+        return Err(invalid(
+            "sudo admission accepts only the installed contract or a store bundle manifest",
+        ));
+    }
     // The legacy cutover contract explicitly supports deployed aliases. Bind
     // workers to the resolved contract file; custody and authority are still
     // read through their strict receipt readers.
@@ -286,4 +307,24 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sudo_contract;
+    use std::path::Path;
+    #[test]
+    fn sudo_accepts_only_installed_or_exact_store_bundle_contracts() {
+        assert!(sudo_contract(Path::new("/etc/harbor-db/cutover.json")));
+        assert!(sudo_contract(Path::new(
+            "/nix/store/x8n7pfqbi0ixi5rvllacgs30x4fsj0a2-harbor-db-cutover-contract/manifest.json"
+        )));
+        for path in [
+            "/nix/store/x/../../tmp/evil-harbor-db-cutover-contract/manifest.json",
+            "/nix/store/x8n7pfqbi0ixi5rvllacgs30x4fsj0a2/../x-harbor-db-cutover-contract/manifest.json",
+            "/tmp/cutover.json",
+        ] {
+            assert!(!sudo_contract(Path::new(path)), "{path}");
+        }
+    }
 }

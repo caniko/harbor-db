@@ -378,6 +378,15 @@ PostgreSQL package's `pg_controldata` and `pg_verifybackup` to validate actual
 retained bytes. WAL replay is established by the disposable restored server,
 not by a successful service exit or a copied report.
 
+Routine admission (cutover `preflight` and `activate`, `inspect-recovery` without
+a socket, the NixOS pre-switch check) verifies backup health only: the
+`LAST_SUCCESS` backup matches the primary, is within `max_age_seconds`, and
+(except for `preflight`) passes byte verification. Record snapshots and receipts
+are not consulted, so a nightly base backup does not block host rebuilds.
+Transitions (`certify`, adoption, preparation/import, upgrades) and live
+`inspect-recovery --socket-dir` require fresh record-certified evidence for the
+selected backup; renew it only before a transition.
+
 Use the candidate's `/etc/harbor-db/postgresql.json` and package before first
 activation. Under the consumer's existing consistency window, keep application
 writers paused from backup capture through the record snapshot. Queries must

@@ -23,7 +23,7 @@ fn recovery_admission(
     if config.get("recovery").is_none_or(Value::is_null) {
         Ok(None)
     } else {
-        Ok(Some(super::recovery::admission_lease(
+        Ok(Some(super::recovery::evidence_admission(
             config,
             None,
             true,

@@ -313,6 +313,11 @@ in {
             command = "${cfg.package}/bin/harbor-db-cutover check --contract /etc/harbor-db/cutover.json --host ${config.networking.hostName} --phase preflight";
             options = ["NOPASSWD"];
           }
+          {
+            # Safe: the installed trusted binary reads the store manifest as data, for the preflight phase only.
+            command = "${cfg.package}/bin/harbor-db-cutover check --contract /nix/store/*-harbor-db-cutover-contract/manifest.json --host ${config.networking.hostName} --phase preflight";
+            options = ["NOPASSWD"];
+          }
         ];
       };
     })

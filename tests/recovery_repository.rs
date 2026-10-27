@@ -142,7 +142,7 @@ fn selected_capture_requires_complete_retained_wal_through_post_target_in_both_e
         fs::rename(&path, path.with_extension("partial")).unwrap();
         assert!(recovery_repository::select(&f.config, &f.config["recovery"], f.now).is_err());
         assert!(f.python().get("error").is_some());
-        assert!(recovery::check(&f.config, Some(f.now)).is_err());
+        assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
         assert!(f.python_action("check").get("error").is_some());
         fs::rename(path.with_extension("partial"), &path).unwrap();
         fs::OpenOptions::new()
@@ -153,7 +153,7 @@ fn selected_capture_requires_complete_retained_wal_through_post_target_in_both_e
             .unwrap();
         assert!(recovery_repository::select(&f.config, &f.config["recovery"], f.now).is_err());
         assert!(f.python().get("error").is_some());
-        assert!(recovery::check(&f.config, Some(f.now)).is_err());
+        assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
         assert!(f.python_action("check").get("error").is_some());
         fs::OpenOptions::new()
             .write(true)
@@ -164,7 +164,7 @@ fn selected_capture_requires_complete_retained_wal_through_post_target_in_both_e
     }
     recovery_repository::select(&f.config, &f.config["recovery"], f.now).unwrap();
     assert!(f.python().get("error").is_none());
-    assert!(recovery::check(&f.config, Some(f.now)).is_ok());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_ok());
     assert!(f.python_action("check").get("error").is_none());
 }
 
@@ -185,7 +185,7 @@ fn same_length_wal_corruption_invalidates_selected_readiness_without_rebinding_e
         wal.write_all(b"corrupted bytes").unwrap();
         assert_eq!(wal.metadata().unwrap().len(), 16777216);
         assert!(
-            recovery::check(&f.config, Some(f.now)).is_err(),
+            recovery::evidence_check(&f.config, Some(f.now)).is_err(),
             "same-length corrupt WAL accepted: {name}"
         );
         assert!(f.python_action("check").get("error").is_some());
@@ -196,7 +196,7 @@ fn same_length_wal_corruption_invalidates_selected_readiness_without_rebinding_e
         );
         wal.seek(SeekFrom::Start(8192)).unwrap();
         wal.write_all(&[0; 15]).unwrap();
-        assert!(recovery::check(&f.config, Some(f.now)).is_ok());
+        assert!(recovery::evidence_check(&f.config, Some(f.now)).is_ok());
         assert!(f.python_action("check").get("error").is_none());
     }
 }
@@ -210,7 +210,7 @@ fn wal_inventory_is_mandatory_and_cannot_be_rebound_after_certification_in_both_
     let snapshot = fs::read(f.snapshot_path()).unwrap();
     let receipt = fs::read(f.p("backup/evidence/receipt.json")).unwrap();
     fs::remove_file(&path).unwrap();
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
     assert!(f.python_action("check").get("error").is_some());
     fs::write(&path, &original).unwrap();
     let mut inventory = codec::decode(&original).unwrap();
@@ -219,7 +219,7 @@ fn wal_inventory_is_mandatory_and_cannot_be_rebound_after_certification_in_both_
         .unwrap()
         .remove("000000010000000000000001");
     durable::write_json(&path, &inventory).unwrap();
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
     assert!(f.python_action("check").get("error").is_some());
     let wal = f.p("backup/wal/000000010000000000000001");
     let mut file = fs::OpenOptions::new().write(true).open(&wal).unwrap();
@@ -230,7 +230,7 @@ fn wal_inventory_is_mandatory_and_cannot_be_rebound_after_certification_in_both_
     durable::write_json(&path, &inventory).unwrap();
     // Even rewriting the inventory to match corruption cannot reuse accepted
     // source/receipt bindings to its original immutable carrier bytes.
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
     assert!(f.python_action("check").get("error").is_some());
     assert_eq!(fs::read(f.snapshot_path()).unwrap(), snapshot);
     assert_eq!(
@@ -241,7 +241,7 @@ fn wal_inventory_is_mandatory_and_cannot_be_rebound_after_certification_in_both_
     file.seek(SeekFrom::Start(0)).unwrap();
     file.write_all(&[0; 15]).unwrap();
     fs::write(&path, original).unwrap();
-    assert!(recovery::check(&f.config, Some(f.now)).is_ok());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_ok());
     assert!(f.python_action("check").get("error").is_none());
 }
 
@@ -521,7 +521,7 @@ impl Fixture {
             Some("primary-host"),
         )
         .unwrap();
-        assert!(recovery::check(&self.config, Some(self.now)).is_ok());
+        assert!(recovery::evidence_check(&self.config, Some(self.now)).is_ok());
     }
     fn executable(&self, path: &str, body: &str) {
         fs::write(self.p(path), format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -588,7 +588,7 @@ fn forged_source_records_or_token_never_certify_admit_import_or_prepare() {
                     Some(f.now),
                     Some("independent-host"),
                 ),
-                "check" => recovery::check(&f.config, Some(f.now)),
+                "check" => recovery::evidence_check(&f.config, Some(f.now)),
                 "live" => recovery::live_check(
                     &f.config,
                     std::path::Path::new("/run/postgresql"),
@@ -655,7 +655,7 @@ fn selected_generation_ignores_global_snapshot_and_uncommitted_capture() {
     .unwrap();
     // Pending publication has no snapshot and has not committed SELECTED.
     let before = unchanged_files(f.root.path());
-    assert!(recovery::check(&f.config, Some(f.now)).is_ok());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_ok());
     assert!(f.python_action("check").get("error").is_none());
     assert_eq!(unchanged_files(f.root.path()), before);
     let native = recovery::certify(
@@ -721,7 +721,7 @@ fn primary_snapshot_retry_returns_frozen_generation_without_republishing() {
         receipt["snapshot_sha256"],
         codec::file_digest(&f.snapshot_path()).unwrap()
     );
-    assert!(recovery::check(&f.config, Some(f.now + 30)).is_ok());
+    assert!(recovery::evidence_check(&f.config, Some(f.now + 30)).is_ok());
     assert!(f.python_action("check").get("error").is_none());
     // Neither language can silently repair an incomplete generation.
     fs::remove_file(f.snapshot_path()).unwrap();
