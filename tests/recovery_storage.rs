@@ -270,8 +270,8 @@ fn local_and_off_host_receipt_paths_cannot_alias_in_admission() {
     remote["executor_machine_sha256"] = json!("0".repeat(64));
     durable::write_json(&f.p("backup/evidence/recovery.json"), &remote).unwrap();
     assert!(recovery::check(&f.config, Some(f.now)).is_err());
-    // Shared output selection belongs only to certification. Admission still
-    // requires independent and local executions retained under separate paths.
+    // Shared output selection belongs only to certification. Admission reads
+    // the independent execution from its own, distinct path.
     f.config["recovery"]["receipt_file"] = json!(f.p("backup/evidence/local.json"));
     f.certify();
     assert_eq!(
@@ -437,7 +437,7 @@ impl Fixture {
         executable(
             &root.path().join("package/bin/pg_verifybackup"),
             &format!(
-                "printf 'verify\\n' >> '{}'; test ! -e '{}'",
+                "case \" $* \" in *' --skip-checksums '*) printf 'skip\\n';; *) printf 'verify\\n';; esac >> '{}'; test ! -e '{}'",
                 root.path().join("verify.log").display(),
                 root.path().join("corrupt").display()
             ),
@@ -1021,6 +1021,127 @@ fn verification_timeout_retains_source_for_explicit_retry() {
     assert!(f.p("backup/base/base-1/backup_manifest").exists());
     executable(&f.p("package/bin/pg_verifybackup"), "exit 0");
     assert_eq!(f.snapshot()["backup_id"], "base-1");
+}
+
+#[test]
+fn backup_checksums_run_once_per_snapshot_and_again_off_host() {
+    let _workers = WORKERS.lock().unwrap();
+    let f = Fixture::new();
+    // The snapshot verifies the bytes; the local drill and admission reuse them.
+    f.accepted();
+    recovery::check(&f.config, Some(f.now)).unwrap();
+    // An off-host certifier's copy crossed hosts: full checksums again.
+    let mut source = f.source();
+    source["source_machine_sha256"] = json!("0".repeat(64));
+    durable::write_json(&f.p("backup/evidence/records.json"), &source).unwrap();
+    recovery::certify(
+        &f.config,
+        &f.p("restored"),
+        Path::new("/restore/socket"),
+        55432,
+        Some(f.now),
+        Some("independent-host"),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(f.p("verify.log")).unwrap(),
+        "verify\nskip\nskip\nverify\n"
+    );
+}
+
+#[test]
+fn concurrent_record_checks_keep_each_digest_with_its_check() {
+    let _workers = WORKERS.lock().unwrap();
+    let mut f = Fixture::new();
+    f.config["recovery"]["record_checks"] = json!(
+        (0..6)
+            .map(|n| json!({"name": format!("c{n}"), "database": "app", "sql": format!("SELECT check {n}")}))
+            .collect::<Vec<_>>()
+    );
+    // Earlier checks answer later, so completion order is not check order.
+    let psql = f.p("package/bin/psql");
+    let script = fs::read_to_string(&psql).unwrap();
+    executable(
+        &psql,
+        &format!(
+            "for arg in \"$@\"; do case \"$arg\" in 'PREPARE harbor_db_recovery_query AS SELECT check '*) n=${{arg##* }}; sleep 0.$((6 - n)); echo \"$n\"; exit;; esac; done\n{}",
+            script.strip_prefix("#!/bin/sh\n").unwrap()
+        ),
+    );
+    let records = f.snapshot()["records"].clone();
+    for n in 0..6 {
+        assert_eq!(
+            records[format!("c{n}")],
+            json!(codec::digest(format!("{n}\n").as_bytes())),
+            "{records}"
+        );
+    }
+}
+
+#[test]
+fn record_checks_still_complete_with_a_single_free_connection() {
+    let _workers = WORKERS.lock().unwrap();
+    let mut f = Fixture::new();
+    f.config["recovery"]["record_checks"] = json!(
+        (0..6)
+            .map(|n| json!({"name": format!("c{n}"), "database": "app", "sql": format!("SELECT check {n}")}))
+            .collect::<Vec<_>>()
+    );
+    // A primary with one free connection refuses every concurrent session.
+    let psql = f.p("package/bin/psql");
+    let script = fs::read_to_string(&psql).unwrap();
+    executable(
+        &psql,
+        &format!(
+            "for arg in \"$@\"; do case \"$arg\" in 'PREPARE harbor_db_recovery_query AS SELECT check '*) mkdir '{}' 2>/dev/null || exit 2; sleep 0.1; echo \"${{arg##* }}\"; rmdir '{}'; exit;; esac; done\n{}",
+            f.p("connection").display(),
+            f.p("connection").display(),
+            script.strip_prefix("#!/bin/sh\n").unwrap()
+        ),
+    );
+    let records = f.snapshot()["records"].clone();
+    for n in 0..6 {
+        assert_eq!(
+            records[format!("c{n}")],
+            json!(codec::digest(format!("{n}\n").as_bytes())),
+            "{records}"
+        );
+    }
+}
+
+#[test]
+fn executor_certification_replaces_the_local_drill_only_when_configured() {
+    let _workers = WORKERS.lock().unwrap();
+    let mut f = Fixture::new();
+    f.accepted();
+    let mut independent = f.receipt();
+    independent["executor_host"] = json!("independent-host");
+    independent["executor_machine_sha256"] = json!("0".repeat(64));
+    fs::remove_file(f.p("backup/evidence/recovery.json")).unwrap();
+    let prep = f.preparation();
+    executable(
+        &f.p("restore-command"),
+        &format!(
+            "printf 'restore\\n' >> '{}'",
+            f.p("preparation.log").display()
+        ),
+    );
+    // Without an executor the local drill runs and its receipt is required.
+    assert!(f.prepare(&prep).is_err());
+    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    // With one, its certification alone admits: no drill, no local receipt.
+    f.config["recovery"]["off_host_receipt_file"] = json!(f.p("backup/evidence/off-host.json"));
+    durable::write_json(&f.p("backup/evidence/off-host.json"), &independent).unwrap();
+    assert_eq!(f.prepare(&prep).unwrap()["off_host"], "independent-host");
+    assert_eq!(
+        recovery::check(&f.config, Some(f.now)).unwrap()["off_host"],
+        "independent-host"
+    );
+    assert_eq!(
+        fs::read_to_string(f.p("preparation.log")).unwrap(),
+        "readiness\nrestore\nreadiness\n"
+    );
+    assert!(!f.p("backup/evidence/recovery.json").exists());
 }
 
 #[test]
@@ -1708,27 +1829,24 @@ fn preparation_captures_first_snapshot_and_reuses_exact_evidence_on_retry() {
     f.seed_template();
     let prep = f.preparation();
     f.config["recovery"]["off_host_receipt_file"] = json!(f.p("backup/evidence/off-host.json"));
+    // The executor's certification replaces the local drill.
     assert!(f.prepare(&prep).is_err());
     assert_eq!(
         fs::read_to_string(f.p("preparation.log")).unwrap(),
-        "readiness\nbackup\nrestore\n"
+        "readiness\nbackup\n"
     );
     let source = fs::read(f.p("backup/evidence/records.json")).unwrap();
-    let receipt = fs::read(f.p("backup/evidence/recovery.json")).unwrap();
     assert!(f.p("backup/evidence/preparation.json").exists());
     assert!(f.prepare(&prep).is_err());
     assert_eq!(
         fs::read_to_string(f.p("preparation.log")).unwrap(),
-        "readiness\nbackup\nrestore\nreadiness\n"
+        "readiness\nbackup\nreadiness\n"
     );
     assert_eq!(
         fs::read(f.p("backup/evidence/records.json")).unwrap(),
         source
     );
-    assert_eq!(
-        fs::read(f.p("backup/evidence/recovery.json")).unwrap(),
-        receipt
-    );
+    assert!(!f.p("backup/evidence/recovery.json").exists());
     assert_eq!(
         fs::read_to_string(f.p("backup/LAST_SUCCESS")).unwrap(),
         "base-1\n"

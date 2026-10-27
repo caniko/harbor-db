@@ -3296,9 +3296,12 @@ argv_suffix = ["--", "--exact"]
 maturity = "crystallized"
 selectors = [
   "backup_and_evidence_leases_exclude_mutation_through_authority_publication",
+  "backup_checksums_run_once_per_snapshot_and_again_off_host",
   "backup_manifest_metadata_identity_and_completed_identifier_changes_invalidate_evidence",
+  "concurrent_record_checks_keep_each_digest_with_its_check",
   "disposable_certifier_rejects_missing_or_invalid_copied_fence_tokens",
   "disposable_restore_must_be_distinct_read_only_primary_at_recovery_point",
+  "executor_certification_replaces_the_local_drill_only_when_configured",
   "fractional_verification_timeout_runs_backup_verification",
   "hostile_receipts_cannot_claim_record_level_acceptance",
   "incomplete_or_malformed_snapshot_records_never_admit",
@@ -3319,6 +3322,7 @@ selectors = [
   "preparation_rejects_stale_snapshot_and_stale_backup_without_replacement",
   "preparation_validates_all_argv_and_required_fence_before_commands",
   "queries_are_local_read_only_normalized_and_workers_retain_explicit_leases",
+  "record_checks_still_complete_with_a_single_free_connection",
   "redirected_snapshot_receipt_and_backup_ancestors_are_rejected",
   "required_fence_binds_snapshots_certifiers_and_retained_authority_window",
   "required_fence_live_inspection_rejects_other_writers_before_capture",
@@ -7078,6 +7082,7 @@ selectors = [
   "certify_reports_the_receipt_digest_import_checks",
   "a_thawed_journal_is_archived_so_a_new_generation_can_roll_out",
   "worker_and_executor_output_never_reaches_step_stdout",
+  "an_executor_policy_never_claims_the_unused_local_receipt_directory",
   "an_unreadable_journal_is_an_error_not_an_idle_rollout",
 ]
 

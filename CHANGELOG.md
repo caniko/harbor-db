@@ -25,6 +25,28 @@
   certification and an explicitly hashed runtime-extension contract. The original
   PR #14 Python runtime is retained as a frozen oracle.
 
+### Changed
+
+- Speed up recovery preparation, which reread the same immutable base backup
+  about 25 times. Only the record snapshot's producer and an off-host
+  certifier (whose copy crossed hosts) run a full `pg_verifybackup`; local
+  drills, admissions, imports and preparation retries of that backup pass
+  `--skip-checksums`. Admission checks its receipts before verifying the
+  backup, so a preparation still waiting for its off-host receipt fails
+  without reading it. Record checks run on up to four concurrent `psql`
+  workers with unchanged per-query bounds and results; checks that fail are
+  repeated one at a time, so a primary with one free connection still
+  passes. The rollout's preparation unit keeps the default CPU weight
+  instead of `CPUWeight=10`.
+- With `offHostReceiptFile` configured, the independent executor's
+  certification is the single restore proof. Preparation no longer runs the
+  local `restoreCommand` drill, and admission (including preparation's import
+  and final checks) requires the off-host receipt but no local receipt. A
+  policy without an off-host receipt still requires the local drill and its
+  receipt. Consumers that copied the local receipt into their export (such as
+  an `accepted-local.json`) or ran a local-only `inspect-recovery` with the
+  off-host path cleared must stop doing so.
+
 ### Fixed
 
 - Let first PostgreSQL rollouts with cutover enabled reach their switch adoption

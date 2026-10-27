@@ -650,14 +650,16 @@ fn run(args: Args) -> Result<()> {
         g.shell("primary", format!("{stage} --source /run/independent-receipt.json --destination /run/trusted-receipt-import/{engine}; cmp /run/independent-receipt.json /run/trusted-receipt-import/{engine}; test \"$(stat -c '%u:%g:%a' /run/trusted-receipt-import/{engine})\" = 0:0:400"), true, &format!("{engine}-trusted-independent-receipt-pinned-into-private-root-storage"))?;
         g.shell("primary", format!("runuser -u postgres -- {stage} --source /run/independent-receipt.json --destination /run/trusted-receipt-import/worker"), false, &format!("{engine}-unprivileged-import-staging-rejected"))?;
     }
-    g.shell("primary", format!("install -m 0600 -o postgres -g postgres /run/independent-receipt.json {ROOT}/evidence/receipt.json; install -m 0600 -o postgres -g postgres /run/independent-receipt.json {ROOT}/evidence/off-host.json; cmp {ROOT}/evidence/receipt.json {ROOT}/evidence/off-host.json"), true, "same-independent-receipt-negative-fixture-installed")?;
+    g.shell("primary", format!("install -m 0600 -o postgres -g postgres /run/independent-receipt.json {ROOT}/evidence/receipt.json; install -m 0600 -o postgres -g postgres /run/independent-receipt.json {ROOT}/evidence/off-host.json; cmp {ROOT}/evidence/receipt.json {ROOT}/evidence/off-host.json"), true, "same-independent-receipt-at-both-paths-installed")?;
     g.align("primary", "certifier", "source-clock-aligned")?;
     let admission = format!("{pg} inspect-recovery --socket-dir /run/postgresql --port 5432");
+    // With an off-host executor configured its certification is the single
+    // restore proof; the local receipt path is not consulted.
     g.shell(
         "primary",
         &admission,
-        false,
-        "one-independent-restore-cannot-satisfy-local-plus-off-host-policy",
+        true,
+        "one-independent-restore-satisfies-executor-policy",
     )?;
     g.shell("primary", format!("install -d -m 0700 -o postgres -g postgres /srv/recovered /srv/recovery-socket; cp -a {ROOT}/base/{} /srv/recovered/18; sha256sum /srv/recovered/18/postgresql.auto.conf > /run/local-restored-auto.sha256; printf '%s' {} > /srv/recovered/18/postgresql.conf; printf 'local all postgres peer\\n' > /srv/recovered/private-hba.conf; touch /srv/recovered/private-ident.conf /srv/recovered/18/recovery.signal; chown postgres:postgres /srv/recovered/18/postgresql.conf /srv/recovered/18/recovery.signal /srv/recovered/private-*.conf; chmod 0600 /srv/recovered/private-*.conf; if ! {ctl} -p {}/bin/postgres -l /srv/recovered/local.log -t 60 -w start; then cat /srv/recovered/local.log; exit 1; fi",q(&backup),q(&restore),q(&c.postgres_package)), true, "source-host-fresh-disposable-physical-replay-started")?;
     g.wait(
