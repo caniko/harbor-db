@@ -90,6 +90,17 @@ fn last(t: &Path) -> Value {
     durable::read_json(&t.join("backups/LAST_SUCCESS")).unwrap()
 }
 
+/// `Command::output` forks outside the lease fork gate, so a parallel test's
+/// child could briefly retain another test's released flock. Use the gate.
+fn gated_output(command: &mut std::process::Command) -> std::process::Output {
+    use std::process::Stdio;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    process::spawn(command).unwrap().wait_with_output().unwrap()
+}
+
 fn backup_cli(python: bool) -> std::process::Command {
     if !python {
         return std::process::Command::new(env!("CARGO_BIN_EXE_harbor-db-application-backup"));
@@ -259,12 +270,7 @@ fn automatic_manual_capture_remains_pinned_after_scheduled_retention_in_both_eng
         let config = t.path().join("config.json");
         durable::write_json(&config, &c).unwrap();
         let mut command = backup_cli(python);
-        let result = command
-            .arg("--config")
-            .arg(&config)
-            .arg("capture")
-            .output()
-            .unwrap();
+        let result = gated_output(command.arg("--config").arg(&config).arg("capture"));
         assert!(
             result.status.success(),
             "{}",
@@ -274,7 +280,7 @@ fn automatic_manual_capture_remains_pinned_after_scheduled_retention_in_both_eng
         let id = receipt["attempt"].as_str().unwrap();
         let root = t.path().join("backups");
         let original = fs::read(root.join(id).join("acceptance.json")).unwrap();
-        let scheduled = command.arg("--scheduled").output().unwrap();
+        let scheduled = gated_output(command.arg("--scheduled"));
         assert!(
             scheduled.status.success(),
             "{}",
@@ -314,18 +320,13 @@ fn prune_peer(c: &Value, python: bool, keep: u32) -> std::process::Output {
     let config = t.path().join("config.json");
     durable::write_json(&config, c).unwrap();
     let mut command = backup_cli(python);
-    command
-        .arg("--config")
-        .arg(config)
-        .args([
-            "prune",
-            "--keep",
-            &keep.to_string(),
-            "--incomplete-age-seconds",
-            "120",
-        ])
-        .output()
-        .unwrap()
+    gated_output(command.arg("--config").arg(config).args([
+        "prune",
+        "--keep",
+        &keep.to_string(),
+        "--incomplete-age-seconds",
+        "120",
+    ]))
 }
 
 #[test]

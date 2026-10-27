@@ -140,6 +140,9 @@ fn uts_hostname_change_cannot_certify_an_independent_machine_in_both_engines() {
     assert!(!f.p("backup/evidence/recovery.json").exists());
 }
 
+fn evidence_preflight(config: &Value, now: Option<i64>) -> harbor_db::storage::Result<Value> {
+    Ok(recovery::evidence_admission(config, now, false, None, 5432)?.result)
+}
 fn executable(path: &Path, script: &str) {
     fs::write(path, format!("#!/bin/sh\n{script}\n")).unwrap();
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
@@ -183,7 +186,7 @@ fn local_acceptance_cannot_reuse_an_independent_host_receipt_in_both_engines() {
     )
     .unwrap();
     durable::write_json(&f.p("backup/evidence/recovery.json"), &receipt).unwrap();
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
     let script = r#"import json,sys
 from harbor_db import recovery
 c,source,binding,receipt=map(json.loads,sys.argv[1:])
@@ -269,13 +272,13 @@ fn local_and_off_host_receipt_paths_cannot_alias_in_admission() {
     remote["executor_host"] = json!("independent-host");
     remote["executor_machine_sha256"] = json!("0".repeat(64));
     durable::write_json(&f.p("backup/evidence/recovery.json"), &remote).unwrap();
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
     // Shared output selection belongs only to certification. Admission reads
     // the independent execution from its own, distinct path.
     f.config["recovery"]["receipt_file"] = json!(f.p("backup/evidence/local.json"));
     f.certify();
     assert_eq!(
-        recovery::check(&f.config, Some(f.now)).unwrap()["off_host"],
+        recovery::evidence_check(&f.config, Some(f.now)).unwrap()["off_host"],
         "independent-host"
     );
 }
@@ -843,7 +846,7 @@ fn python_and_rust_certify_each_others_fenced_snapshots_and_reuse_preparation_wi
         assert_eq!(certified["snapshot_sha256"], codec::digest(&snapshot_bytes));
         assert_eq!(
             python_recovery(&f, "check", &json!({})),
-            recovery::check(&f.config, Some(f.now)).unwrap()
+            recovery::evidence_check(&f.config, Some(f.now)).unwrap()
         );
         assert_eq!(
             python_recovery(&f, "live", &json!({})),
@@ -988,7 +991,7 @@ fn matching_records_certify_exact_backup_and_snapshot_bytes() {
         codec::file_digest(&f.p("backup/base/base-1/backup_manifest")).unwrap()
     );
     assert_eq!(
-        recovery::check(&f.config, Some(f.now)).unwrap()["backup_id"],
+        recovery::evidence_check(&f.config, Some(f.now)).unwrap()["backup_id"],
         "base-1"
     );
     assert_eq!(
@@ -1029,7 +1032,7 @@ fn backup_checksums_run_once_per_snapshot_and_again_off_host() {
     let f = Fixture::new();
     // The snapshot verifies the bytes; the local drill and admission reuse them.
     f.accepted();
-    recovery::check(&f.config, Some(f.now)).unwrap();
+    recovery::evidence_check(&f.config, Some(f.now)).unwrap();
     // An off-host certifier's copy crossed hosts: full checksums again.
     let mut source = f.source();
     source["source_machine_sha256"] = json!("0".repeat(64));
@@ -1128,13 +1131,13 @@ fn executor_certification_replaces_the_local_drill_only_when_configured() {
     );
     // Without an executor the local drill runs and its receipt is required.
     assert!(f.prepare(&prep).is_err());
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
     // With one, its certification alone admits: no drill, no local receipt.
     f.config["recovery"]["off_host_receipt_file"] = json!(f.p("backup/evidence/off-host.json"));
     durable::write_json(&f.p("backup/evidence/off-host.json"), &independent).unwrap();
     assert_eq!(f.prepare(&prep).unwrap()["off_host"], "independent-host");
     assert_eq!(
-        recovery::check(&f.config, Some(f.now)).unwrap()["off_host"],
+        recovery::evidence_check(&f.config, Some(f.now)).unwrap()["off_host"],
         "independent-host"
     );
     assert_eq!(
@@ -1213,16 +1216,16 @@ fn managed_preparation_retains_local_evidence_across_missing_off_host_retry() {
 fn missing_evidence_and_missing_lease_anchors_are_never_created_by_admission() {
     let _workers = WORKERS.lock().unwrap();
     let f = Fixture::new();
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
     assert!(!f.p("backup/evidence/recovery.lock").exists());
     f.snapshot();
-    assert!(recovery::preflight(&f.config, Some(f.now)).is_err());
+    assert!(evidence_preflight(&f.config, Some(f.now)).is_err());
     f.certify();
     fs::remove_file(f.p("backup/evidence/recovery.lock")).unwrap();
-    assert!(recovery::preflight(&f.config, Some(f.now)).is_err());
+    assert!(evidence_preflight(&f.config, Some(f.now)).is_err());
     assert!(!f.p("backup/evidence/recovery.lock").exists());
     fs::remove_file(f.p("backup/locks/mutate")).unwrap();
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
     assert!(!f.p("backup/locks/mutate").exists());
 }
 
@@ -1234,17 +1237,58 @@ fn preflight_defers_byte_verification_but_requires_fresh_bound_receipts() {
     let before = fs::read(f.p("verify.log")).unwrap();
     fs::write(f.p("corrupt"), "").unwrap();
     assert_eq!(
-        recovery::preflight(&f.config, Some(f.now)).unwrap()["status"],
+        evidence_preflight(&f.config, Some(f.now)).unwrap()["status"],
         "preflight-ready"
     );
     assert_eq!(fs::read(f.p("verify.log")).unwrap(), before);
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
     for now in [f.now - 1, f.now + 3601] {
-        assert!(recovery::preflight(&f.config, Some(now)).is_err());
+        assert!(evidence_preflight(&f.config, Some(now)).is_err());
     }
     let mut bad = f.config.clone();
     bad["recovery"]["record_checks"][0]["sql"] = json!("SELECT different_records");
-    assert!(recovery::preflight(&bad, Some(f.now)).is_err());
+    assert!(evidence_preflight(&bad, Some(f.now)).is_err());
+    // Routine preflight needs only a fresh bound backup, not matching evidence.
+    assert_eq!(
+        recovery::preflight(&bad, Some(f.now)).unwrap()["status"],
+        "preflight-ready"
+    );
+    for now in [f.now - 1, f.now + 3601] {
+        assert!(recovery::preflight(&f.config, Some(now)).is_err());
+    }
+}
+
+#[test]
+fn routine_admission_survives_a_newer_base_but_transitions_require_its_evidence() {
+    let _workers = WORKERS.lock().unwrap();
+    let f = Fixture::new();
+    f.accepted();
+    let base = f.p("backup/base/base-2");
+    fs::create_dir_all(&base).unwrap();
+    fs::write(base.join("PG_VERSION"), "18\n").unwrap();
+    fs::write(base.join("identifier"), "12345").unwrap();
+    fs::write(base.join("backup_manifest"), "{\"WAL-Ranges\": [1]}\n").unwrap();
+    durable::write_json(&f.p("backup/base/base-2.meta.json"),&json!({"backup_id":"base-2","system_identifier":"12345","pg_major":18,"epoch_id":"epoch-2","backup_stop_lsn":"0/300","post_backup_lsn":"0/400"})).unwrap();
+    fs::write(f.p("backup/LAST_SUCCESS"), "base-2\n").unwrap();
+    let _ = fs::remove_file(f.p("verify.log"));
+    for admitted in [
+        recovery::check(&f.config, Some(f.now)).unwrap(),
+        recovery::preflight(&f.config, Some(f.now)).unwrap(),
+    ] {
+        assert_eq!(admitted["backup_id"], "base-2");
+    }
+    // Without certified evidence, routine verification must check checksums;
+    // preflight defers byte verification entirely.
+    assert_eq!(fs::read_to_string(f.p("verify.log")).unwrap(), "verify\n");
+    for err in [
+        recovery::evidence_check(&f.config, Some(f.now)).unwrap_err(),
+        evidence_preflight(&f.config, Some(f.now)).unwrap_err(),
+        recovery::live_check(&f.config, Path::new("/run/postgresql"), 5432, Some(f.now))
+            .unwrap_err(),
+    ] {
+        assert!(err.to_string().contains("different backup"), "{err}");
+    }
+    assert!(recovery::check(&f.config, Some(f.now + 3601)).is_err());
 }
 
 #[test]
@@ -1272,7 +1316,7 @@ fn loss_and_changed_source_records_cannot_publish_or_reuse_certification() {
         recovery::live_check(&f.config, Path::new("/run/postgresql"), 5432, Some(f.now)).is_err()
     );
     f.snapshot();
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
 }
 
 #[test]
@@ -1287,7 +1331,10 @@ fn backup_manifest_metadata_identity_and_completed_identifier_changes_invalidate
         let mut bytes = fs::read(f.p(target)).unwrap();
         bytes.push(b' ');
         fs::write(f.p(target), bytes).unwrap();
-        assert!(recovery::check(&f.config, Some(f.now)).is_err(), "{target}");
+        assert!(
+            recovery::evidence_check(&f.config, Some(f.now)).is_err(),
+            "{target}"
+        );
     }
     for id in ["../data", "base-1.partial", "", "base/1"] {
         let f = Fixture::new();
@@ -1300,6 +1347,7 @@ fn backup_manifest_metadata_identity_and_completed_identifier_changes_invalidate
     let f = Fixture::new();
     f.accepted();
     fs::write(f.p("backup/base/base-1/identifier"), "99999").unwrap();
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
     assert!(recovery::check(&f.config, Some(f.now)).is_err());
     let f = Fixture::new();
     let meta = f.p("backup/base/base-1.meta.json");
@@ -1552,10 +1600,13 @@ fn hostile_receipts_cannot_claim_record_level_acceptance() {
         let mut bad_receipt = good.clone();
         bad_receipt[key] = bad;
         durable::write_json(&f.p("backup/evidence/recovery.json"), &bad_receipt).unwrap();
-        assert!(recovery::check(&f.config, Some(f.now)).is_err(), "{key}");
+        assert!(
+            recovery::evidence_check(&f.config, Some(f.now)).is_err(),
+            "{key}"
+        );
     }
     durable::write_json(&f.p("backup/evidence/recovery.json"), &good).unwrap();
-    recovery::check(&f.config, Some(f.now)).unwrap();
+    recovery::evidence_check(&f.config, Some(f.now)).unwrap();
 }
 
 #[test]
@@ -1575,7 +1626,7 @@ fn incomplete_or_malformed_snapshot_records_never_admit() {
         let mut bad = source.clone();
         bad["records"] = records;
         durable::write_json(&f.p("backup/evidence/records.json"), &bad).unwrap();
-        assert!(recovery::preflight(&f.config, Some(f.now)).is_err());
+        assert!(evidence_preflight(&f.config, Some(f.now)).is_err());
     }
 }
 
@@ -1587,7 +1638,7 @@ fn off_host_import_requires_independent_executor_and_exact_source_binding() {
     let good = f.receipt();
     let remote = f.p("backup/evidence/off-host.json");
     f.config["recovery"]["off_host_receipt_file"] = json!(remote);
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
     let incoming = f.p("incoming.json");
     for changes in [
         json!({}),
@@ -1610,7 +1661,7 @@ fn off_host_import_requires_independent_executor_and_exact_source_binding() {
     durable::write_json(&incoming, &receipt).unwrap();
     recovery::import_off_host(&f.config, &incoming, Some(f.now)).unwrap();
     assert_eq!(
-        recovery::check(&f.config, Some(f.now)).unwrap()["off_host"],
+        recovery::evidence_check(&f.config, Some(f.now)).unwrap()["off_host"],
         "independent-host"
     );
     assert_eq!(durable::read_json(&remote).unwrap(), receipt);
@@ -1630,13 +1681,16 @@ fn redirected_snapshot_receipt_and_backup_ancestors_are_rejected() {
         let saved = selected.with_extension("saved");
         fs::rename(&selected, &saved).unwrap();
         symlink(&saved, &selected).unwrap();
-        assert!(recovery::check(&f.config, Some(f.now)).is_err(), "{name}");
+        assert!(
+            recovery::evidence_check(&f.config, Some(f.now)).is_err(),
+            "{name}"
+        );
     }
     let f = Fixture::new();
     f.accepted();
     fs::rename(f.p("backup/evidence"), f.p("evidence-saved")).unwrap();
     symlink(f.p("evidence-saved"), f.p("backup/evidence")).unwrap();
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
 }
 
 #[test]
@@ -1646,13 +1700,13 @@ fn backup_and_evidence_leases_exclude_mutation_through_authority_publication() {
     f.accepted();
     for anchor in ["backup/locks/mutate", "backup/evidence/recovery.lock"] {
         let lease = durable::lock(&f.p(anchor), false, false).unwrap();
-        assert!(recovery::check(&f.config, Some(f.now)).is_err());
+        assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
         assert!(
             recovery::snapshot(&f.config, Path::new("/run/postgresql"), 5432, Some(f.now)).is_err()
         );
         drop(lease);
     }
-    let accepted = recovery::admission_lease(&f.config, Some(f.now), true, None, 5432).unwrap();
+    let accepted = recovery::evidence_admission(&f.config, Some(f.now), true, None, 5432).unwrap();
     for anchor in ["backup/locks/mutate", "backup/evidence/recovery.lock"] {
         assert!(durable::lock(&f.p(anchor), false, false).is_err());
     }
@@ -1679,14 +1733,14 @@ fn required_fence_binds_snapshots_certifiers_and_retained_authority_window() {
     fs::rename(&marker, f.p("held.json")).unwrap();
     f.certify();
     fs::rename(f.p("held.json"), &marker).unwrap();
-    let accepted = recovery::admission_lease(&f.config, Some(f.now), true, None, 5432).unwrap();
+    let accepted = recovery::evidence_admission(&f.config, Some(f.now), true, None, 5432).unwrap();
     assert!(writer_fence::close_fence(&f.config, &token).is_err());
     drop(accepted);
     writer_fence::close_fence(&f.config, &token).unwrap();
     f.fence();
-    assert!(recovery::check(&f.config, Some(f.now)).is_err());
+    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
     f.config["recovery"]["require_writer_fence"] = json!(false);
-    recovery::check(&f.config, Some(f.now)).unwrap();
+    recovery::evidence_check(&f.config, Some(f.now)).unwrap();
 }
 
 #[test]

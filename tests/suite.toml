@@ -3327,6 +3327,7 @@ selectors = [
   "redirected_snapshot_receipt_and_backup_ancestors_are_rejected",
   "required_fence_binds_snapshots_certifiers_and_retained_authority_window",
   "required_fence_live_inspection_rejects_other_writers_before_capture",
+  "routine_admission_survives_a_newer_base_but_transitions_require_its_evidence",
   "verification_timeout_retains_source_for_explicit_retry",
 ]
 

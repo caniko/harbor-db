@@ -54,6 +54,8 @@ enum Operation {
         #[arg(long)]
         port: Option<u16>,
     },
+    /// Routine admission: backup health without record-certified evidence.
+    InspectBackup,
     FenceOpen {
         #[arg(long)]
         system_identifier: String,
@@ -325,8 +327,9 @@ fn operate(args: Args) -> Result<Option<Value>> {
                 phase.text(),
             )?
         }
+        Operation::InspectBackup => storage::recovery::check(&config, None)?,
         Operation::InspectRecovery { socket_dir, port } => match (socket_dir, port) {
-            (None, None) => storage::recovery::check(&config, None)?,
+            (None, None) => storage::recovery::evidence_check(&config, None)?,
             (Some(socket), Some(port)) => {
                 storage::recovery::live_check(&config, &socket, port, None)?
             }

@@ -16,9 +16,14 @@ An enabled unguarded primary is a configuration error, as is an enrolled primary
 without `services.harbor-db.postgresql.recovery`, because every non-startup phase
 requires recovery admission. Existing PostgreSQL
 identity, staged-upgrade, recovery snapshot and independent restore acceptance
-engines remain authoritative. Early admission validates their current bindings
-and evidence freshness. It deliberately defers backup byte verification to the
-activation gate, which runs the existing full recovery admission.
+engines remain authoritative. Routine admission (`preflight`, `activate`, and
+`inspect-backup`) checks backup health only: the backup named
+by `LAST_SUCCESS` must match the declared primary, be fresh, and, at `activate`,
+pass byte verification. It does not read record snapshots or receipts, so the
+nightly base backup advancing `LAST_SUCCESS` never blocks a host rebuild.
+`inspect-recovery`, `certify`, adoption, preparation/import and rollout thaw
+still require fresh record-certified evidence bound to the selected backup.
+Renew evidence only before one of these.
 
 Candidate-owned `postgresCompatibilityChecks` run cheap read-only SQL against
 the live primary before building. Each query must return exactly one true value;

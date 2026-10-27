@@ -378,6 +378,17 @@ PostgreSQL package's `pg_controldata` and `pg_verifybackup` to validate actual
 retained bytes. WAL replay is established by the disposable restored server,
 not by a successful service exit or a copied report.
 
+Routine admission (cutover `preflight` and `activate`, `inspect-backup`, and the
+NixOS pre-switch check unless a switch adoption is requested) verifies backup
+health only: the
+`LAST_SUCCESS` backup matches the primary, is within `max_age_seconds`, and
+(except for `preflight`) passes `pg_verifybackup` including data-file checksums. Record snapshots and receipts
+are not consulted, so a nightly base backup does not block host rebuilds.
+`inspect-recovery` (with or without `--socket-dir`), cutover `certify`,
+adoption, preparation/import and rollout thaw require fresh record-certified
+evidence for the selected backup; renew it only before one of these. `upgrade`
+does not check evidence itself; run `inspect-recovery` first.
+
 Use the candidate's `/etc/harbor-db/postgresql.json` and package before first
 activation. Under the consumer's existing consistency window, keep application
 writers paused from backup capture through the record snapshot. Queries must
@@ -432,8 +443,9 @@ the consumer's next explicitly coordinated consistency window.
    the off-host receipt. Copy the resulting receipt back with private ownership
    and atomic publication. The CLI records the real executor hostname; it has
    no hostname override.
-6. Run `inspect-recovery`. It is read-only and emits JSON, as does the optional
-   `harbor-db-postgresql-recovery-check.service`. Missing/stale evidence, changed
+6. Run `inspect-recovery`. It is read-only and emits JSON. The optional
+   `harbor-db-postgresql-recovery-check.service` runs `inspect-backup`, which
+   checks backup health only and does not read evidence. Missing/stale evidence, changed
    query contracts or backup bytes, wrong cluster identities, incomplete replay
    and mismatched records fail before authority creation.
 

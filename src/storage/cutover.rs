@@ -616,16 +616,17 @@ pub fn check_resource_until(
         }
         // Keep the primary, backup mutation and receipt leases until every database
         // inventory query completes; a receipt returned by value is insufficient.
-        let accepted = recovery::admission_lease(
-            &database,
-            Some(now),
-            matches!(phase, "activate" | "certify"),
-            Some(socket),
-            port,
-        )?;
-        if phase == "certify" {
+        // Only the certify transition needs record-certified evidence; preflight and
+        // activate gate on backup health.
+        let verify = matches!(phase, "activate" | "certify");
+        let accepted = if phase == "certify" {
+            let accepted =
+                recovery::evidence_admission(&database, Some(now), verify, Some(socket), port)?;
             recovery::live_check(&database, socket, port, Some(now))?;
-        }
+            accepted
+        } else {
+            recovery::backup_admission(&database, Some(now), verify, Some(socket), port)?
+        };
         let mut requirements = serde_json::Map::new();
         if let Some(checks) = config.get("corpus_checks") {
             for (name, checks) in checks

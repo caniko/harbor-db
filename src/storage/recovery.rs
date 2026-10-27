@@ -1180,21 +1180,39 @@ pub struct Admission {
     pub result: Value,
     pub fence: WriterExclusion,
     pub backup_lease: durable::Lease,
-    pub evidence_lease: durable::Lease,
+    /// Held only by evidence admission; routine backup admission takes none.
+    pub evidence_lease: Option<durable::Lease>,
 }
 impl Admission {
     pub fn fds(&self) -> Vec<RawFd> {
-        fds(&self.fence, &self.backup_lease, &self.evidence_lease)
+        let mut result = vec![self.backup_lease.fd()];
+        result.extend(self.evidence_lease.iter().map(|l| l.fd()));
+        result.extend(self.fence.lease.iter().map(|l| l.fd()));
+        result
     }
 }
-pub fn admission_lease(
+/// Routine admission: backup health only (LAST_SUCCESS binding, age, optional
+/// content verification). Record-certified evidence only certifies a frozen
+/// point, and the nightly base advances LAST_SUCCESS past it, so requiring it
+/// here would block every routine rebuild; transitions use `evidence_admission`.
+pub fn backup_admission(
     config: &Value,
     now: Option<i64>,
     verify_contents: bool,
     socket: Option<&Path>,
     port: u16,
 ) -> Result<Admission> {
-    admission_with_outer(config, now, verify_contents, socket, port, &[])
+    admission_with_outer(config, now, verify_contents, socket, port, &[], false)
+}
+/// Transition admission: the backup must also carry fresh record-certified evidence.
+pub fn evidence_admission(
+    config: &Value,
+    now: Option<i64>,
+    verify_contents: bool,
+    socket: Option<&Path>,
+    port: u16,
+) -> Result<Admission> {
+    admission_with_outer(config, now, verify_contents, socket, port, &[], true)
 }
 fn admission_with_outer(
     config: &Value,
@@ -1203,6 +1221,7 @@ fn admission_with_outer(
     socket: Option<&Path>,
     port: u16,
     outer: &[RawFd],
+    evidence: bool,
 ) -> Result<Admission> {
     let settings = policy(config)?;
     let now = clock(now)?;
@@ -1214,17 +1233,32 @@ fn admission_with_outer(
         leases.push(lease.fd());
     }
     let (directory, binding) = backup(config, settings, now, &leases)?;
-    let evidence_lease = evidence_lease(settings, true)?;
-    leases.push(evidence_lease.fd());
-    let result = check_evidence(
-        config,
-        settings,
-        (&directory, &binding),
-        now,
-        verify_contents,
-        fence.binding.as_ref(),
-        &leases,
-    )?;
+    let (result, evidence_lease) = if evidence {
+        let lease = evidence_lease(settings, true)?;
+        leases.push(lease.fd());
+        let result = check_evidence(
+            config,
+            settings,
+            (&directory, &binding),
+            now,
+            verify_contents,
+            fence.binding.as_ref(),
+            &leases,
+        )?;
+        (result, Some(lease))
+    } else {
+        // No certified restore proves these bytes, so check data-file checksums.
+        if verify_contents {
+            verify_backup(config, &directory, &leases, true)?;
+        }
+        let mut result = result(&binding)?;
+        result["status"] = json!(if verify_contents {
+            "ready"
+        } else {
+            "preflight-ready"
+        });
+        (result, None)
+    };
     Ok(Admission {
         result,
         fence,
@@ -1232,24 +1266,19 @@ fn admission_with_outer(
         evidence_lease,
     })
 }
-pub fn admission(
-    config: &Value,
-    now: Option<i64>,
-    verify_contents: bool,
-    socket: Option<&Path>,
-    port: u16,
-) -> Result<Value> {
-    Ok(admission_lease(config, now, verify_contents, socket, port)?.result)
-}
 pub fn check(config: &Value, now: Option<i64>) -> Result<Value> {
-    admission(config, now, true, None, 5432)
+    Ok(backup_admission(config, now, true, None, 5432)?.result)
 }
 pub fn preflight(config: &Value, now: Option<i64>) -> Result<Value> {
-    admission(config, now, false, None, 5432)
+    Ok(backup_admission(config, now, false, None, 5432)?.result)
+}
+/// `check` plus the record-certified evidence a transition requires.
+pub fn evidence_check(config: &Value, now: Option<i64>) -> Result<Value> {
+    Ok(evidence_admission(config, now, true, None, 5432)?.result)
 }
 pub fn live_check(config: &Value, socket: &Path, port: u16, now: Option<i64>) -> Result<Value> {
     let settings = policy(config)?;
-    let accepted = admission_lease(config, now, true, Some(socket), port)?;
+    let accepted = evidence_admission(config, now, true, Some(socket), port)?;
     let source = durable::read_json(&absolute(&source_snapshot_path(config, settings)?)?)?;
     if super::recovery_repository::source_local(settings)? {
         validate_capture_source(config, settings, &source, clock(now)?)?;
@@ -1615,7 +1644,7 @@ pub fn prepare_at(
             import_off_host_leased(config, &incoming, now, &leases)?;
         }
     }
-    Ok(admission_with_outer(config, now, true, None, 5432, &leases)?.result)
+    Ok(admission_with_outer(config, now, true, None, 5432, &leases, true)?.result)
 }
 
 #[cfg(test)]
