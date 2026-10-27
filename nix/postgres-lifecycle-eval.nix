@@ -371,6 +371,8 @@ in
           && rollout.setup_units == ["postgresql-setup.service"]
           && rollout.paused_publishers == ["fixture-backup.service"]
           && rollout.import_slot == "/srv/import/off-host.json"
+          # Always rendered (required by the coordinator), empty unless declared.
+          && rollout.trusted_ancestors == []
           && rollout.executor.command == ["/fixture/certify"]
           # Unset, the hook is not written (older coordinators load the manifest).
           && !(rollout.executor ? transport)
@@ -382,6 +384,52 @@ in
           }
           && rollout.maintenance == builtins.unsafeDiscardStringContext (toString etc."harbor-db/postgresql.json".source);
         message = "The opt-in rollout manifest must bind the fenced primary, client inventory, setup units, publishers and executor.";
+      }
+      {
+        name = "rollout-trusted-ancestors-match-the-loader";
+        assertion = let
+          accepted = ancestor:
+            (builtins.tryEval (builtins.deepSeq
+              (withRollout.extendModules {modules = [{services.harbor-db.postgresql.rollout.trustedAncestors = [ancestor];}];}).config.services.harbor-db.postgresql.rollout.trustedAncestors
+              true)).success;
+        in
+          lib.all accepted [
+            {
+              path = "/data/nvme0/can";
+              uid = 1000;
+            }
+            {
+              path = "/data/.state/..x";
+              uid = 4294967295;
+            }
+          ]
+          && lib.all (ancestor: !accepted ancestor) [
+            {
+              path = "/data/../etc";
+              uid = 1000;
+            }
+            {
+              path = "/data/./can";
+              uid = 1000;
+            }
+            {
+              path = "/data/";
+              uid = 1000;
+            }
+            {
+              path = "/";
+              uid = 1000;
+            }
+            {
+              path = "/data";
+              uid = 0;
+            }
+            {
+              path = "/data";
+              uid = 4294967296;
+            }
+          ];
+        message = "Trusted ancestors must evaluate only where the coordinator loads them: normalized non-root paths with a non-root u32 uid.";
       }
       {
         name = "rollout-replaces-legacy-preparation-and-rejects-split-properties";
