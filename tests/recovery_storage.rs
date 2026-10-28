@@ -1295,7 +1295,8 @@ fn routine_admission_survives_a_newer_base_but_transitions_require_its_evidence(
     ] {
         assert!(err.to_string().contains("different backup"), "{err}");
     }
-    assert!(recovery::check(&f.config, Some(f.now + 3601)).is_err());
+    // The stale boundary is relative to base-2's mtime, which `now` bounds.
+    assert!(recovery::check(&f.config, Some(now + 3601)).is_err());
 }
 
 #[test]
