@@ -1271,9 +1271,16 @@ fn routine_admission_survives_a_newer_base_but_transitions_require_its_evidence(
     durable::write_json(&f.p("backup/base/base-2.meta.json"),&json!({"backup_id":"base-2","system_identifier":"12345","pg_major":18,"epoch_id":"epoch-2","backup_stop_lsn":"0/300","post_backup_lsn":"0/400"})).unwrap();
     fs::write(f.p("backup/LAST_SUCCESS"), "base-2\n").unwrap();
     let _ = fs::remove_file(f.p("verify.log"));
+    // base-2's manifest mtime is taken now; f.now predates the slow accepted()
+    // steps above, so on a loaded runner the mtime lands after f.now and
+    // admission rejects it as a future timestamp.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
     for admitted in [
-        recovery::check(&f.config, Some(f.now)).unwrap(),
-        recovery::preflight(&f.config, Some(f.now)).unwrap(),
+        recovery::check(&f.config, Some(now)).unwrap(),
+        recovery::preflight(&f.config, Some(now)).unwrap(),
     ] {
         assert_eq!(admitted["backup_id"], "base-2");
     }
