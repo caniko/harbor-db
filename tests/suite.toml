@@ -3674,6 +3674,7 @@ selectors = [
   "python_and_native_cli_fifo_anchor_preserves_inode_and_recovery_through_peer_continuation",
   "python_and_native_cli_unused_surrogates_and_last_decoded_keys_accept_retention",
   "retention_projection_rejects_invalid_syntax_and_last_fields_before_deletion",
+  "meta_sidecars_do_not_block_pruning_and_leave_with_their_tree",
 ]
 
 [[coverage]]

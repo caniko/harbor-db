@@ -18,6 +18,7 @@
     "harbor-db-postgres"
     "harbor-db-durable"
     "harbor-db-backup-prune"
+    "harbor-db-pg-backup"
     "harbor-db-resource"
     "harbor-db-provision"
     "harbor-db-application-backup"
