@@ -139,8 +139,8 @@ fn contiguous(
     }
     Ok(())
 }
-/// Switchpoints `(parent timeline, segment)` from a `.history` file, oldest first.
-fn parse_history(text: &str, size: u64) -> Result<Vec<(u32, u64)>> {
+/// Switchpoints `(parent timeline, LSN)` from a `.history` file, oldest first.
+fn parse_history(text: &str) -> Result<Vec<(u32, u64)>> {
     text.lines()
         .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
         .map(|l| {
@@ -148,7 +148,7 @@ fn parse_history(text: &str, size: u64) -> Result<Vec<(u32, u64)>> {
             let tli = f.next().and_then(|t| t.parse().ok());
             let at = f.next().map(lsn);
             match (tli, at) {
-                (Some(tli), Some(Ok(at))) => Ok((tli, at / size)),
+                (Some(tli), Some(Ok(at))) => Ok((tli, at)),
                 _ => Err(invalid("unreadable history file")),
             }
         })
@@ -161,6 +161,7 @@ fn chain(
     size: u64,
     base: u32,
     first: u64,
+    stop: u64,
     newest: u32,
     hi: u64,
 ) -> Result<Vec<(u32, u64, u64)>> {
@@ -169,7 +170,7 @@ fn chain(
     }
     let text = fs::read_to_string(root.join("wal").join(format!("{newest:08X}.history")))
         .map_err(|_| invalid(format!("history file of timeline {newest} missing")))?;
-    let history = parse_history(&text, size)?;
+    let history = parse_history(&text)?;
     let at = history
         .iter()
         .position(|(t, _)| *t == base)
@@ -178,10 +179,17 @@ fn chain(
                 "base timeline {base} is not an ancestor of {newest}"
             ))
         })?;
+    // The base holds state up to its stop LSN; a branch that left earlier cannot recover it.
+    if history[at].1 < stop {
+        return Err(invalid(format!(
+            "timeline {newest} forked before the base's stop LSN"
+        )));
+    }
     let (mut legs, mut start) = (Vec::new(), first);
     for (timeline, fork) in &history[at..] {
-        legs.push((*timeline, start, *fork));
-        start = *fork;
+        let fork = fork / size;
+        legs.push((*timeline, start, fork));
+        start = fork;
     }
     legs.push((newest, start, hi));
     Ok(legs)
@@ -479,7 +487,7 @@ pub fn health(h: &Health) -> Vec<String> {
             }
             match oldest_base_range(h.root, h.segment_bytes) {
                 Err(e) => fail(format!("retained base backups unusable: {e}")),
-                Ok((timeline, first, tree)) => {
+                Ok((timeline, first, stop, tree)) => {
                     let newest = archive.keys().map(|k| k.0).max().unwrap_or(0);
                     let hi = archive
                         .range((newest, 0)..=(newest, u64::MAX))
@@ -488,7 +496,7 @@ pub fn health(h: &Health) -> Vec<String> {
                     let legs = if newest < timeline {
                         Err(invalid(format!("no WAL on timeline {timeline}")))
                     } else {
-                        chain(h.root, h.segment_bytes, timeline, first, newest, hi)
+                        chain(h.root, h.segment_bytes, timeline, first, stop, newest, hi)
                     };
                     match (legs, tree_sysid(&tree)) {
                         (Ok(legs), Ok(sysid)) => {
@@ -515,8 +523,8 @@ pub fn health(h: &Health) -> Vec<String> {
     }
     failures
 }
-/// `(timeline, first segment, tree)` of the oldest retained published base.
-fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64, PathBuf)> {
+/// `(timeline, first segment, stop LSN, tree)` of the oldest retained published base.
+fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64, u64, PathBuf)> {
     let mut trees: Vec<_> = fs::read_dir(root.join("base"))?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
@@ -537,8 +545,8 @@ fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64, PathBuf)> {
     let oldest = trees
         .first()
         .ok_or_else(|| invalid("no retained base backup"))?;
-    let (timeline, first, _) = manifest_range(oldest, size)?;
-    Ok((timeline, first, oldest.clone()))
+    let (timeline, first, stop) = manifest_range(oldest, size)?;
+    Ok((timeline, first, stop, oldest.clone()))
 }
 
 // --------------------------------------------------------------- admission
@@ -646,8 +654,15 @@ mod tests {
         )
         .unwrap();
         let size = 16 << 20;
-        assert_eq!(chain(&root, size, 1, 3, 1, 9).unwrap(), vec![(1, 3, 9)]);
-        let legs = chain(&root, size, 1, 3, 2, 8).unwrap();
+        assert_eq!(
+            chain(&root, size, 1, 3, 0x3000000, 1, 9).unwrap(),
+            vec![(1, 3, 9)]
+        );
+        let legs = chain(&root, size, 1, 3, 0x4000000, 2, 8).unwrap();
+        assert!(
+            chain(&root, size, 1, 3, 0x6000000, 2, 8).is_err(),
+            "base stop beyond the fork"
+        );
         assert_eq!(legs, vec![(1, 3, 5), (2, 5, 8)]);
         // Parent segment 4 missing while the child is intact: the second leg alone passes.
         let have = archive(&[
@@ -664,11 +679,11 @@ mod tests {
             .count();
         assert_eq!(failed, 1);
         assert!(
-            chain(&root, size, 1, 3, 3, 9).is_err(),
+            chain(&root, size, 1, 3, 0x3000000, 3, 9).is_err(),
             "missing history of the newest timeline"
         );
         assert!(
-            chain(&root, size, 7, 3, 2, 9).is_err(),
+            chain(&root, size, 7, 3, 0x3000000, 2, 9).is_err(),
             "base timeline not an ancestor"
         );
         fs::remove_dir_all(&root).unwrap();
