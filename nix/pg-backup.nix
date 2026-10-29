@@ -579,7 +579,7 @@ in {
         inherit (target) ts;
         tag = lib.optionalString (name != "legacy") " [target ${name}]";
         base = ts.baseBackup;
-        sqlOk = base.sqlConninfo != null || (sourceRole && name == "legacy" && lib.elem source.hostName ["127.0.0.1" "localhost" "::1"]);
+        sqlOk = base.sqlConninfo != null || (sourceRole && name == "legacy" && lib.elem target.source.hostName ["127.0.0.1" "localhost" "::1"]);
       in [
         {
           assertion = ts.receiveWal.enable || base.enable;
