@@ -273,6 +273,11 @@ pub fn mark_gap(
     conninfo: &str,
     slot: &str,
 ) -> Result<bool> {
+    // An invalidated slot cannot be resumed and --if-not-exists would keep it: replace it.
+    let state = slot_state(psql_bin, conninfo, slot)?;
+    if state == Slot::Lost {
+        psql(psql_bin, conninfo, &format!("DROP_REPLICATION_SLOT {slot}"))?;
+    }
     if gap_path(root).exists() {
         return Ok(false);
     }
@@ -292,7 +297,7 @@ pub fn mark_gap(
             );
         }
     }
-    if slot_state(psql_bin, conninfo, slot)? != Slot::Missing {
+    if state == Slot::Present {
         return Ok(false);
     }
     if archive.is_empty() && fs::read_dir(root.join("base"))?.next().is_none() {
@@ -379,6 +384,17 @@ pub fn finalize(f: &Finalize) -> Result<Value> {
     let flush = psql(f.sql_psql, f.sql_conninfo, "SELECT pg_switch_wal()")?;
     if lsn(&marker)? <= stop {
         return Err(invalid("restore point does not follow the backup stop LSN"));
+    }
+    // A promotion between the manifest and the restore point would put the marker on another timeline.
+    let marker_timeline = psql(
+        f.sql_psql,
+        f.sql_conninfo,
+        &format!("SELECT substr(pg_walfile_name('{marker}'), 1, 8)"),
+    )?;
+    if u32::from_str_radix(&marker_timeline, 16).ok() != Some(timeline) {
+        return Err(invalid(format!(
+            "restore point is on timeline {marker_timeline}, the base is on {timeline}"
+        )));
     }
     let last = lsn(&marker)? / f.segment_bytes;
     let deadline = std::time::Instant::now() + f.wal_wait;
