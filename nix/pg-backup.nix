@@ -693,15 +693,20 @@ in {
               message = "services.harbor-db.pgBackup sourceLocalRecovery requires at least two replication slots and three WAL senders, including effective PostgreSQL settings.";
             }
             {
-              # Local streams: the running receiver holds one sender and slot, and a
+              # Local streams: each running receiver holds one sender and slot, and a
               # streaming base backup needs two sender connections and its own slot.
               assertion = let
-                legacy = targetSources.legacy or null;
-                local = legacy != null && sourceRole && lib.elem legacy.source.hostName ["127.0.0.1" "localhost" "::1"];
+                local = lib.filter (t: sourceRole && lib.elem t.source.hostName ["127.0.0.1" "localhost" "::1"] && t.source.port == config.services.postgresql.settings.port) (lib.attrValues targetSources);
+                count = f: lib.length (lib.filter f local);
+                receivers = count (t: t.ts.receiveWal.enable);
+                bases = count (t: t.ts.baseBackup.enable);
               in
-                !(local && legacy.ts.receiveWal.enable && legacy.ts.baseBackup.enable)
-                || (config.services.postgresql.settings.max_replication_slots >= 2 && config.services.postgresql.settings.max_wal_senders >= 3);
-              message = "services.harbor-db.pgBackup local receiver plus base backups need at least two replication slots and three WAL senders in the effective PostgreSQL settings.";
+                local
+                == []
+                || (config.services.postgresql.settings.max_replication_slots
+                  >= receivers + bases
+                  && (bases == 0 || config.services.postgresql.settings.max_wal_senders >= receivers + 2 * bases));
+              message = "services.harbor-db.pgBackup local receiver plus base backups need one slot per receiver and base backup and one WAL sender per receiver plus two per base backup in the effective PostgreSQL settings.";
             }
             {
               assertion = !sourceRole || (config.services.postgresql.settings.max_replication_slots >= 1 && config.services.postgresql.settings.max_wal_senders >= 1);

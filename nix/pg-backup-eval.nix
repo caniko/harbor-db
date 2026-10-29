@@ -740,6 +740,12 @@ in
       {
         name = "local-streams-need-sender-and-slot-headroom";
         assertion = let
+          # A named loopback target adds its own receiver and base backup.
+          namedLocalRejected =
+            lib.any (a: !a.assertion && lib.hasInfix "local receiver plus base backups" a.message)
+            (localEval.extendModules {
+              modules = [{services.harbor-db.pgBackup.targets.extra.source.hostName = "127.0.0.1";}];
+            }).config.assertions;
           rejected = slots: senders:
             lib.any (a: !a.assertion && lib.hasInfix "local receiver plus base backups" a.message)
             (localEval.extendModules {
@@ -753,7 +759,7 @@ in
               ];
             }).config.assertions;
         in
-          rejected 1 1 && rejected 2 2 && !rejected 2 3;
+          rejected 1 1 && rejected 2 2 && !rejected 2 3 && namedLocalRejected;
         message = "A loopback receiver plus streaming base backups need two slots and three WAL senders.";
       }
       {
