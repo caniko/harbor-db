@@ -5,6 +5,7 @@ use super::{Result, durable, invalid, recovery};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -51,15 +52,47 @@ pub fn parse_segment(name: &str, size: u64) -> Option<(u32, u64, bool)> {
         partial,
     ))
 }
-fn wal_segments(root: &Path, size: u64) -> Result<Vec<(u32, u64, bool, PathBuf)>> {
-    let mut out = Vec::new();
+/// Received WAL by `(timeline, segment)`: `(partial, path)`; a complete file wins over its `.partial`.
+type Archive = BTreeMap<(u32, u64), (bool, PathBuf)>;
+fn wal_segments(root: &Path, size: u64) -> Result<Archive> {
+    let mut out = Archive::new();
     for entry in fs::read_dir(root.join("wal"))? {
         let entry = entry?;
         if let Some((t, s, p)) = parse_segment(&entry.file_name().to_string_lossy(), size) {
-            out.push((t, s, p, entry.path()));
+            if p && out.contains_key(&(t, s)) {
+                continue;
+            }
+            out.insert((t, s), (p, entry.path()));
         }
     }
     Ok(out)
+}
+/// System identifier in the long page header of a segment's first page (0 while unwritten).
+fn segment_sysid(path: &Path) -> Result<u64> {
+    let mut header = [0u8; 32];
+    fs::File::open(path)?.read_exact(&mut header)?;
+    Ok(u64::from_ne_bytes(header[24..32].try_into().unwrap()))
+}
+/// System identifier of a base: the first field of `global/pg_control`.
+fn tree_sysid(tree: &Path) -> Result<u64> {
+    let mut id = [0u8; 8];
+    fs::File::open(tree.join("global/pg_control"))?.read_exact(&mut id)?;
+    Ok(u64::from_ne_bytes(id))
+}
+/// Every archived segment `first..=last` belongs to the cluster `sysid`: stale
+/// files of a replaced cluster must never satisfy continuity.
+fn same_cluster(archive: &Archive, timeline: u32, first: u64, last: u64, sysid: u64) -> Result<()> {
+    for segment in first..=last {
+        if let Some((partial, path)) = archive.get(&(timeline, segment)) {
+            let found = segment_sysid(path)?;
+            if found != sysid && !(*partial && found == 0) {
+                return Err(invalid(format!(
+                    "WAL segment {segment} (timeline {timeline}) belongs to another cluster; use a fresh backup root"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 /// WAL range of one published base: `(timeline, first segment, stop LSN)`.
 fn manifest_range(tree: &Path, size: u64) -> Result<(u32, u64, u64)> {
@@ -84,23 +117,70 @@ fn manifest_range(tree: &Path, size: u64) -> Result<(u32, u64, u64)> {
 }
 /// Every segment `first..=last` of `timeline` is present; only the newest may be partial.
 fn contiguous(
-    segments: &[(u32, u64, bool, PathBuf)],
+    archive: &Archive,
     timeline: u32,
     first: u64,
     last: u64,
     allow_partial_last: bool,
 ) -> Result<()> {
     for segment in first..=last {
-        let found = segments.iter().find(|s| {
-            s.0 == timeline && s.1 == segment && (!s.2 || (allow_partial_last && segment == last))
-        });
-        if found.is_none() {
-            return Err(invalid(format!(
-                "WAL segment {segment} (timeline {timeline}) missing"
-            )));
+        match archive.get(&(timeline, segment)) {
+            Some((partial, _)) if !*partial || (allow_partial_last && segment == last) => {}
+            _ => {
+                return Err(invalid(format!(
+                    "WAL segment {segment} (timeline {timeline}) missing"
+                )));
+            }
         }
     }
     Ok(())
+}
+/// Switchpoints `(parent timeline, segment)` from a `.history` file, oldest first.
+fn parse_history(text: &str, size: u64) -> Result<Vec<(u32, u64)>> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let mut f = l.split_whitespace();
+            let tli = f.next().and_then(|t| t.parse().ok());
+            let at = f.next().map(lsn);
+            match (tli, at) {
+                (Some(tli), Some(Ok(at))) => Ok((tli, at / size)),
+                _ => Err(invalid("unreadable history file")),
+            }
+        })
+        .collect()
+}
+/// Gapless legs `(timeline, first, last)` from the base's start to the newest
+/// segment of `newest`, following the newest timeline's history.
+fn chain(
+    root: &Path,
+    size: u64,
+    base: u32,
+    first: u64,
+    newest: u32,
+    hi: u64,
+) -> Result<Vec<(u32, u64, u64)>> {
+    if newest == base {
+        return Ok(vec![(base, first, hi)]);
+    }
+    let text = fs::read_to_string(root.join("wal").join(format!("{newest:08X}.history")))
+        .map_err(|_| invalid(format!("history file of timeline {newest} missing")))?;
+    let history = parse_history(&text, size)?;
+    let at = history
+        .iter()
+        .position(|(t, _)| *t == base)
+        .ok_or_else(|| {
+            invalid(format!(
+                "base timeline {base} is not an ancestor of {newest}"
+            ))
+        })?;
+    let (mut legs, mut start) = (Vec::new(), first);
+    for (timeline, fork) in &history[at..] {
+        legs.push((*timeline, start, *fork));
+        start = *fork;
+    }
+    legs.push((newest, start, hi));
+    Ok(legs)
 }
 
 // ----------------------------------------------------- slot state and psql
@@ -172,7 +252,8 @@ fn rotate(root: &Path) -> Result<String> {
     durable::atomic_write(&root.join("GENERATION"), format!("{token}\n").as_bytes())?;
     Ok(token)
 }
-/// Receiver start-up: a slot that must be recreated while history exists is a WAL gap.
+/// Receiver start-up: a replaced cluster or a slot that must be recreated over
+/// existing history is a WAL gap.
 pub fn mark_gap(
     root: &Path,
     segment_bytes: u64,
@@ -180,20 +261,38 @@ pub fn mark_gap(
     conninfo: &str,
     slot: &str,
 ) -> Result<bool> {
-    if slot_state(psql_bin, conninfo, slot)? != Slot::Missing || gap_path(root).exists() {
+    if gap_path(root).exists() {
         return Ok(false);
     }
-    let history = fs::read_dir(root.join("wal"))?
-        .filter_map(|e| e.ok())
-        .any(|e| parse_segment(&e.file_name().to_string_lossy(), segment_bytes).is_some())
-        || fs::read_dir(root.join("base"))?.next().is_some();
-    if !history {
+    let archive = wal_segments(root, segment_bytes)?;
+    let server: u64 = psql(psql_bin, conninfo, "IDENTIFY_SYSTEM")?
+        .split('|')
+        .next()
+        .and_then(|id| id.parse().ok())
+        .ok_or_else(|| invalid("unreadable IDENTIFY_SYSTEM"))?;
+    if let Some((_, path)) = archive.values().next_back() {
+        let found = segment_sysid(path).unwrap_or(0);
+        if found != 0 && found != server {
+            return write_gap(
+                root,
+                slot,
+                "system identifier changed; use a fresh backup root",
+            );
+        }
+    }
+    if slot_state(psql_bin, conninfo, slot)? != Slot::Missing {
         return Ok(false);
     }
+    if archive.is_empty() && fs::read_dir(root.join("base"))?.next().is_none() {
+        return Ok(false);
+    }
+    write_gap(root, slot, "slot recreated")
+}
+fn write_gap(root: &Path, slot: &str, reason: &str) -> Result<bool> {
     let generation = generation(root)?;
     durable::write_json(
         &gap_path(root),
-        &json!({"slot": slot, "detected_epoch": now(), "generation": generation}),
+        &json!({"slot": slot, "reason": reason, "detected_epoch": now(), "generation": generation}),
     )?;
     Ok(true)
 }
@@ -271,14 +370,18 @@ pub fn finalize(f: &Finalize) -> Result<Value> {
     }
     let last = lsn(&marker)? / f.segment_bytes;
     let deadline = std::time::Instant::now() + f.wal_wait;
-    loop {
-        let segments = wal_segments(f.root, f.segment_bytes)?;
-        match contiguous(&segments, timeline, first, last, false) {
-            Ok(()) => break,
+    let archive = loop {
+        let archive = wal_segments(f.root, f.segment_bytes)?;
+        match contiguous(&archive, timeline, first, last, false) {
+            Ok(()) => break archive,
             Err(e) if std::time::Instant::now() >= deadline => return Err(e),
             Err(_) => thread::sleep(Duration::from_secs(1)),
         }
-    }
+    };
+    let sysid: u64 = system_identifier
+        .parse()
+        .map_err(|_| invalid("invalid system identifier"))?;
+    same_cluster(&archive, timeline, first, last, sysid)?;
     let manifest = fs::read(tree.join("backup_manifest"))?;
     let checksum: String = Sha256::digest(&manifest)
         .iter()
@@ -286,6 +389,7 @@ pub fn finalize(f: &Finalize) -> Result<Value> {
         .collect();
     let closes_gap = gap_closed_by(f.root, f.started)?;
     let epoch = if closes_gap {
+        set_floor(f.root, f.started)?;
         rotate(f.root)?
     } else {
         generation(f.root)?
@@ -358,53 +462,41 @@ pub fn health(h: &Health) -> Vec<String> {
     }
     match wal_segments(h.root, h.segment_bytes) {
         Err(e) => fail(format!("cannot list WAL: {e}")),
-        Ok(segments) => {
-            let newest = segments
-                .iter()
-                .map(|s| (s.0, s.1))
-                .max_by_key(|k| (k.0, k.1));
-            match segments
-                .iter()
-                .filter(|s| Some((s.0, s.1)) == newest)
-                .filter_map(|s| age(&s.3).ok())
-                .min()
-            {
+        Ok(archive) => {
+            match archive.iter().next_back() {
                 None => fail("no received WAL".into()),
-                Some(a) if a > h.max_wal_age => {
-                    fail(format!("newest WAL is {a}s old (max {}s)", h.max_wal_age))
-                }
-                Some(_) => {}
+                Some((_, (_, path))) => match age(path) {
+                    Ok(a) if a > h.max_wal_age => {
+                        fail(format!("newest WAL is {a}s old (max {}s)", h.max_wal_age))
+                    }
+                    Ok(_) => {}
+                    Err(e) => fail(format!("newest WAL unreadable: {e}")),
+                },
             }
             match oldest_base_range(h.root, h.segment_bytes) {
                 Err(e) => fail(format!("retained base backups unusable: {e}")),
-                Ok((timeline, first)) => {
-                    // The base's timeline and every later (promoted) one must be gapless.
-                    let timelines: std::collections::BTreeSet<_> = segments
-                        .iter()
-                        .map(|s| s.0)
-                        .filter(|t| *t >= timeline)
-                        .collect();
-                    if timelines.is_empty() {
-                        fail(format!("no WAL on timeline {timeline}"));
-                    }
-                    for t in timelines {
-                        let mine = segments.iter().filter(|s| s.0 == t).map(|s| s.1);
-                        let hi = mine.max().unwrap_or(0);
-                        // A promoted timeline starts at its fork point from the history file.
-                        let start = if t == timeline {
-                            first
-                        } else {
-                            match fork_segment(h.root, t, h.segment_bytes) {
-                                Ok(start) => start,
-                                Err(e) => {
-                                    fail(format!("timeline {t}: {e}"));
-                                    continue;
+                Ok((timeline, first, tree)) => {
+                    let newest = archive.keys().map(|k| k.0).max().unwrap_or(0);
+                    let hi = archive
+                        .range((newest, 0)..=(newest, u64::MAX))
+                        .next_back()
+                        .map_or(0, |(k, _)| k.1);
+                    let legs = if newest < timeline {
+                        Err(invalid(format!("no WAL on timeline {timeline}")))
+                    } else {
+                        chain(h.root, h.segment_bytes, timeline, first, newest, hi)
+                    };
+                    match (legs, tree_sysid(&tree)) {
+                        (Ok(legs), Ok(sysid)) => {
+                            for (t, lo, end) in legs {
+                                if let Err(e) = contiguous(&archive, t, lo, end, true)
+                                    .and_then(|()| same_cluster(&archive, t, lo, end, sysid))
+                                {
+                                    fail(format!("WAL not usable from the oldest base: {e}"));
                                 }
                             }
-                        };
-                        if let Err(e) = contiguous(&segments, t, start, hi, true) {
-                            fail(format!("WAL not contiguous from the oldest base: {e}"));
                         }
+                        (Err(e), _) | (_, Err(e)) => fail(format!("WAL chain: {e}")),
                     }
                 }
             }
@@ -419,19 +511,8 @@ pub fn health(h: &Health) -> Vec<String> {
     }
     failures
 }
-/// First segment of a promoted timeline: its switchpoint in `<tli>.history`.
-fn fork_segment(root: &Path, timeline: u32, size: u64) -> Result<u64> {
-    let history = fs::read_to_string(root.join("wal").join(format!("{timeline:08X}.history")))
-        .map_err(|_| invalid("history file missing"))?;
-    let switch = history
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .and_then(|l| l.split_whitespace().nth(1))
-        .ok_or_else(|| invalid("unreadable history file"))?;
-    Ok(lsn(switch)? / size)
-}
-/// `(timeline, first segment)` of the oldest retained published base.
-fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64)> {
+/// `(timeline, first segment, tree)` of the oldest retained published base.
+fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64, PathBuf)> {
     let mut trees: Vec<_> = fs::read_dir(root.join("base"))?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
@@ -453,7 +534,7 @@ fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64)> {
         .first()
         .ok_or_else(|| invalid("no retained base backup"))?;
     let (timeline, first, _) = manifest_range(oldest, size)?;
-    Ok((timeline, first))
+    Ok((timeline, first, oldest.clone()))
 }
 
 // --------------------------------------------------------------- admission
@@ -528,6 +609,12 @@ mod tests {
         assert_eq!(parse_slot("physical|0/3000000|1"), Slot::Present);
         assert_eq!(parse_slot("physical||"), Slot::Lost);
     }
+    fn archive(parts: &[(u32, u64, bool)]) -> Archive {
+        parts
+            .iter()
+            .map(|(t, s, p)| ((*t, *s), (*p, PathBuf::new())))
+            .collect()
+    }
     #[test]
     fn segment_names_round_trip_and_contiguity_detects_holes() {
         let size = 16 << 20;
@@ -538,17 +625,15 @@ mod tests {
             parse_segment(&format!("{name}.partial"), size),
             Some((1, 0x1ff, true))
         );
-        let seg = |s, p| (1, s, p, PathBuf::new());
-        let have = [seg(4, false), seg(5, false), seg(6, true)];
+        let have = archive(&[(1, 4, false), (1, 5, false), (1, 6, true)]);
         assert!(contiguous(&have, 1, 4, 6, true).is_ok());
         assert!(contiguous(&have, 1, 4, 6, false).is_err());
         assert!(contiguous(&have, 1, 3, 6, true).is_err());
-        let hole = [seg(4, false), seg(6, false)];
-        assert!(contiguous(&hole, 1, 4, 6, true).is_err());
+        assert!(contiguous(&archive(&[(1, 4, false), (1, 6, false)]), 1, 4, 6, true).is_err());
     }
     #[test]
-    fn promoted_timeline_starts_at_its_switchpoint() {
-        let root = std::env::temp_dir().join(format!("pgb-fork-{}", std::process::id()));
+    fn chain_requires_each_parent_through_its_fork() {
+        let root = std::env::temp_dir().join(format!("pgb-chain-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("wal")).unwrap();
         fs::write(
@@ -556,8 +641,67 @@ mod tests {
             "1\t0/5000060\tno recovery target specified\n",
         )
         .unwrap();
-        assert_eq!(fork_segment(&root, 2, 16 << 20).unwrap(), 5);
-        assert!(fork_segment(&root, 3, 16 << 20).is_err());
+        let size = 16 << 20;
+        assert_eq!(chain(&root, size, 1, 3, 1, 9).unwrap(), vec![(1, 3, 9)]);
+        let legs = chain(&root, size, 1, 3, 2, 8).unwrap();
+        assert_eq!(legs, vec![(1, 3, 5), (2, 5, 8)]);
+        // Parent segment 4 missing while the child is intact: the second leg alone passes.
+        let have = archive(&[
+            (1, 3, false),
+            (1, 5, true),
+            (2, 5, false),
+            (2, 6, false),
+            (2, 7, false),
+            (2, 8, true),
+        ]);
+        let failed = legs
+            .iter()
+            .filter(|(t, a, b)| contiguous(&have, *t, *a, *b, true).is_err())
+            .count();
+        assert_eq!(failed, 1);
+        assert!(
+            chain(&root, size, 1, 3, 3, 9).is_err(),
+            "missing history of the newest timeline"
+        );
+        assert!(
+            chain(&root, size, 7, 3, 2, 9).is_err(),
+            "base timeline not an ancestor"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
+    fn stale_wal_of_another_cluster_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("pgb-sysid-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, id: u64| {
+            let mut bytes = vec![0u8; 64];
+            bytes[24..32].copy_from_slice(&id.to_ne_bytes());
+            fs::write(dir.join(name), bytes).unwrap();
+            dir.join(name)
+        };
+        let mut have = Archive::new();
+        have.insert((1, 4), (false, write("a", 77)));
+        have.insert((1, 5), (true, write("b", 0)));
+        assert!(
+            same_cluster(&have, 1, 4, 5, 77).is_ok(),
+            "unwritten partial is tolerated"
+        );
+        assert!(same_cluster(&have, 1, 4, 5, 78).is_err());
+        have.insert((1, 5), (false, write("c", 78)));
+        assert!(same_cluster(&have, 1, 4, 5, 77).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn finalize_style_floor_excludes_older_bases() {
+        let root = std::env::temp_dir().join(format!("pgb-floor-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        set_floor(&root, 1234).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("BASE_FLOOR")).unwrap().trim(),
+            "1234"
+        );
         fs::remove_dir_all(&root).unwrap();
     }
     #[test]
