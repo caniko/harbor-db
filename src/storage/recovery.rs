@@ -498,7 +498,7 @@ pub(super) fn query_argv(
 }
 /// Concurrent record-check queries (each its own psql backend).
 const RECORD_WORKERS: usize = 4;
-fn records(
+pub(crate) fn records(
     config: &Value,
     settings: &Value,
     socket: &Path,

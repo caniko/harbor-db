@@ -34,13 +34,6 @@
       SH
       chmod +x "$out/bin/initdb"
     '';
-  validator = pkgs.writeShellScript "verify-upgraded-records" ''
-    set -euo pipefail
-    data=$1
-    ${new}/bin/pg_ctl -D "$data" -l "$data/validator.log" -o "-k ${state} -p 55439 -c data_directory='$data' -c listen_addresses=\"\" -c default_transaction_read_only=on" -w start
-    trap '${new}/bin/pg_ctl -D "$data" -m fast -w stop' EXIT
-    test "$(${new}/bin/psql -h ${state} -p 55439 -d postgres -Atqc 'SELECT receipt FROM acknowledged_saves')" = receipt-before-upgrade
-  '';
   oldConfig = pkgs.writeText "old-adoption.json" (builtins.toJSON {
     resource = "postgresql";
     state_dir = state;
@@ -68,7 +61,18 @@ in
           oldPackage = old;
           oldDataDir = "/var/lib/postgres/17";
           initdbArgs = ["--locale=C" "--encoding=UTF8" "--no-data-checksums"];
-          validateCommand = ["${validator}"];
+          # Built-in validation: record digests before and after pg_upgrade.
+          validate.recordChecks = true;
+        };
+        recovery = {
+          systemIdentifier = "1";
+          backupRoot = "/srv/backup";
+          snapshotFile = "/srv/backup/evidence/records.json";
+          receiptFile = "/srv/backup/evidence/recovery.json";
+          recordChecks.saves = {
+            database = "postgres";
+            sql = "SELECT receipt FROM acknowledged_saves ORDER BY receipt";
+          };
         };
       };
       environment.systemPackages = [tool];
