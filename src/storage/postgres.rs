@@ -202,7 +202,7 @@ fn cluster_records(
         .display()
         .to_string();
     let quote = |p: &Path| super::postgres_drill::shell_quote(&p.display().to_string());
-    worker(
+    let started = worker(
         vec![
             pg_ctl.clone(),
             "-D".into(),
@@ -220,8 +220,12 @@ fn cluster_records(
         ],
         None,
         lease,
-    )?;
-    let records = super::recovery::records(config, settings, state, port, &[lease.fd()]);
+    );
+    // A start that timed out may still be coming up: always try to stop it.
+    let records = match started {
+        Ok(()) => super::recovery::records(config, settings, state, port, &[lease.fd()]),
+        Err(e) => Err(e),
+    };
     let stopped = worker(
         vec![
             pg_ctl,
