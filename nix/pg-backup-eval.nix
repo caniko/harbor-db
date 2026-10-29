@@ -737,5 +737,24 @@ in
           && failing (named [{services.harbor-db.pgBackup.targets.legacy.source.hostName = "10.0.0.3";}]);
         message = "recoveryMeta, gap tracking, health and admission must work per named target, require an explicit SQL connection remotely, and reserve the legacy name.";
       }
+      {
+        name = "local-streams-need-sender-and-slot-headroom";
+        assertion = let
+          rejected = slots: senders:
+            lib.any (a: !a.assertion && lib.hasInfix "local receiver plus base backups" a.message)
+            (localEval.extendModules {
+              modules = [
+                {
+                  services.postgresql.settings = {
+                    max_replication_slots = lib.mkForce slots;
+                    max_wal_senders = lib.mkForce senders;
+                  };
+                }
+              ];
+            }).config.assertions;
+        in
+          rejected 1 1 && rejected 2 2 && !rejected 2 3;
+        message = "A loopback receiver plus streaming base backups need two slots and three WAL senders.";
+      }
     ];
   }

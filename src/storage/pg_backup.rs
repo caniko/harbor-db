@@ -109,6 +109,10 @@ fn manifest_range(tree: &Path, size: u64) -> Result<(u32, u64, u64)> {
             .ok_or_else(|| invalid("invalid manifest timeline"))
     };
     let (first, last) = (&ranges[0], &ranges[ranges.len() - 1]);
+    // ponytail: a standby backup crossing a promotion has one range per timeline; verify each leg if needed.
+    if ranges.iter().any(|r| r["Timeline"] != first["Timeline"]) {
+        return Err(invalid("multi-timeline backup manifests are unsupported"));
+    }
     Ok((
         timeline(last)?,
         field(first, "Start-LSN")? / size,
@@ -690,6 +694,24 @@ mod tests {
         assert!(same_cluster(&have, 1, 4, 5, 78).is_err());
         have.insert((1, 5), (false, write("c", 78)));
         assert!(same_cluster(&have, 1, 4, 5, 77).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn multi_timeline_manifest_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("pgb-manifest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let write = |ranges: Value| {
+            durable::write_json(&dir.join("backup_manifest"), &json!({"WAL-Ranges": ranges}))
+                .unwrap()
+        };
+        write(json!([{"Timeline":1,"Start-LSN":"0/3000000","End-LSN":"0/4000000"}]));
+        assert_eq!(manifest_range(&dir, 16 << 20).unwrap(), (1, 3, 0x4000000));
+        write(json!([
+            {"Timeline":1,"Start-LSN":"0/3000000","End-LSN":"0/4000000"},
+            {"Timeline":2,"Start-LSN":"0/4000000","End-LSN":"0/5000000"}
+        ]));
+        assert!(manifest_range(&dir, 16 << 20).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
     #[test]

@@ -676,6 +676,17 @@ in {
               message = "services.harbor-db.pgBackup sourceLocalRecovery requires at least two replication slots and three WAL senders, including effective PostgreSQL settings.";
             }
             {
+              # Local streams: the running receiver holds one sender and slot, and a
+              # streaming base backup needs two sender connections and its own slot.
+              assertion = let
+                legacy = targetSources.legacy or null;
+                local = legacy != null && sourceRole && lib.elem legacy.source.hostName ["127.0.0.1" "localhost" "::1"];
+              in
+                !(local && legacy.ts.receiveWal.enable && legacy.ts.baseBackup.enable)
+                || (config.services.postgresql.settings.max_replication_slots >= 2 && config.services.postgresql.settings.max_wal_senders >= 3);
+              message = "services.harbor-db.pgBackup local receiver plus base backups need at least two replication slots and three WAL senders in the effective PostgreSQL settings.";
+            }
+            {
               assertion = !sourceRole || (config.services.postgresql.settings.max_replication_slots >= 1 && config.services.postgresql.settings.max_wal_senders >= 1);
               message = "services.harbor-db.pgBackup source roles require nonzero effective replication capacity for WAL senders and slots.";
             }
