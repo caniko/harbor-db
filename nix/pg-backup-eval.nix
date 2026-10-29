@@ -775,5 +775,36 @@ in
           lib.hasInfix "host=/run/postgresql port=55432 user=postgres" script;
         message = "The local restore-point connection must use the configured PostgreSQL port.";
       }
+      {
+        name = "named-targets-on-one-source-need-distinct-base-slots";
+        assertion = let
+          failing = c: lib.any (a: !a.assertion && lib.hasInfix "distinct replication slot names" a.message) c.assertions;
+          second = {
+            source.hostName = "10.0.0.2";
+            receiveWal.slotName = "other_wal";
+          };
+        in
+          failing (named [{services.harbor-db.pgBackup.targets.second = second;}])
+          && !failing (named [{services.harbor-db.pgBackup.targets.second = second // {baseBackup.slotName = "other_base";};}]);
+        message = "Targets sharing a source must not share the temporary base-backup slot either.";
+      }
+      {
+        name = "recovery-meta-needs-receiver-and-modern-postgresql";
+        assertion = let
+          failing = text: modules:
+            lib.any (a: !a.assertion && lib.hasInfix text a.message) (named modules).assertions;
+          meta = {
+            services.harbor-db.pgBackup.targets.thething.baseBackup = {
+              recoveryMeta = true;
+              sqlConninfo = "host=10.0.0.2 user=marker";
+            };
+          };
+        in
+          !failing "requires receiveWal.enable" [meta]
+          && failing "requires receiveWal.enable" [meta {services.harbor-db.pgBackup.targets.thething.receiveWal.enable = false;}]
+          && failing "PostgreSQL 15 or newer" [meta {services.harbor-db.pgBackup.targets.thething.package = pkgs.postgresql_14;}]
+          && !failing "PostgreSQL 15 or newer" [meta];
+        message = "recoveryMeta needs a receiver and a PostgreSQL 15+ package.";
+      }
     ];
   }

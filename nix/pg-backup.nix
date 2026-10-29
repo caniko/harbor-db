@@ -590,6 +590,14 @@ in {
           message = "services.harbor-db.pgBackup requires walDays >= baseBackupDays + 1 for safe PITR.${tag}";
         }
         {
+          assertion = !base.recoveryMeta || ts.receiveWal.enable;
+          message = "services.harbor-db.pgBackup baseBackup.recoveryMeta requires receiveWal.enable (it waits for the archived WAL).${tag}";
+        }
+        {
+          assertion = !(base.recoveryMeta || ts.health.enable) || lib.versionAtLeast ts.package.version "15";
+          message = "services.harbor-db.pgBackup recoveryMeta and health probe the slot with READ_REPLICATION_SLOT and need a PostgreSQL 15 or newer package.${tag}";
+        }
+        {
           assertion = !base.recoveryMeta || (base.enable && sqlOk);
           message = "services.harbor-db.pgBackup baseBackup.recoveryMeta requires baseBackup.enable and a source SQL connection (sqlConninfo, or a loopback legacy target on role=source/both).${tag}";
         }
@@ -611,6 +619,11 @@ in {
         }
       ])
       targetSources);
+    slotClaims = lib.concatMap (t: let
+      endpoint = "${t.source.hostName}:${toString t.source.port}";
+    in
+      lib.optional t.ts.receiveWal.enable "${endpoint}/${t.ts.receiveWal.slotName}"
+      ++ lib.optional t.ts.baseBackup.enable "${endpoint}/${t.ts.baseBackup.slotName}") (lib.attrValues targetSources);
   in
     mkMerge [
       {
@@ -624,6 +637,10 @@ in {
             {
               assertion = cfg.targets == {} || targetRole;
               message = "services.harbor-db.pgBackup.targets requires role target or both.";
+            }
+            {
+              assertion = !targetRole || lib.length slotClaims == lib.length (lib.unique slotClaims);
+              message = "services.harbor-db.pgBackup targets sharing a source host and port need distinct replication slot names.";
             }
             {
               assertion = cfg.source.hostName != null || (cfg.role == "target" && cfg.targets != {});

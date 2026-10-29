@@ -167,6 +167,10 @@ fn chain(
     hi: u64,
 ) -> Result<Vec<(u32, u64, u64)>> {
     if newest == base {
+        // The archive must reach the base's stop, not merely exist on its timeline.
+        if hi < stop / size {
+            return Err(invalid("archived WAL ends before the base's stop LSN"));
+        }
         return Ok(vec![(base, first, hi)]);
     }
     let text = fs::read_to_string(root.join("wal").join(format!("{newest:08X}.history")))
@@ -191,6 +195,9 @@ fn chain(
         let fork = fork / size;
         legs.push((*timeline, start, fork));
         start = fork;
+    }
+    if hi < start {
+        return Err(invalid(format!("timeline {newest} ends before its fork")));
     }
     legs.push((newest, start, hi));
     Ok(legs)
