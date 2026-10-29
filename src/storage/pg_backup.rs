@@ -205,6 +205,10 @@ fn gap_closed_by(root: &Path, started: u64) -> Result<bool> {
         Err(e) => Err(e),
     }
 }
+/// Bases that started before the cleared gap cannot reach the newest WAL.
+fn set_floor(root: &Path, started: u64) -> Result<()> {
+    durable::atomic_write(&root.join("BASE_FLOOR"), format!("{started}\n").as_bytes())
+}
 fn remove_gap(root: &Path) -> Result<()> {
     fs::remove_file(gap_path(root))?;
     durable::sync_directory(&root.join("wal"))
@@ -215,6 +219,7 @@ pub fn clear_gap(root: &Path, started: u64) -> Result<bool> {
         return Ok(false);
     }
     rotate(root)?;
+    set_floor(root, started)?;
     remove_gap(root)?;
     Ok(true)
 }
@@ -413,26 +418,15 @@ fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64)> {
         .collect();
     trees.sort();
     // Bases from before the last cleared gap cannot reach the newest WAL.
-    // ponytail: bases without a meta sidecar are always considered; use recoveryMeta with health.
-    let current = fs::read_to_string(root.join("GENERATION"))
+    let floor: u64 = fs::read_to_string(root.join("BASE_FLOOR"))
         .ok()
-        .map(|g| g.trim().to_owned());
-    let metas: Vec<_> = trees
-        .iter()
-        .map(|tree| {
-            let mut meta = tree.as_os_str().to_owned();
-            meta.push(".meta.json");
-            durable::read_json(Path::new(&meta)).ok()
-        })
-        .collect();
-    // Once any base carries metadata, sidecar-less (pre-recoveryMeta) trees are not recovery bases.
-    let has_meta = metas.iter().any(Option::is_some);
-    let mut keep = metas.iter().map(|m| match (m, &current) {
-        (Some(meta), Some(current)) => meta["epoch_id"] == current.as_str(),
-        (None, _) => !has_meta,
-        _ => true,
+        .and_then(|f| f.trim().parse().ok())
+        .unwrap_or(0);
+    trees.retain(|tree| {
+        fs::metadata(tree)
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) >= floor)
     });
-    trees.retain(|_| keep.next().unwrap_or(true));
     let oldest = trees
         .first()
         .ok_or_else(|| invalid("no retained base backup"))?;

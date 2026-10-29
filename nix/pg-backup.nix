@@ -201,7 +201,7 @@
     sqlConninfo =
       if baseCfg.sqlConninfo != null
       then baseCfg.sqlConninfo
-      else if sourceRole && isLegacy
+      else if sourceRole && isLegacy && lib.elem source.hostName ["127.0.0.1" "localhost" "::1"]
       then "host=/run/postgresql user=postgres dbname=postgres"
       else null;
     admissionArgs = lib.concatStringsSep " " (
@@ -579,7 +579,7 @@ in {
         inherit (target) ts;
         tag = lib.optionalString (name != "legacy") " [target ${name}]";
         base = ts.baseBackup;
-        sqlOk = base.sqlConninfo != null || (sourceRole && name == "legacy");
+        sqlOk = base.sqlConninfo != null || (sourceRole && name == "legacy" && lib.elem source.hostName ["127.0.0.1" "localhost" "::1"]);
       in [
         {
           assertion = ts.receiveWal.enable || base.enable;
@@ -591,7 +591,7 @@ in {
         }
         {
           assertion = !base.recoveryMeta || (base.enable && sqlOk);
-          message = "services.harbor-db.pgBackup baseBackup.recoveryMeta requires baseBackup.enable and a source SQL connection (sqlConninfo, or the legacy target on role=source/both).${tag}";
+          message = "services.harbor-db.pgBackup baseBackup.recoveryMeta requires baseBackup.enable and a source SQL connection (sqlConninfo, or a loopback legacy target on role=source/both).${tag}";
         }
         {
           assertion = !ts.health.enable || (ts.receiveWal.enable && base.enable);
