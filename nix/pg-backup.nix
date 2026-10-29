@@ -202,7 +202,7 @@
       if baseCfg.sqlConninfo != null
       then baseCfg.sqlConninfo
       else if sourceRole && isLegacy && lib.elem source.hostName ["127.0.0.1" "localhost" "::1"]
-      then "host=/run/postgresql user=postgres dbname=postgres"
+      then "host=/run/postgresql port=${toString source.port} user=postgres dbname=postgres"
       else null;
     admissionArgs = lib.concatStringsSep " " (
       lib.optional (baseCfg.admission.minRamBytes != null) "--min-ram-bytes ${toString baseCfg.admission.minRamBytes}"
@@ -349,7 +349,7 @@
         exec 9>>"$backup_root/BACKUP_LOCK"
         ${pkgs.util-linux}/bin/flock -n 9
         # Never replace the last good backup during another run on the same day.
-        ${lib.optionalString gapTracking ''started_epoch="$(date +%s)"''}
+        ${lib.optionalString gapTracking ''started_ms="$(date +%s%3N)"''}
         date_dir="$backup_root/base/$(date -u +%Y-%m-%dT%H%M%S)-$$"
         partial_dir="$date_dir.partial"
         wal_dir="${walDir}"
@@ -384,13 +384,13 @@
           then ''
             # Metadata first, then LAST_SUCCESS=<id>; a verified later base also clears a WAL gap.
             ${pgBackupTool} finalize --root "$backup_root" --id "$(basename "$date_dir")" \
-              --started-epoch "$started_epoch" --segment-bytes ${toString ts.walSegmentBytes} \
+              --started-ms "$started_ms" --segment-bytes ${toString ts.walSegmentBytes} \
               --package ${ts.package} --source-host ${lib.escapeShellArg sourceId} \
               --sql-psql ${ts.package}/bin/psql --sql-conninfo ${lib.escapeShellArg sqlConninfo}
           ''
           else ''
             printf '%s\n' "$(date --iso-8601=seconds)" | ${durable} write "$backup_root/LAST_SUCCESS"
-            ${lib.optionalString gapTracking "${pgBackupTool} clear-gap --root \"$backup_root\" --started-epoch \"$started_epoch\""}
+            ${lib.optionalString gapTracking "${pgBackupTool} clear-gap --root \"$backup_root\" --started-ms \"$started_ms\""}
           ''
         }
         # The separate prune service uses the same lock; retention runs next time.

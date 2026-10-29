@@ -14,10 +14,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// Milliseconds: gap detection and a base start in the same second must stay ordered.
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+        .map_or(0, |d| d.as_millis() as u64)
 }
 fn gap_path(root: &Path) -> PathBuf {
     root.join("wal/.gap")
@@ -309,14 +310,14 @@ fn write_gap(root: &Path, slot: &str, reason: &str) -> Result<bool> {
     let generation = generation(root)?;
     durable::write_json(
         &gap_path(root),
-        &json!({"slot": slot, "reason": reason, "detected_epoch": now(), "generation": generation}),
+        &json!({"slot": slot, "reason": reason, "detected_ms": now(), "generation": generation}),
     )?;
     Ok(true)
 }
 /// Base started at `started` and verified: it post-dates the gap, so it closes it.
 fn gap_closed_by(root: &Path, started: u64) -> Result<bool> {
     match durable::read_json(&gap_path(root)) {
-        Ok(gap) => Ok(gap["detected_epoch"].as_u64().is_some_and(|t| t < started)),
+        Ok(gap) => Ok(gap["detected_ms"].as_u64().is_some_and(|t| t < started)),
         Err(_) if !gap_path(root).exists() => Ok(false),
         Err(e) => Err(e),
     }
@@ -556,7 +557,11 @@ fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64, u64, PathBuf)>
     trees.retain(|tree| {
         fs::metadata(tree)
             .and_then(|m| m.modified())
-            .is_ok_and(|t| t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) >= floor)
+            .is_ok_and(|t| {
+                t.duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64)
+                    >= floor
+            })
     });
     let oldest = trees
         .first()
@@ -765,7 +770,7 @@ mod tests {
         fs::create_dir_all(root.join("base")).unwrap();
         let before = generation(&root).unwrap();
         assert_eq!(generation(&root).unwrap(), before);
-        durable::write_json(&gap_path(&root), &json!({"detected_epoch": 100})).unwrap();
+        durable::write_json(&gap_path(&root), &json!({"detected_ms": 100})).unwrap();
         assert!(
             !clear_gap(&root, 100).unwrap(),
             "a base started before the gap must not clear it"

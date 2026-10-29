@@ -30,7 +30,7 @@ enum Action {
         #[arg(long)]
         root: PathBuf,
         #[arg(long)]
-        started_epoch: u64,
+        started_ms: u64,
     },
     /// After a verified publish: write base/<id>.meta.json then LAST_SUCCESS=<id>, clearing a gap.
     Finalize {
@@ -39,7 +39,7 @@ enum Action {
         #[arg(long)]
         id: String,
         #[arg(long)]
-        started_epoch: u64,
+        started_ms: u64,
         #[arg(long)]
         segment_bytes: u64,
         /// PostgreSQL package providing bin/pg_controldata.
@@ -99,18 +99,15 @@ fn run() -> Result<ExitCode> {
                 eprintln!("harbor-db-pg-backup: slot {slot} was missing; WAL gap marked");
             }
         }
-        Action::ClearGap {
-            root,
-            started_epoch,
-        } => {
-            if pg_backup::clear_gap(&root, started_epoch)? {
+        Action::ClearGap { root, started_ms } => {
+            if pg_backup::clear_gap(&root, started_ms)? {
                 eprintln!("harbor-db-pg-backup: WAL gap cleared by the new base backup");
             }
         }
         Action::Finalize {
             root,
             id,
-            started_epoch,
+            started_ms,
             segment_bytes,
             package,
             source_host,
@@ -121,7 +118,7 @@ fn run() -> Result<ExitCode> {
             pg_backup::finalize(&pg_backup::Finalize {
                 root: &root,
                 id: &id,
-                started: started_epoch,
+                started: started_ms,
                 segment_bytes,
                 package: &package,
                 source_host: &source_host,

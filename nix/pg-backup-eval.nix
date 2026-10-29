@@ -756,5 +756,24 @@ in
           rejected 1 1 && rejected 2 2 && !rejected 2 3;
         message = "A loopback receiver plus streaming base backups need two slots and three WAL senders.";
       }
+      {
+        name = "local-marker-connection-carries-the-source-port";
+        assertion = let
+          script =
+            (localEval.extendModules {
+              modules = [
+                {
+                  services.postgresql.settings.port = lib.mkForce 55432;
+                  services.harbor-db.pgBackup = {
+                    source.port = lib.mkForce 55432;
+                    targetSettings.baseBackup.recoveryMeta = true;
+                  };
+                }
+              ];
+            }).config.systemd.services.pg-basebackup.script;
+        in
+          lib.hasInfix "host=/run/postgresql port=55432 user=postgres" script;
+        message = "The local restore-point connection must use the configured PostgreSQL port.";
+      }
     ];
   }
