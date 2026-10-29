@@ -373,17 +373,21 @@ pub fn health(h: &Health) -> Vec<String> {
             match oldest_base_range(h.root, h.segment_bytes) {
                 Err(e) => fail(format!("retained base backups unusable: {e}")),
                 Ok((timeline, first)) => {
-                    let last = segments
+                    // The base's timeline and every later (promoted) one must be gapless.
+                    let timelines: std::collections::BTreeSet<_> = segments
                         .iter()
-                        .filter(|s| s.0 == timeline)
-                        .map(|s| s.1)
-                        .max();
-                    match last {
-                        None => fail(format!("no WAL on timeline {timeline}")),
-                        Some(last) => {
-                            if let Err(e) = contiguous(&segments, timeline, first, last, true) {
-                                fail(format!("WAL not contiguous from the oldest base: {e}"));
-                            }
+                        .map(|s| s.0)
+                        .filter(|t| *t >= timeline)
+                        .collect();
+                    if timelines.is_empty() {
+                        fail(format!("no WAL on timeline {timeline}"));
+                    }
+                    for t in timelines {
+                        let mine = segments.iter().filter(|s| s.0 == t).map(|s| s.1);
+                        let (lo, hi) = (mine.clone().min().unwrap_or(0), mine.max().unwrap_or(0));
+                        let start = if t == timeline { first } else { lo };
+                        if let Err(e) = contiguous(&segments, t, start, hi, true) {
+                            fail(format!("WAL not contiguous from the oldest base: {e}"));
                         }
                     }
                 }
@@ -413,14 +417,22 @@ fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64)> {
     let current = fs::read_to_string(root.join("GENERATION"))
         .ok()
         .map(|g| g.trim().to_owned());
-    trees.retain(|tree| {
-        let mut meta = tree.as_os_str().to_owned();
-        meta.push(".meta.json");
-        match (durable::read_json(Path::new(&meta)), &current) {
-            (Ok(meta), Some(current)) => meta["epoch_id"] == current.as_str(),
-            _ => true,
-        }
+    let metas: Vec<_> = trees
+        .iter()
+        .map(|tree| {
+            let mut meta = tree.as_os_str().to_owned();
+            meta.push(".meta.json");
+            durable::read_json(Path::new(&meta)).ok()
+        })
+        .collect();
+    // Once any base carries metadata, sidecar-less (pre-recoveryMeta) trees are not recovery bases.
+    let has_meta = metas.iter().any(Option::is_some);
+    let mut keep = metas.iter().map(|m| match (m, &current) {
+        (Some(meta), Some(current)) => meta["epoch_id"] == current.as_str(),
+        (None, _) => !has_meta,
+        _ => true,
     });
+    trees.retain(|_| keep.next().unwrap_or(true));
     let oldest = trees
         .first()
         .ok_or_else(|| invalid("no retained base backup"))?;
