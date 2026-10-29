@@ -812,5 +812,14 @@ in
           && !failing "PostgreSQL 15 or newer" [meta];
         message = "recoveryMeta needs a receiver and a PostgreSQL 15+ package.";
       }
+      {
+        name = "colliding-target-roots-are-rejected";
+        assertion = let
+          failing = c: lib.any (a: !a.assertion && lib.hasInfix "backup roots collide" a.message) c.assertions;
+        in
+          failing (named [{services.harbor-db.pgBackup.source.hostName = "thething";}])
+          && !failing (named [{services.harbor-db.pgBackup.source.hostName = "10.0.0.9";}]);
+        message = "A legacy host-named root must not equal a named target's root.";
+      }
     ];
   }

@@ -641,6 +641,13 @@ in {
               message = "services.harbor-db.pgBackup.targets requires role target or both.";
             }
             {
+              assertion = let
+                roots = map (t: t.backupRoot) (lib.attrValues targetSources);
+              in
+                !targetRole || lib.length roots == lib.length (lib.unique roots);
+              message = "services.harbor-db.pgBackup target backup roots collide (a legacy source host name sanitizes to a named target's name); rename the target or relocate backupDir.";
+            }
+            {
               assertion = !targetRole || lib.length slotClaims == lib.length (lib.unique slotClaims);
               message = "services.harbor-db.pgBackup targets sharing a source host and port need distinct replication slot names.";
             }
