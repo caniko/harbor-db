@@ -1,8 +1,9 @@
 //! Generated backup-service acceptance; this is not recovery-ready evidence.
 use clap::Parser;
+use harbor_db::storage::recovery;
 use harbor_db::testing::protocol::{Client, Request};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
     os::{fd::FromRawFd, unix::net::UnixStream},
@@ -12,9 +13,9 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-const ROOT: &str = "/srv/pgbackup/192.168.1.10";
+const ROOT: &str = "/srv/pgbackup/primary";
 // Inactive manual units may be unloaded by systemd until their first start.
-const RESET_FAILED: &str = "for unit in pg-basebackup.service pg-backup-prune.service; do if test \"$(systemctl is-failed \"$unit\")\" = failed; then systemctl reset-failed \"$unit\"; fi; done";
+const RESET_FAILED: &str = "for unit in pg-basebackup-primary.service pg-backup-prune-primary.service pg-backup-health-primary.service; do if test \"$(systemctl is-failed \"$unit\")\" = failed; then systemctl reset-failed \"$unit\"; fi; done";
 #[derive(Parser)]
 struct Args {
     #[arg(long)]
@@ -108,25 +109,25 @@ impl Gate {
     fn start_backup(&mut self, tag: &str) -> Result<()> {
         self.shell(
             "backup",
-            format!("{RESET_FAILED}; systemctl start --no-block pg-basebackup.service"),
+            format!("{RESET_FAILED}; systemctl start --no-block pg-basebackup-primary.service"),
             true,
             &format!("{tag}-started"),
         )?;
         self.wait("primary", "test \"$(runuser -u postgres -- psql -Xw -At -d postgres -c 'SELECT count(*) FROM pg_stat_progress_basebackup WHERE backup_streamed > 0')\" = 1", &format!("{tag}-real-postgres-progress"))?;
-        self.wait("backup", &format!("pid=$(systemctl show pg-basebackup.service -p MainPID --value); test \"$pid\" -gt 0; test -n \"$(find {ROOT}/base -path \"*-$pid.partial/*\" -type f -size +0c -print -quit)\""), &format!("{tag}-nonempty-partial"))
+        self.wait("backup", &format!("pid=$(systemctl show pg-basebackup-primary.service -p MainPID --value); test \"$pid\" -gt 0; test -n \"$(find {ROOT}/base -path \"*-$pid.partial/*\" -type f -size +0c -print -quit)\""), &format!("{tag}-nonempty-partial"))
     }
     fn interrupt(&mut self, tag: &str) -> Result<()> {
         self.shell(
             "backup",
-            "systemctl kill --kill-who=all --signal=SIGKILL pg-basebackup.service",
+            "systemctl kill --kill-who=all --signal=SIGKILL pg-basebackup-primary.service",
             true,
             &format!("{tag}-cgroup-killed"),
         )?;
-        self.wait("backup", "test \"$(systemctl show pg-basebackup.service -p ActiveState --value)\" = failed; test \"$(systemctl show pg-basebackup.service -p Result --value)\" = signal", &format!("{tag}-unit-failure-recorded"))?;
+        self.wait("backup", "test \"$(systemctl show pg-basebackup-primary.service -p ActiveState --value)\" = failed; test \"$(systemctl show pg-basebackup-primary.service -p Result --value)\" = signal", &format!("{tag}-unit-failure-recorded"))?;
         self.wait("primary", "test \"$(runuser -u postgres -- psql -Xw -At -d postgres -c 'SELECT count(*) FROM pg_stat_progress_basebackup')\" = 0", &format!("{tag}-source-transfer-ended"))
     }
     fn complete(&mut self, tag: &str) -> Result<Vec<String>> {
-        self.shell("backup", format!("{RESET_FAILED}; systemctl start pg-basebackup.service; test \"$(systemctl show pg-basebackup.service -p ActiveState --value)\" = inactive; test \"$(systemctl show pg-basebackup.service -p Result --value)\" = success"), true, &format!("{tag}-oneshot-success"))?;
+        self.shell("backup", format!("{RESET_FAILED}; systemctl start pg-basebackup-primary.service; test \"$(systemctl show pg-basebackup-primary.service -p ActiveState --value)\" = inactive; test \"$(systemctl show pg-basebackup-primary.service -p Result --value)\" = success"), true, &format!("{tag}-oneshot-success"))?;
         let trees = self.trees()?;
         for (i, tree) in trees.iter().enumerate() {
             self.shell(
@@ -198,6 +199,7 @@ fn run(args: Args) -> Result<()> {
         )?;
     }
     g.wait("primary", "test \"$(systemctl is-active postgresql.service)\" = active; test \"$(systemctl show postgresql-setup.service -p Result --value)\" = success; test \"$(runuser -u postgres -- psql -Xw -At -d postgres -c \"SELECT count(*) FROM pg_roles WHERE rolname='replicator' AND rolreplication AND rolcanlogin\")\" = 1", "source-role-setup-complete")?;
+    g.sql("CREATE ROLE pgbackup_marker LOGIN; GRANT EXECUTE ON FUNCTION pg_create_restore_point(text), pg_switch_wal() TO pgbackup_marker", "least-privilege-marker-role")?;
     let (code, password) = g.exec("primary", "cat /run/backup-credential/password")?;
     require(
         code == 0 && password.len() == 64 && password.bytes().all(|b| b.is_ascii_hexdigit()),
@@ -206,10 +208,10 @@ fn run(args: Args) -> Result<()> {
     g.shell("backup", format!("install -d -m 0700 -o postgres -g postgres /run/backup-credential; printf '%s' {} > /run/backup-credential/password; chown postgres:postgres /run/backup-credential/password; chmod 0400 /run/backup-credential/password", q(&password)), true, "target-private-runtime-credential")?;
     for (unit, expected) in [
         (
-            "pg-basebackup",
+            "pg-basebackup-primary",
             vec!["harbor-db-durable", "publish-tree", "pg_verifybackup"],
         ),
-        ("pg-backup-prune", vec!["harbor-db-backup-prune"]),
+        ("pg-backup-prune-primary", vec!["harbor-db-backup-prune"]),
     ] {
         let script = g.shell("backup", format!("unit_script=$(systemctl show {unit}.service -p ExecStart --value | grep -o '/nix/store/[^ ;}}]*' | head -n 1); test -f \"$unit_script\"; cat \"$unit_script\"; systemctl show {unit}.service -p User -p ProtectSystem -p UMask"), true, &format!("{unit}-effective-execstart-read"))?;
         g.check(
@@ -221,10 +223,10 @@ fn run(args: Args) -> Result<()> {
             &format!("{unit}-native-private-unit"),
         )?;
     }
-    g.shell("backup", "test \"$(systemctl is-enabled pg-basebackup.timer 2>/dev/null || true)\" != enabled; systemctl start pg-receivewal.service", true, "manual-schedule-and-receiver-start")?;
+    g.shell("backup", "test \"$(systemctl is-enabled pg-basebackup-primary.timer 2>/dev/null || true)\" != enabled; systemctl start pg-receivewal-primary.service", true, "manual-schedule-and-receiver-start")?;
     g.wait(
         "backup",
-        "systemctl is-active pg-receivewal.service",
+        "systemctl is-active pg-receivewal-primary.service",
         "real-receiver-active",
     )?;
     g.sql("CREATE TABLE backup_records(id integer PRIMARY KEY, body text NOT NULL, revision integer NOT NULL, payload text NOT NULL); ALTER TABLE backup_records ALTER COLUMN payload SET STORAGE EXTERNAL; INSERT INTO backup_records VALUES (1, 'acknowledged generated-service record', 7, repeat(md5('service-record'), 262144)); CHECKPOINT", "nonempty-revision-seven-record-acknowledged")?;
@@ -250,7 +252,41 @@ fn run(args: Args) -> Result<()> {
         true,
         "legacy-marker-read",
     )?;
-    g.shell("backup", format!("printf '%s\\n' {} | grep -Eq '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}T[0-9]{{2}}:[0-9]{{2}}:[0-9]{{2}}[+-][0-9]{{2}}:[0-9]{{2}}$'; date --date={} +%s >/dev/null; test -z \"$(find {ROOT}/base -name '*.meta.json' -print -quit)\"", q(&marker), q(&marker)), true, "legacy-timestamp-contract-without-invented-metadata")?;
+    let meta: Value = serde_json::from_str(&g.shell(
+        "backup",
+        format!("cat {ROOT}/base/{marker}.meta.json"),
+        true,
+        "recovery-meta-read",
+    )?)?;
+    g.check(
+        first[0] == format!("{ROOT}/base/{marker}") && meta["backup_id"] == marker.as_str(),
+        "last-success-is-the-published-backup-id",
+    )?;
+    let system_identifier = meta["system_identifier"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    g.check(
+        meta["pg_major"] == 18
+            && !system_identifier.is_empty()
+            && system_identifier.bytes().all(|b| b.is_ascii_digit())
+            && meta["timeline"] == 1
+            && !meta["epoch_id"].as_str().unwrap_or_default().is_empty()
+            && recovery::lsn(&meta["post_backup_lsn"])? > recovery::lsn(&meta["backup_stop_lsn"])?,
+        "recovery-meta-fields-and-recovery-point-after-stop",
+    )?;
+    let inspect = json!({
+        "resource": "backup-service-fixture", "data_dir": "/var/lib/unused", "state_dir": "/srv/authority",
+        "major": "18", "package": c.postgres_package, "required_mounts": [],
+        "recovery": {
+            "system_identifier": system_identifier, "source_hostname": "192.168.1.10", "backup_root": ROOT,
+            "snapshot_file": format!("{ROOT}/evidence/records.json"), "receipt_file": format!("{ROOT}/evidence/recovery.json"),
+            "off_host_receipt_file": format!("{ROOT}/evidence/off-host.json"), "max_age_seconds": 3600,
+            "verify_timeout_seconds": 300, "record_checks": [],
+        },
+    });
+    g.shell("backup", format!("install -d -m 0700 -o postgres -g postgres /srv/authority {ROOT}/locks {ROOT}/evidence; install -m 0600 -o postgres -g postgres /dev/null {ROOT}/locks/mutate; printf '%s' {} > /srv/inspect.json; chown postgres:postgres /srv/inspect.json; chmod 0600 /srv/inspect.json; runuser -u postgres -- {}/bin/harbor-db-postgres --config /srv/inspect.json inspect-backup", q(&inspect.to_string()), q(&c.native_package)), true, "recovery-gate-inspect-backup-accepts-published-meta")?;
+    g.shell("backup", format!("test \"$(systemctl show pg-basebackup-primary.service -p ExecCondition --value | grep -c 'admit --min-ram-bytes 1')\" = 1; tool={}/bin/harbor-db-pg-backup; $tool admit --min-ram-bytes 1; if $tool admit --min-ram-bytes 1099511627776; then exit 1; else test $? = 1; fi; printf 'MemAvailable: 9999999 kB\\nSwapTotal: 1024 kB\\nSwapFree: 0 kB\\n' > /tmp/meminfo; if $tool admit --min-swap-bytes 1 --meminfo /tmp/meminfo; then exit 1; fi; printf 'MemAvailable: 9999999 kB\\nSwapTotal: 0 kB\\nSwapFree: 0 kB\\n' > /tmp/meminfo; $tool admit --min-swap-bytes 1 --meminfo /tmp/meminfo", q(&c.native_package)), true, "admission-skips-short-ram-or-swap-and-ignores-absent-swap")?;
     let parity = format!(
         "cat {ROOT}/LAST_SUCCESS | {}/bin/harbor-db-durable write /srv/pgbackup/marker-parity/python-marker; cmp {ROOT}/LAST_SUCCESS /srv/pgbackup/marker-parity/python-marker; cat /srv/pgbackup/marker-parity/python-marker | {}/bin/harbor-db-durable write /srv/pgbackup/marker-parity/native-marker; cmp {ROOT}/LAST_SUCCESS /srv/pgbackup/marker-parity/native-marker",
         q(&c.legacy_package),
@@ -267,11 +303,11 @@ fn run(args: Args) -> Result<()> {
     g.start_backup("second")?;
     g.shell(
         "backup",
-        "systemctl start pg-backup-prune.service",
+        "systemctl start pg-backup-prune-primary.service",
         false,
         "separate-prune-lock-contention-refused",
     )?;
-    g.shell("backup", "test \"$(systemctl show pg-backup-prune.service -p ActiveState --value)\" = failed; test \"$(systemctl show pg-backup-prune.service -p Result --value)\" = exit-code; journalctl -u pg-backup-prune.service --no-pager | grep -F 'Resource temporarily unavailable'", true, "contending-prune-unit-lock-failure")?;
+    g.shell("backup", "test \"$(systemctl show pg-backup-prune-primary.service -p ActiveState --value)\" = failed; test \"$(systemctl show pg-backup-prune-primary.service -p Result --value)\" = exit-code; journalctl -u pg-backup-prune-primary.service --no-pager | grep -F 'Resource temporarily unavailable'", true, "contending-prune-unit-lock-failure")?;
     let during = g.snapshot(&first[0])?;
     g.check(
         during == prior,
@@ -307,7 +343,7 @@ fn run(args: Args) -> Result<()> {
         partials.lines().count() == 2,
         "two-interrupted-partials-retained",
     )?;
-    g.shell("backup", format!("touch -m -d '3 days ago' {}; {RESET_FAILED}; systemctl start pg-backup-prune.service; test \"$(systemctl show pg-backup-prune.service -p Result --value)\" = success", q(&first[0])), true, "actual-prune-expires-aged-oldest")?;
+    g.shell("backup", format!("touch -m -d '3 days ago' {}; {RESET_FAILED}; systemctl start pg-backup-prune-primary.service; test \"$(systemctl show pg-backup-prune-primary.service -p Result --value)\" = success", q(&first[0])), true, "actual-prune-expires-aged-oldest")?;
     let retained = g.trees()?;
     g.check(
         retained.len() == 2
@@ -320,6 +356,84 @@ fn run(args: Args) -> Result<()> {
         code == 0 && remaining == format!("{partials}\n{lock}"),
         "prune-preserves-partials-and-durable-lock-inode",
     )?;
+    let tool = format!("{}/bin/harbor-db-pg-backup", c.native_package);
+    let health = "systemctl start pg-backup-health-primary.service";
+    g.shell(
+        "backup",
+        format!("{RESET_FAILED}; {health}"),
+        true,
+        "health-green-on-a-fresh-chain",
+    )?;
+    let generation = g.shell(
+        "backup",
+        format!("cat {ROOT}/GENERATION"),
+        true,
+        "generation-read",
+    )?;
+    g.shell(
+        "backup",
+        "systemctl stop pg-receivewal-primary.service",
+        true,
+        "receiver-stopped",
+    )?;
+    g.wait("primary", "runuser -u postgres -- psql -Xw -At -d postgres -c \"SELECT pg_drop_replication_slot('pgbackup_wal')\"", "wal-slot-dropped-on-source")?;
+    g.sql("INSERT INTO backup_records VALUES (3, 'written while the slot was lost', 7, repeat(md5('gap-record'), 1024)); SELECT pg_switch_wal()", "source-advances-past-the-lost-slot")?;
+    g.shell(
+        "backup",
+        "systemctl start pg-receivewal-primary.service",
+        true,
+        "receiver-restarted",
+    )?;
+    g.shell(
+        "backup",
+        format!("test -f {ROOT}/wal/.gap"),
+        true,
+        "recreated-slot-writes-durable-gap-marker",
+    )?;
+    g.shell(
+        "backup",
+        format!("{RESET_FAILED}; {health}"),
+        false,
+        "health-fails-while-gap-marker-present",
+    )?;
+    g.shell(
+        "backup",
+        "journalctl -u pg-backup-health-primary.service --no-pager | grep -F 'WAL gap marker present'",
+        true,
+        "health-names-the-gap",
+    )?;
+    g.wait(
+        "backup",
+        "systemctl is-active pg-receivewal-primary.service",
+        "receiver-streaming-after-gap",
+    )?;
+    g.complete("post-gap")?;
+    g.shell(
+        "backup",
+        format!(
+            "test ! -e {ROOT}/wal/.gap; test \"$(cat {ROOT}/GENERATION)\" != {}",
+            q(&generation)
+        ),
+        true,
+        "verified-base-clears-gap-and-rotates-generation",
+    )?;
+    let after: Value = serde_json::from_str(&g.shell(
+        "backup",
+        format!("cat {ROOT}/base/\"$(cat {ROOT}/LAST_SUCCESS)\".meta.json"),
+        true,
+        "post-gap-meta-read",
+    )?)?;
+    g.check(
+        after["epoch_id"] != meta["epoch_id"],
+        "post-gap-base-has-new-epoch-token",
+    )?;
+    g.shell(
+        "backup",
+        format!("{RESET_FAILED}; {health}"),
+        true,
+        "health-green-after-new-base",
+    )?;
+    g.shell("backup", format!("systemctl stop pg-receivewal-primary.service; {tool} backup-health --root {ROOT} --segment-bytes 16777216 --slot pgbackup_wal --psql {}/bin/psql --conninfo 'host=192.168.1.10 user=pgbackup_marker dbname=postgres' --max-wal-age-seconds 1", q(&c.postgres_package)), false, "health-fails-when-the-slot-probe-fails")?;
     let assertions: Vec<_> = g
         .assertions
         .into_iter()

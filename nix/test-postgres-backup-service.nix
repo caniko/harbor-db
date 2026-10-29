@@ -55,6 +55,9 @@ in
           maxReplicationSlots = 4;
         };
       };
+      # Least-privilege marker role for recoveryMeta; the fixture grants it
+      # EXECUTE on pg_create_restore_point(text) and pg_switch_wal().
+      services.postgresql.authentication = lib.mkAfter "host postgres pgbackup_marker 192.168.1.20/32 trust";
       systemd.services.backup-credential = {
         before = ["postgresql.service" "postgresql-setup.service"];
         requiredBy = ["postgresql.service" "postgresql-setup.service"];
@@ -85,21 +88,38 @@ in
       };
       system.extraDependencies = [legacyPackage];
       systemd.tmpfiles.rules = ["d /srv/pgbackup 0700 postgres postgres -"];
+      # The primary is backed up as a named target: pg-*-primary units and
+      # /srv/pgbackup/primary, while the single-source options stay unused.
       services.harbor-db.pgBackup = {
         role = "target";
+        source.hostName = lib.mkForce null;
         targetSettings = {
-          package = postgres;
           backupDir = "/srv/pgbackup";
           replicatorPasswordFile = "/run/backup-credential/password";
-          baseBackup.maxRate = "1M";
+        };
+        targets.primary = {
+          source.hostName = "192.168.1.10";
+          package = postgres;
+          receiveWal = {
+            statusInterval = 1;
+            slotCreateTimeoutSeconds = 30;
+          };
+          baseBackup = {
+            maxRate = "1M";
+            recoveryMeta = true;
+            sqlConninfo = "host=192.168.1.10 user=pgbackup_marker dbname=postgres";
+            admission.minRamBytes = 1;
+          };
+          health.enable = true;
           retain = {
             baseBackupDays = 1;
             walDays = 2;
           };
         };
       };
-      systemd.services.pg-receivewal.wantedBy = lib.mkForce [];
-      systemd.timers.pg-basebackup.enable = lib.mkForce false;
+      systemd.services.pg-receivewal-primary.wantedBy = lib.mkForce [];
+      systemd.timers.pg-basebackup-primary.enable = lib.mkForce false;
+      systemd.timers.pg-backup-health-primary.enable = lib.mkForce false;
     };
     # Python supplies only node objects and the version-1 transport.
     testScript = bridge.script {

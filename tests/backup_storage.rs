@@ -662,3 +662,20 @@ fn retention_projection_rejects_invalid_syntax_and_last_fields_before_deletion()
     assert_eq!(fs::read(&manifest).unwrap(), excessive.as_bytes());
     assert_eq!(fs::metadata(&manifest).unwrap().ino(), inode);
 }
+
+#[test]
+fn meta_sidecars_do_not_block_pruning_and_leave_with_their_tree() {
+    let root = fixture();
+    for name in ["old", "middle", "new"] {
+        fs::write(
+            root.path().join("base").join(format!("{name}.meta.json")),
+            "{}",
+        )
+        .unwrap();
+    }
+    backup::prune(root.path(), 1, 2, 1024 * 1024, Some(1_000_000.0)).unwrap();
+    assert!(!root.path().join("base/old").exists());
+    assert!(!root.path().join("base/old.meta.json").exists());
+    assert!(root.path().join("base/middle.meta.json").exists());
+    assert!(root.path().join("base/new.meta.json").exists());
+}

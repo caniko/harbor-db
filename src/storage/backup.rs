@@ -48,7 +48,11 @@ pub fn prune(
     let mut backups = Vec::new();
     for entry in fs::read_dir(&base)? {
         let entry = entry?;
-        if entry.file_name().to_string_lossy().ends_with(".partial") {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // `<id>.meta.json` sidecars belong to the tree they name.
+        if name.ends_with(".partial")
+            || (name.ends_with(".meta.json") && entry.file_type()?.is_file())
+        {
             continue;
         }
         if !entry.file_type()?.is_dir() {
@@ -104,6 +108,10 @@ pub fn prune(
         }
     }
     for path in expired {
+        // Drop the sidecar first: a tree without metadata is simply not recoverable.
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(".meta.json");
+        let _ = fs::remove_file(sidecar);
         fs::remove_dir_all(path)?;
     }
     durable::sync_directory(&base)?;
