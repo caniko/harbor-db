@@ -202,7 +202,7 @@
             find "$out/share/harbor-db-test" -name __pycache__ -type d -exec rm -rf {} +
             cp tests/suite.toml "$out/share/harbor-db-test/suite.toml"
             wrapProgram "$out/bin/harbor-db-test" \
-              --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.nix pkgs.stdenv.hostPlatform.systemd pkgs.gitMinimal pkgs.python3 pkgs.cargo pkgs.rustc pkgs.stdenv.cc pkgs.bash pkgs.coreutils pkgs.util-linux]} \
+              --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.nix pkgs.systemd pkgs.gitMinimal pkgs.python3 pkgs.cargo pkgs.rustc pkgs.stdenv.cc pkgs.bash pkgs.coreutils pkgs.util-linux]} \
               --set PYTHONPATH "$out/share/harbor-db-test/python:$out/share/harbor-db-test/tests"
           '';
         });
