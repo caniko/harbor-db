@@ -400,7 +400,7 @@ def names(body):
         if len(indent) == depth: result.update(inherited.split())
     return result
 package_names = names(packages)
-both, native = re.split(r'\}\s*//\s*pkgs\.lib\.optionalAttrs\s*\(pkgs\.system == "x86_64-linux"\)\s*\{', checks, maxsplit=1)
+both, native = re.split(r'\}\s*//\s*pkgs\.lib\.optionalAttrs\s*\(pkgs\.stdenv\.hostPlatform\.system == "x86_64-linux"\)\s*\{', checks, maxsplit=1)
 check_names = names(both)
 native_names = names(native)
 exports = [f'.#packages.{system}.{name}' for system in ('x86_64-linux', 'aarch64-linux') for name in package_names]

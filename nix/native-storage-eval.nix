@@ -55,7 +55,7 @@
   };
   evaluate = modules:
     import "${pkgs.path}/nixos/lib/eval-config.nix" {
-      inherit (pkgs) system;
+      system = pkgs.stdenv.hostPlatform.system;
       modules = modules ++ [adapterFixture];
     };
   eval = evaluate [module];

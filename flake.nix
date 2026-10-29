@@ -128,7 +128,7 @@
         ./nix/cutover.nix
         (lib.mkAliasOptionModule ["services" "db-harbor"] ["services" "harbor-db"])
       ];
-      services.harbor-db.package = lib.mkDefault self.packages.${pkgs.system}.harbor-db;
+      services.harbor-db.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db;
     };
     nixosModules.pg-backup = {
       imports = [storagePackageArgument ./nix/pg-backup.nix];
@@ -249,7 +249,7 @@
             export HARBOR_DB_TEST_TMPDIR="$TMPDIR"
             namespaceTools=${pkgs.util-linux}/bin
             if ! "$namespaceTools/unshare" --user --map-root-user --mount -- true 2>namespace-probe.log; then
-              ${pkgs.lib.optionalString (pkgs.system == "aarch64-linux") ''
+              ${pkgs.lib.optionalString (pkgs.stdenv.hostPlatform.system == "aarch64-linux") ''
               # Keep ARM lifecycle executables under test when QEMU's user
               # emulation cannot perform namespace syscalls itself.
               if grep -q 'unshare failed: Invalid argument' namespace-probe.log; then
@@ -259,12 +259,12 @@
               "$namespaceTools/unshare" --user --map-root-user --mount -- true
             fi
             export PATH="$namespaceTools:$PATH"
-            echo "Harbor namespace substrate: $namespaceTools (lifecycle executables remain ${pkgs.system})"
+            echo "Harbor namespace substrate: $namespaceTools (lifecycle executables remain ${pkgs.stdenv.hostPlatform.system})"
           '';
         };
       inherit (commonArgs) src;
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-      nativePackage = self.packages.${pkgs.system}.storage-lifecycle-rust;
+      nativePackage = self.packages.${pkgs.stdenv.hostPlatform.system}.storage-lifecycle-rust;
       nativeModule = self.nixosModules.native-storage;
     in
       {
@@ -276,7 +276,7 @@
         };
         native-cli-smoke = pkgs.callPackage ./nix/native-cli-smoke.nix {
           package = nativePackage;
-          testPackage = self.packages.${pkgs.system}.harbor-db-test;
+          testPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db-test;
         };
         module-eval = pkgs.callPackage ./nix/module-eval.nix {
           module = import ./nix/module.nix;
@@ -344,20 +344,20 @@
             cargoClippyExtraArgs = "-- -D warnings";
           });
       }
-      // pkgs.lib.optionalAttrs (pkgs.system == "x86_64-linux") {
+      // pkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
         btrfs-crash = pkgs.callPackage ./nix/test-btrfs-crash.nix {
           inherit (self.lib.testing) mkBtrfsCrashTest;
         };
         native-supervisor = pkgs.callPackage ./nix/test-native-supervisor.nix {
-          testPackage = self.packages.${pkgs.system}.harbor-db-test;
+          testPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db-test;
         };
         native-postgres-backup-service = pkgs.callPackage ./nix/test-postgres-backup-service.nix {
           inherit nativePackage;
-          testPackage = self.packages.${pkgs.system}.harbor-db-test;
+          testPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db-test;
         };
         native-source-local-recovery = pkgs.callPackage ./nix/test-source-local-recovery.nix {
           inherit nativePackage;
-          testPackage = self.packages.${pkgs.system}.harbor-db-test;
+          testPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db-test;
         };
         native-postgres-crash-rollback = pkgs.callPackage ./nix/test-postgres-lifecycle.nix {
           inherit nativePackage;
@@ -369,26 +369,26 @@
         native-postgres-writer-fence = pkgs.callPackage ./nix/test-postgres-writer-fence.nix {
           inherit nativePackage;
           interop = true;
-          testPackage = self.packages.${pkgs.system}.harbor-db-test;
+          testPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db-test;
         };
         native-application-provision = pkgs.callPackage ./nix/test-application-provision.nix {
           module = nativeModule;
           inherit nativePackage;
           interop = true;
-          testPackage = self.packages.${pkgs.system}.harbor-db-test;
+          testPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db-test;
         };
         native-application-backup = pkgs.callPackage ./nix/test-application-backup.nix {module = nativeModule;};
         native-application-transition = pkgs.callPackage ./nix/test-application-transition.nix {
           module = nativeModule;
           inherit nativePackage;
           interop = true;
-          testPackage = self.packages.${pkgs.system}.harbor-db-test;
+          testPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db-test;
         };
         native-application-postgres-transition = pkgs.callPackage ./nix/test-application-transition.nix {
           module = nativeModule;
           inherit nativePackage;
           interop = true;
-          testPackage = self.packages.${pkgs.system}.harbor-db-test;
+          testPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db-test;
           withPostgres = true;
         };
       });

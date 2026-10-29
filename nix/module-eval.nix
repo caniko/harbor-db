@@ -9,7 +9,7 @@
   runner = pkgs.writeShellScriptBin "module-eval-runner" "exit 0";
   evaluate = additional:
     import (pkgs.path + "/nixos/lib/eval-config.nix") {
-      inherit (pkgs) system;
+      system = pkgs.stdenv.hostPlatform.system;
       modules = [
         module
         {
