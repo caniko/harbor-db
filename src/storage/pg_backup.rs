@@ -209,7 +209,8 @@ fn chain(
 pub enum Slot {
     Missing,
     Lost,
-    Present,
+    /// Restart LSN of the slot.
+    Present(u64),
 }
 pub fn parse_slot(output: &str) -> Slot {
     let mut fields = output.trim().split('|');
@@ -220,7 +221,7 @@ pub fn parse_slot(output: &str) -> Slot {
     } else if restart.is_empty() {
         Slot::Lost
     } else {
-        Slot::Present
+        lsn(restart).map_or(Slot::Lost, Slot::Present)
     }
 }
 fn psql(psql: &Path, conninfo: &str, sql: &str) -> Result<String> {
@@ -290,11 +291,21 @@ pub fn mark_gap(
         return Ok(false);
     }
     let archive = wal_segments(root, segment_bytes)?;
-    let server: u64 = psql(psql_bin, conninfo, "IDENTIFY_SYSTEM")?
-        .split('|')
+    let identify = psql(psql_bin, conninfo, "IDENTIFY_SYSTEM")?;
+    let mut fields = identify.split('|');
+    let server: u64 = fields
         .next()
         .and_then(|id| id.parse().ok())
         .ok_or_else(|| invalid("unreadable IDENTIFY_SYSTEM"))?;
+    let server_timeline: u32 = fields.next().and_then(|t| t.parse().ok()).unwrap_or(0);
+    // A server behind the archive's newest timeline was restored and re-promoted: a sibling branch.
+    if archive.keys().any(|k| k.0 > server_timeline) && server_timeline != 0 {
+        return write_gap(
+            root,
+            slot,
+            "timeline went backwards; use a fresh backup root",
+        );
+    }
     if let Some((_, path)) = archive.values().next_back() {
         let found = segment_sysid(path).unwrap_or(0);
         if found != 0 && found != server {
@@ -305,8 +316,13 @@ pub fn mark_gap(
             );
         }
     }
-    if state == Slot::Present {
-        return Ok(false);
+    if let Slot::Present(restart) = state {
+        // A slot recreated while the receiver was down restarts past what the archive holds.
+        let newest = archive.keys().map(|k| k.1).max();
+        if newest.is_none_or(|n| restart / segment_bytes <= n + 1) {
+            return Ok(false);
+        }
+        return write_gap(root, slot, "slot restart point is beyond the archive");
     }
     if archive.is_empty() && fs::read_dir(root.join("base"))?.next().is_none() {
         return Ok(false);
@@ -384,6 +400,12 @@ pub fn finalize(f: &Finalize) -> Result<Value> {
     // A restore point plus a WAL switch gives recovery a target past the stop LSN
     // inside a segment that is complete in the archive.
     let label = format!("pgbackup_{}", f.id.replace(['.', '-'], "_"));
+    // ponytail: standby sources are unsupported for recoveryMeta (restore points need a primary).
+    if psql(f.sql_psql, f.sql_conninfo, "SELECT pg_is_in_recovery()")? == "t" {
+        return Err(invalid(
+            "recoveryMeta needs sqlConninfo to reach a primary, not a standby",
+        ));
+    }
     let marker = psql(
         f.sql_psql,
         f.sql_conninfo,
@@ -480,7 +502,7 @@ pub fn health(h: &Health) -> Vec<String> {
     let mut failures = Vec::new();
     let mut fail = |message: String| failures.push(message);
     match slot_state(h.psql, h.conninfo, h.slot) {
-        Ok(Slot::Present) => {}
+        Ok(Slot::Present(_)) => {}
         Ok(Slot::Missing) => fail(format!("replication slot {} is missing", h.slot)),
         Ok(Slot::Lost) => fail(format!("replication slot {} is lost", h.slot)),
         Err(e) => fail(format!("slot probe failed: {e}")),
@@ -644,9 +666,14 @@ mod tests {
         assert!(admit("MemAvailable: 1 kB\n", 0, 0).is_err());
     }
     #[test]
+    fn present_slot_parses_restart_lsn() {
+        assert_eq!(parse_slot("physical|0/5000000|1"), Slot::Present(0x5000000));
+        assert_eq!(parse_slot("physical|bogus|1"), Slot::Lost);
+    }
+    #[test]
     fn slot_output_classification() {
         assert_eq!(parse_slot("||"), Slot::Missing);
-        assert_eq!(parse_slot("physical|0/3000000|1"), Slot::Present);
+        assert_eq!(parse_slot("physical|0/3000000|1"), Slot::Present(0x3000000));
         assert_eq!(parse_slot("physical||"), Slot::Lost);
     }
     fn archive(parts: &[(u32, u64, bool)]) -> Archive {

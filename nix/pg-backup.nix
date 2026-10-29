@@ -129,7 +129,9 @@
         description = ''
           libpq connection string for the source used by `recoveryMeta`. The
           role needs EXECUTE on `pg_create_restore_point(text)` and
-          `pg_switch_wal()`. Defaults to the local postgres socket for
+          `pg_switch_wal()`, and must reach the primary (standby sources are
+            refused at finalize). A source restored to an earlier point, or
+            replaced, needs a fresh backup root. Defaults to the local postgres socket for
           role=source/both; required for role=target.
         '';
       };
