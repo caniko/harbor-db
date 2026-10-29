@@ -389,8 +389,19 @@ pub fn health(h: &Health) -> Vec<String> {
                     }
                     for t in timelines {
                         let mine = segments.iter().filter(|s| s.0 == t).map(|s| s.1);
-                        let (lo, hi) = (mine.clone().min().unwrap_or(0), mine.max().unwrap_or(0));
-                        let start = if t == timeline { first } else { lo };
+                        let hi = mine.max().unwrap_or(0);
+                        // A promoted timeline starts at its fork point from the history file.
+                        let start = if t == timeline {
+                            first
+                        } else {
+                            match fork_segment(h.root, t, h.segment_bytes) {
+                                Ok(start) => start,
+                                Err(e) => {
+                                    fail(format!("timeline {t}: {e}"));
+                                    continue;
+                                }
+                            }
+                        };
                         if let Err(e) = contiguous(&segments, t, start, hi, true) {
                             fail(format!("WAL not contiguous from the oldest base: {e}"));
                         }
@@ -407,6 +418,17 @@ pub fn health(h: &Health) -> Vec<String> {
         }
     }
     failures
+}
+/// First segment of a promoted timeline: its switchpoint in `<tli>.history`.
+fn fork_segment(root: &Path, timeline: u32, size: u64) -> Result<u64> {
+    let history = fs::read_to_string(root.join("wal").join(format!("{timeline:08X}.history")))
+        .map_err(|_| invalid("history file missing"))?;
+    let switch = history
+        .lines()
+        .rfind(|l| !l.trim().is_empty())
+        .and_then(|l| l.split_whitespace().nth(1))
+        .ok_or_else(|| invalid("unreadable history file"))?;
+    Ok(lsn(switch)? / size)
 }
 /// `(timeline, first segment)` of the oldest retained published base.
 fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64)> {
@@ -523,6 +545,20 @@ mod tests {
         assert!(contiguous(&have, 1, 3, 6, true).is_err());
         let hole = [seg(4, false), seg(6, false)];
         assert!(contiguous(&hole, 1, 4, 6, true).is_err());
+    }
+    #[test]
+    fn promoted_timeline_starts_at_its_switchpoint() {
+        let root = std::env::temp_dir().join(format!("pgb-fork-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("wal")).unwrap();
+        fs::write(
+            root.join("wal/00000002.history"),
+            "1\t0/5000060\tno recovery target specified\n",
+        )
+        .unwrap();
+        assert_eq!(fork_segment(&root, 2, 16 << 20).unwrap(), 5);
+        assert!(fork_segment(&root, 3, 16 << 20).is_err());
+        fs::remove_dir_all(&root).unwrap();
     }
     #[test]
     fn gap_marks_clears_and_rotates_generation() {
