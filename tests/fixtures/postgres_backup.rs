@@ -282,7 +282,7 @@ fn run(args: Args) -> Result<()> {
             "system_identifier": system_identifier, "source_hostname": "192.168.1.10", "backup_root": ROOT,
             "snapshot_file": format!("{ROOT}/evidence/records.json"), "receipt_file": format!("{ROOT}/evidence/recovery.json"),
             "off_host_receipt_file": format!("{ROOT}/evidence/off-host.json"), "max_age_seconds": 3600,
-            "verify_timeout_seconds": 300, "record_checks": [],
+            "verify_timeout_seconds": 300, "record_checks": [{"name": "records", "database": "postgres", "sql": "SELECT id, revision FROM backup_records ORDER BY id"}],
         },
     });
     g.shell("backup", format!("install -d -m 0700 -o postgres -g postgres /srv/authority {ROOT}/locks {ROOT}/evidence; install -m 0600 -o postgres -g postgres /dev/null {ROOT}/locks/mutate; printf '%s' {} > /srv/inspect.json; chown postgres:postgres /srv/inspect.json; chmod 0600 /srv/inspect.json; runuser -u postgres -- {}/bin/harbor-db-postgres --config /srv/inspect.json inspect-backup", q(&inspect.to_string()), q(&c.native_package)), true, "recovery-gate-inspect-backup-accepts-published-meta")?;
