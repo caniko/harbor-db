@@ -64,10 +64,16 @@ pub fn prune(
     if backups.is_empty() {
         return Ok(());
     }
+    // The tree LAST_SUCCESS names is the recovery target: failed-finalize trees
+    // (no sidecar) must never displace it.
+    let last_success = fs::read_to_string(root.join("LAST_SUCCESS"))
+        .map(|t| t.trim().to_owned())
+        .unwrap_or_default();
     let mut floors = BTreeMap::<u64, u64>::new();
     let mut expired = Vec::new();
     for (index, (path, time)) in backups.iter().enumerate() {
         let retain = index < 2
+            || (!last_success.is_empty() && path.file_name().is_some_and(|n| *n == *last_success))
             || *time >= now - base_days as f64 * 86400.0
             || protection.as_ref().is_some_and(|p| {
                 path.file_name()
