@@ -60,6 +60,14 @@ fn wal_segments(root: &Path, size: u64) -> Result<Archive> {
     for entry in fs::read_dir(root.join("wal"))? {
         let entry = entry?;
         if let Some((t, s, p)) = parse_segment(&entry.file_name().to_string_lossy(), size) {
+            // A complete name must be a regular file of exactly one segment.
+            if !p
+                && !entry
+                    .metadata()
+                    .is_ok_and(|m| m.is_file() && m.len() == size)
+            {
+                continue;
+            }
             if p && out.contains_key(&(t, s)) {
                 continue;
             }
@@ -192,8 +200,15 @@ fn chain(
     }
     let (mut legs, mut start) = (Vec::new(), first);
     for (timeline, fork) in &history[at..] {
-        let fork = fork / size;
-        legs.push((*timeline, start, fork));
+        let fork_at = *fork;
+        let fork = fork_at / size;
+        // At an exact boundary the fork segment belongs to the child alone.
+        let end = if fork_at % size == 0 {
+            fork.saturating_sub(1)
+        } else {
+            fork
+        };
+        legs.push((*timeline, start, end));
         start = fork;
     }
     if hi < start {
@@ -725,6 +740,12 @@ mod tests {
             "base stop beyond the fork"
         );
         assert_eq!(legs, vec![(1, 3, 5), (2, 5, 8)]);
+        fs::write(root.join("wal/00000005.history"), "1\t0/5000000\tx\n").unwrap();
+        assert_eq!(
+            chain(&root, size, 1, 3, 0x4000000, 5, 8).unwrap(),
+            vec![(1, 3, 4), (5, 5, 8)],
+            "boundary fork"
+        );
         // Parent segment 4 missing while the child is intact: the second leg alone passes.
         let have = archive(&[
             (1, 3, false),
@@ -746,6 +767,35 @@ mod tests {
         assert!(
             chain(&root, size, 7, 3, 0x3000000, 2, 9).is_err(),
             "base timeline not an ancestor"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
+    fn short_complete_wal_files_are_not_indexed() {
+        let root = std::env::temp_dir().join(format!("pgb-short-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("wal")).unwrap();
+        let size = 1 << 20;
+        let full = root.join(segment_name(1, 4, size));
+        fs::File::create(&full).unwrap().set_len(size).unwrap();
+        fs::write(root.join(segment_name(1, 5, size)), vec![0u8; 64]).unwrap();
+        fs::write(
+            root.join("wal")
+                .join(format!("{}.partial", segment_name(1, 6, size))),
+            b"x",
+        )
+        .unwrap();
+        fs::rename(&full, root.join("wal").join(segment_name(1, 4, size))).unwrap();
+        fs::rename(
+            root.join(segment_name(1, 5, size)),
+            root.join("wal").join(segment_name(1, 5, size)),
+        )
+        .unwrap();
+        let archive = wal_segments(&root, size).unwrap();
+        assert!(archive.contains_key(&(1, 4)) && archive.contains_key(&(1, 6)));
+        assert!(
+            !archive.contains_key(&(1, 5)),
+            "truncated file must not count"
         );
         fs::remove_dir_all(&root).unwrap();
     }
