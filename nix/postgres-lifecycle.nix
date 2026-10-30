@@ -58,17 +58,23 @@
         };
     }
     // lib.optionalAttrs (cfg.upgrade != null) {
-      upgrade = {
-        data_dir = cfg.upgrade.oldDataDir;
-        major = lib.versions.major cfg.upgrade.oldPackage.version;
-        package = toString cfg.upgrade.oldPackage;
-        initdb_args = cfg.upgrade.initdbArgs;
-        extra_config = cfg.upgrade.extraConfig;
-        validate_command = cfg.upgrade.validateCommand;
-        immutable_tools = true;
-        executable_files = cfg.upgrade.executableFiles;
-        copy_command = ["${pkgs.coreutils}/bin/cp" "-aL" "--reflink=auto"];
-      };
+      upgrade =
+        {
+          data_dir = cfg.upgrade.oldDataDir;
+          major = lib.versions.major cfg.upgrade.oldPackage.version;
+          package = toString cfg.upgrade.oldPackage;
+          initdb_args = cfg.upgrade.initdbArgs;
+          extra_config = cfg.upgrade.extraConfig;
+          validate_command = cfg.upgrade.validateCommand;
+        }
+        // lib.optionalAttrs cfg.upgrade.validate.recordChecks {
+          validate_records = true;
+        }
+        // {
+          immutable_tools = true;
+          executable_files = cfg.upgrade.executableFiles;
+          copy_command = ["${pkgs.coreutils}/bin/cp" "-aL" "--reflink=auto"];
+        };
     }));
   manifest =
     if cfg.upgrade == null
@@ -487,7 +493,18 @@ in {
           };
           validateCommand = mkOption {
             type = types.listOf types.str;
-            description = "Validation argv with an immutable store executable. Receives the offline staging directory as its final argument; must stop any server it starts before returning.";
+            default = [];
+            description = "Validation argv with an immutable store executable. Receives the offline staging directory as its final argument; must stop any server it starts before returning. May be empty when `validate.recordChecks` is enabled.";
+          };
+          validate.recordChecks = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Built-in validation: snapshot the `recovery.recordChecks` digests from the old
+              cluster copy before pg_upgrade, then start the staged cluster on a private Unix
+              socket (no TCP), recompute them and refuse publication on any difference.
+              Runs after `validateCommand` when both are set.
+            '';
           };
           executableFiles = mkOption {
             type = types.listOf types.str;
@@ -531,7 +548,7 @@ in {
         message = "PostgreSQL startup inhibition requires a normalized dedicated path disjoint from identity state and PostgreSQL data storage.";
       }
       {
-        assertion = cfg.upgrade == null || (cfg.upgrade.validateCommand != [] && lib.all immutableFiles.storePath (cfg.upgrade.executableFiles ++ [(lib.head cfg.upgrade.validateCommand)]));
+        assertion = cfg.upgrade == null || ((cfg.upgrade.validateCommand != [] || (cfg.upgrade.validate.recordChecks && cfg.recovery != null && cfg.recovery.recordChecks != {})) && lib.all immutableFiles.storePath (cfg.upgrade.executableFiles ++ (lib.take 1 cfg.upgrade.validateCommand)));
         message = "Staged PostgreSQL upgrades require consumer validation with immutable store executables and adapter files.";
       }
       {

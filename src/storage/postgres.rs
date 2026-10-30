@@ -176,6 +176,101 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+const OLD_PORT: u16 = 55438;
+const NEW_PORT: u16 = 55439;
+
+/// The upgrade itself compares recovery record checks before and after pg_upgrade.
+fn builtin_validation(settings: &Value) -> bool {
+    settings.get("validate_records") == Some(&json!(true))
+}
+
+/// Run the configured record checks against a stopped cluster on a private
+/// Unix socket (no TCP), then stop it again.
+fn cluster_records(
+    config: &Value,
+    data: &Path,
+    port: u16,
+    state: &Path,
+    lease: &durable::Lease,
+) -> Result<Value> {
+    let settings = config
+        .get("recovery")
+        .filter(|r| r["record_checks"].as_array().is_some_and(|c| !c.is_empty()))
+        .ok_or_else(|| invalid("record validation requires recovery record checks"))?;
+    let pg_ctl = path(config, "package")?
+        .join("bin/pg_ctl")
+        .display()
+        .to_string();
+    let quote = |p: &Path| super::postgres_drill::shell_quote(&p.display().to_string());
+    let started = worker(
+        vec![
+            pg_ctl.clone(),
+            "-D".into(),
+            data.display().to_string(),
+            "-l".into(),
+            "/dev/null".into(),
+            "-o".into(),
+            format!(
+                "-c listen_addresses='' -k {} -p {port} -c data_directory={}",
+                quote(state),
+                quote(data)
+            ),
+            "-w".into(),
+            "start".into(),
+        ],
+        None,
+        lease,
+    );
+    // A start that timed out may still be coming up: always try to stop it.
+    let records = match started {
+        Ok(()) => super::recovery::records(config, settings, state, port, &[lease.fd()]),
+        Err(e) => Err(e),
+    };
+    let stopped = worker(
+        vec![
+            pg_ctl,
+            "-D".into(),
+            data.display().to_string(),
+            "-m".into(),
+            "fast".into(),
+            "-w".into(),
+            "stop".into(),
+        ],
+        None,
+        lease,
+    );
+    let records = records?;
+    stopped?;
+    Ok(records)
+}
+
+/// Compare the staged cluster's record digests with the pre-upgrade snapshot.
+fn validate_records(
+    config: &Value,
+    staging: &Path,
+    state: &Path,
+    lease: &durable::Lease,
+) -> Result<()> {
+    let snapshot = state.join("upgrade-records.json");
+    let expected = durable::read_json(&snapshot)?;
+    let actual = cluster_records(config, staging, NEW_PORT, state, lease)?;
+    if actual != expected {
+        let differing: Vec<_> = expected
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(name, digest)| actual.get(name.as_str()) != Some(digest))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        return Err(invalid(format!(
+            "upgraded records differ from the pre-upgrade snapshot: {}",
+            differing.join(", ")
+        )));
+    }
+    fs::remove_file(snapshot)?;
+    Ok(())
+}
+
 pub fn upgrade_contract(config: &Value) -> Result<Value> {
     let settings = config
         .get("upgrade")
@@ -199,7 +294,7 @@ pub fn upgrade_contract(config: &Value) -> Result<Value> {
     }
     for key in ["copy_command", "validate_command"] {
         let argv = strings(settings.get(key))?;
-        if key == "validate_command" && argv.is_empty() {
+        if key == "validate_command" && argv.is_empty() && !builtin_validation(settings) {
             return Err(invalid("upgrade requires a consumer validation command"));
         }
         if let Some(executable) = argv.first() {
@@ -441,6 +536,10 @@ pub fn upgrade(config: &Value, retry_incomplete: bool) -> Result<()> {
         ]);
         worker(copy, None, &lease)?;
     }
+    if builtin_validation(settings) {
+        let records = cluster_records(&source, &source_copy, OLD_PORT, &state, &lease)?;
+        durable::write_json(&state.join("upgrade-records.json"), &records)?;
+    }
     let package = path(config, "package")?;
     let mut init = vec![
         package.join("bin/initdb").display().to_string(),
@@ -482,11 +581,16 @@ pub fn upgrade(config: &Value, retry_incomplete: bool) -> Result<()> {
     )?;
     pg_core::require_stopped_leased(&package, &staging, &[lease.fd()])?;
     let mut validator = strings(settings.get("validate_command"))?;
-    if validator.is_empty() {
+    if validator.is_empty() && !builtin_validation(settings) {
         return Err(invalid("upgrade requires a consumer validation command"));
     }
-    validator.push(staging.display().to_string());
-    worker(validator, None, &lease)?;
+    if !validator.is_empty() {
+        validator.push(staging.display().to_string());
+        worker(validator, None, &lease)?;
+    }
+    if builtin_validation(settings) {
+        validate_records(config, &staging, &state, &lease)?;
+    }
     pg_core::require_stopped_leased(&package, &staging, &[lease.fd()])?;
     if pg_core::control_digest(&original)? != digest {
         return Err(invalid("registered source changed during offline upgrade"));
