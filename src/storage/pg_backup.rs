@@ -319,7 +319,13 @@ pub fn mark_gap(
     if let Slot::Present(restart) = state {
         // A slot recreated while the receiver was down restarts past what the archive holds.
         let newest = archive.keys().map(|k| k.1).max();
-        if newest.is_none_or(|n| restart / segment_bytes <= n + 1) {
+        let has_base = fs::read_dir(root.join("base"))?.next().is_some();
+        // An empty archive next to retained bases means the WAL itself is gone.
+        let covered = match newest {
+            Some(n) => restart / segment_bytes <= n + 1,
+            None => !has_base,
+        };
+        if covered {
             return Ok(false);
         }
         return write_gap(root, slot, "slot restart point is beyond the archive");

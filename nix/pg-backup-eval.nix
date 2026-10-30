@@ -821,5 +821,15 @@ in
           && !failing (named [{services.harbor-db.pgBackup.source.hostName = "10.0.0.9";}]);
         message = "A legacy host-named root must not equal a named target's root.";
       }
+      {
+        name = "marker-connection-rejects-embedded-passwords";
+        assertion = let
+          failing = conninfo:
+            lib.any (a: !a.assertion && lib.hasInfix "must not embed a password" a.message)
+            (named [{services.harbor-db.pgBackup.targets.thething.baseBackup.sqlConninfo = conninfo;}]).assertions;
+        in
+          failing "host=h user=u password=secret" && !failing "host=h user=u passfile=/run/secrets/pgpass";
+        message = "Passwords must not be rendered into the unit script.";
+      }
     ];
   }

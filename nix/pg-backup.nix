@@ -592,6 +592,11 @@ in {
           message = "services.harbor-db.pgBackup requires walDays >= baseBackupDays + 1 for safe PITR.${tag}";
         }
         {
+          # The connection string lands in the world-readable unit script.
+          assertion = base.sqlConninfo == null || builtins.match ".*[Pp]assword[[:space:]]*=.*" base.sqlConninfo == null;
+          message = "services.harbor-db.pgBackup baseBackup.sqlConninfo must not embed a password; use passfile=/path (the store is world-readable).${tag}";
+        }
+        {
           assertion = !base.recoveryMeta || ts.receiveWal.enable;
           message = "services.harbor-db.pgBackup baseBackup.recoveryMeta requires receiveWal.enable (it waits for the archived WAL).${tag}";
         }
