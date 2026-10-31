@@ -7130,6 +7130,7 @@ resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
 selectors = [
   "managed_backup_outlives_the_short_probe_deadline",
   "independent_executor_tolerates_an_unsearchable_source_primary_path",
+  "manifest_checksum_mismatch_is_rejected",
 ]
 
 [[cases]]

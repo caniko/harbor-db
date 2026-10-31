@@ -352,11 +352,55 @@ pub fn mark_gap(
     write_gap(root, slot, "slot recreated")
 }
 /// `post_backup_lsn` of the base LAST_SUCCESS names, when it has metadata.
-fn recovery_target(root: &Path) -> Option<u64> {
+/// The newest base's recovery target and the timeline it lies on.
+fn recovery_target(root: &Path) -> Option<(u64, u64)> {
     let id = fs::read_to_string(root.join("LAST_SUCCESS")).ok()?;
     let meta =
         durable::read_json(&root.join("base").join(format!("{}.meta.json", id.trim()))).ok()?;
-    lsn(meta["post_backup_lsn"].as_str()?).ok()
+    Some((
+        meta["timeline"].as_u64()?,
+        lsn(meta["post_backup_lsn"].as_str()?).ok()?,
+    ))
+}
+/// LSN the archive must reach: the target counts when it lies on the newest timeline,
+/// otherwise a descendant chain would already have to cover it.
+fn reach(target: Option<(u64, u64)>, newest: u32, stop: u64) -> u64 {
+    match target {
+        Some((t, lsn)) if t == u64::from(newest) => lsn.max(stop),
+        _ => stop,
+    }
+}
+/// An interrupted `remove_gap` leaves its marker as `.gap.clearing.*`; it still counts.
+fn gap_present(root: &Path) -> bool {
+    gap_path(root).exists() || clearing_markers(root).next().is_some()
+}
+fn clearing_markers(root: &Path) -> impl Iterator<Item = PathBuf> {
+    fs::read_dir(root.join("wal"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with(".gap.clearing."))
+        })
+}
+/// Put a marker orphaned by a crash back as `.gap` unless a newer one is there.
+/// ponytail: assumes a single finalizer at a time; add a lock if that changes.
+fn recover_clearing(root: &Path) -> Result<()> {
+    for orphan in clearing_markers(root).collect::<Vec<_>>() {
+        let ms = |p: &Path| {
+            durable::read_json(p)
+                .ok()
+                .and_then(|g| g["detected_ms"].as_u64())
+        };
+        if ms(&orphan) > ms(&gap_path(root)) {
+            fs::rename(&orphan, gap_path(root))?;
+        } else {
+            fs::remove_file(&orphan)?;
+        }
+    }
+    durable::sync_directory(&root.join("wal"))
 }
 /// A missing segment between the first and last retained segment of any timeline.
 fn has_hole(archive: &Archive) -> bool {
@@ -380,6 +424,7 @@ fn write_gap(root: &Path, slot: &str, reason: &str) -> Result<bool> {
 /// Base started at `started` and verified: it post-dates the gap, so it closes it.
 /// Returns the closed marker's `detected_ms`, its identity for `remove_gap`.
 fn gap_closed_by(root: &Path, started: u64) -> Result<Option<u64>> {
+    recover_clearing(root)?;
     match durable::read_json(&gap_path(root)) {
         Ok(gap) => Ok(gap["detected_ms"].as_u64().filter(|t| *t < started)),
         Err(_) if !gap_path(root).exists() => Ok(None),
@@ -581,7 +626,7 @@ pub fn health(h: &Health) -> Vec<String> {
             fail(format!("receiver {unit} is not active"));
         }
     }
-    if gap_path(h.root).exists() {
+    if gap_present(h.root) {
         fail("WAL gap marker present; take a new base backup".into());
     }
     match wal_segments(h.root, h.segment_bytes) {
@@ -606,12 +651,7 @@ pub fn health(h: &Health) -> Vec<String> {
                         .range((newest, 0)..=(newest, u64::MAX))
                         .next_back()
                         .map_or(0, |(k, _)| k.1);
-                    // The recovery target is on the base's own timeline only when that is the newest;
-                    // otherwise the descendant chain below already reaches it.
-                    let reach = match recovery_target(h.root) {
-                        Some(t) if timeline == newest => t.max(stop),
-                        _ => stop,
-                    };
+                    let reach = reach(recovery_target(h.root), newest, stop);
                     let legs = if newest < timeline {
                         Err(invalid(format!("no WAL on timeline {timeline}")))
                     } else if hi < reach / h.segment_bytes {
@@ -911,10 +951,13 @@ mod tests {
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
         durable::write_json(
             &root.join("base/b1.meta.json"),
-            &json!({"post_backup_lsn":"0/7000028"}),
+            &json!({"timeline":2,"post_backup_lsn":"0/7000028"}),
         )
         .unwrap();
-        assert_eq!(recovery_target(&root), Some(0x7000028));
+        assert_eq!(recovery_target(&root), Some((2, 0x7000028)));
+        // An ancestor-timeline base must still reach a target on the newest timeline.
+        assert_eq!(reach(recovery_target(&root), 2, 0x5000000), 0x7000028);
+        assert_eq!(reach(recovery_target(&root), 3, 0x5000000), 0x5000000);
         fs::remove_dir_all(&root).unwrap();
     }
     #[test]
@@ -995,6 +1038,14 @@ mod tests {
             durable::read_json(&gap_path(&root)).unwrap()["detected_ms"],
             250
         );
+        // A crash mid-clear leaves only the clearing file: health still sees a gap,
+        // and the next check restores it unless a newer marker exists.
+        fs::remove_file(gap_path(&root)).unwrap();
+        let orphan = root.join("wal/.gap.clearing.1");
+        durable::write_json(&orphan, &json!({"detected_ms": 400})).unwrap();
+        assert!(gap_present(&root));
+        assert_eq!(gap_closed_by(&root, 500).unwrap(), Some(400));
+        assert!(gap_path(&root).exists() && !orphan.exists());
         assert_ne!(generation(&root).unwrap(), before);
         fs::remove_dir_all(&root).unwrap();
     }
