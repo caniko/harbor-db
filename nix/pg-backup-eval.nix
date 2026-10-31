@@ -831,5 +831,21 @@ in
           failing "host=h user=u password=secret" && failing "postgresql://u:secret@h/postgres" && !failing "postgresql://u@h/postgres" && !failing "host=h user=u passfile=/run/secrets/pgpass";
         message = "Passwords must not be rendered into the unit script.";
       }
+      {
+        name = "recovery-meta-excludes-source-local-recovery";
+        assertion = let
+          failing = c: lib.any (a: !a.assertion && lib.hasInfix "cannot be combined with sourceLocalRecovery" a.message) c.assertions;
+          meta = {
+            baseBackup = {
+              recoveryMeta = true;
+              sqlConninfo = "host=h user=u";
+            };
+          };
+        in
+          failing (localEval.extendModules {modules = [{services.harbor-db.pgBackup.targetSettings = meta;}];}).config
+          && failing (localEval.extendModules {modules = [{services.harbor-db.pgBackup.targets.extra = {source.hostName = "10.0.0.2";} // meta;}];}).config
+          && !failing localEval.config;
+        message = "recoveryMeta must not combine with sourceLocalRecovery, for the legacy or named targets.";
+      }
     ];
   }

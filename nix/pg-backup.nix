@@ -653,6 +653,11 @@ in {
               message = "services.harbor-db.pgBackup target backup roots collide (a legacy source host name sanitizes to a named target's name); rename the target or relocate backupDir.";
             }
             {
+              # source-local-v1 keeps a timestamp in LAST_SUCCESS; recoveryMeta writes the backup id.
+              assertion = !cfg.targetSettings.sourceLocalRecovery.enable || lib.all (t: !t.ts.baseBackup.recoveryMeta) (lib.attrValues targetSources);
+              message = "services.harbor-db.pgBackup baseBackup.recoveryMeta cannot be combined with sourceLocalRecovery (it changes the LAST_SUCCESS contract).";
+            }
+            {
               assertion = !targetRole || lib.length slotClaims == lib.length (lib.unique slotClaims);
               message = "services.harbor-db.pgBackup targets sharing a source host and port need distinct replication slot names.";
             }

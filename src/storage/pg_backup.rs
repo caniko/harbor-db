@@ -613,6 +613,15 @@ fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64, u64, PathBuf)>
                     >= floor
             })
     });
+    // Once any base carries recovery metadata, failed-finalize (sidecar-less) trees are not recovery bases.
+    let has_meta = |t: &PathBuf| {
+        let mut m = t.as_os_str().to_owned();
+        m.push(".meta.json");
+        Path::new(&m).is_file()
+    };
+    if trees.iter().any(has_meta) {
+        trees.retain(has_meta);
+    }
     let oldest = trees
         .first()
         .ok_or_else(|| invalid("no retained base backup"))?;
@@ -796,6 +805,28 @@ mod tests {
         assert!(
             !archive.contains_key(&(1, 5)),
             "truncated file must not count"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
+    fn health_ignores_failed_finalize_trees_older_than_the_valid_base() {
+        let root = std::env::temp_dir().join(format!("pgb-oldest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let size = 16u64 << 20;
+        for (id, start) in [("a-failed", "0/1000000"), ("b-valid", "0/5000000")] {
+            let t = root.join("base").join(id);
+            fs::create_dir_all(&t).unwrap();
+            let m = json!({"WAL-Ranges":[{"Timeline":1,"Start-LSN":start,"End-LSN":"0/6000000"}]});
+            durable::write_json(&t.join("backup_manifest"), &m).unwrap();
+        }
+        fs::write(root.join("base/b-valid.meta.json"), "{}").unwrap();
+        let (_, first, _, tree) = oldest_base_range(&root, size).unwrap();
+        assert_eq!((first, tree.ends_with("b-valid")), (5, true));
+        fs::remove_file(root.join("base/b-valid.meta.json")).unwrap();
+        assert_eq!(
+            oldest_base_range(&root, size).unwrap().1,
+            1,
+            "no metadata anywhere: all trees count"
         );
         fs::remove_dir_all(&root).unwrap();
     }
