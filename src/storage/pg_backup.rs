@@ -585,14 +585,21 @@ pub fn health(h: &Health) -> Vec<String> {
                 Err(e) => fail(format!("retained base backups unusable: {e}")),
                 Ok((timeline, first, stop, tree)) => {
                     // The newest published base's recovery target must be archived too.
-                    let stop = recovery_target(h.root).map_or(stop, |t| t.max(stop));
                     let newest = archive.keys().map(|k| k.0).max().unwrap_or(0);
                     let hi = archive
                         .range((newest, 0)..=(newest, u64::MAX))
                         .next_back()
                         .map_or(0, |(k, _)| k.1);
+                    // The recovery target is on the base's own timeline only when that is the newest;
+                    // otherwise the descendant chain below already reaches it.
+                    let reach = match recovery_target(h.root) {
+                        Some(t) if timeline == newest => t.max(stop),
+                        _ => stop,
+                    };
                     let legs = if newest < timeline {
                         Err(invalid(format!("no WAL on timeline {timeline}")))
+                    } else if hi < reach / h.segment_bytes {
+                        Err(invalid("archived WAL ends before the recovery target"))
                     } else {
                         chain(h.root, h.segment_bytes, timeline, first, stop, newest, hi)
                     };
