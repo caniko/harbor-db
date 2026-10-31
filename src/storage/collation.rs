@@ -23,14 +23,12 @@ pub struct Options {
 const DRIFT_SQL: &str = "SELECT json_build_object('database', datname, 'quoted', format('%I', datname), 'recorded', datcollversion, 'actual', pg_database_collation_actual_version(oid)) FROM pg_database WHERE datallowconn AND datname <> 'template0' ORDER BY datname;";
 
 /// Explicit libc/ICU collations whose recorded version differs from the provider's.
-const COLLATION_SQL: &str = "SELECT format('%I.%I', n.nspname, c.collname) FROM pg_collation c JOIN pg_namespace n ON n.oid = c.collnamespace WHERE c.collprovider IN ('c', 'i') AND c.collversion IS DISTINCT FROM pg_collation_actual_version(c.oid) ORDER BY 1;";
+const COLLATION_SQL: &str = "SELECT json_build_object('name', format('%I.%I', n.nspname, c.collname), 'actual', pg_collation_actual_version(c.oid)) FROM pg_collation c JOIN pg_namespace n ON n.oid = c.collnamespace WHERE c.collprovider IN ('c', 'i') AND c.collversion IS DISTINCT FROM pg_collation_actual_version(c.oid) ORDER BY n.nspname, c.collname;";
 
-/// database default or an explicit libc collation other than C/POSIX. Every
-/// partial or expression index is included because collations used inside the
-/// predicate or expression are not recorded for the default collation (safe
-/// direction).
-/// collation is not recorded for the default collation (safe direction).
-/// Explicit ICU/builtin collations carry their own versions and are ignored.
+/// Indexes whose ordered key columns (INCLUDE columns excluded) resolve to the
+/// drifted database default or to any drifted explicit collation (libc or ICU).
+/// Every partial or expression index is included because collations used inside
+/// the predicate or expression are not recorded (safe direction).
 const INDEX_SQL: &str = "
 SELECT json_build_object(
   'qualified', format('%I.%I', n.nspname, c.relname),
@@ -50,10 +48,15 @@ WHERE c.relkind = 'i' AND a.amname <> 'hash' AND (
   EXISTS (
     SELECT 1 FROM unnest(i.indcollation::oid[]) WITH ORDINALITY k(coll, pos)
     WHERE k.pos <= i.indnkeyatts AND k.coll <> 0 AND (
-      (k.coll = 100 AND d.datlocprovider IN ('c', 'i') AND (d.datlocprovider = 'i' OR d.datcollate NOT IN ('C', 'POSIX')))
-      OR EXISTS (SELECT 1 FROM pg_collation co WHERE co.oid = k.coll AND co.collprovider = 'c' AND co.collcollate NOT IN ('C', 'POSIX'))))
+      (k.coll = 100 AND d.datcollversion IS DISTINCT FROM pg_database_collation_actual_version(d.oid))
+      OR EXISTS (SELECT 1 FROM pg_collation co WHERE co.oid = k.coll AND co.collprovider IN ('c', 'i') AND co.collversion IS DISTINCT FROM pg_collation_actual_version(co.oid))))
   OR i.indpred IS NOT NULL OR i.indexprs IS NOT NULL)
 ORDER BY pg_relation_size(c.oid), c.relname;";
+
+pub struct Collation {
+    pub name: String,
+    pub actual: String,
+}
 
 #[derive(Debug, PartialEq)]
 pub struct Item {
@@ -102,7 +105,14 @@ pub fn parse_items(output: &str) -> Result<Vec<Item>> {
     Ok(items)
 }
 
-fn psql(config: &Value, options: &Options, database: &str, sql: &str) -> Result<String> {
+/// Names are passed through PGDATABASE, which libpq does not expand as a
+/// connection string, so `=`, spaces and quotes in a name stay literal.
+fn psql_spec(
+    config: &Value,
+    options: &Options,
+    database: &str,
+    sql: &str,
+) -> Result<process::CommandSpec> {
     let mut spec = pg_core::command(
         vec![
             pg_core::path(config, "package")?
@@ -114,7 +124,6 @@ fn psql(config: &Value, options: &Options, database: &str, sql: &str) -> Result<
             format!("--host={}", options.socket_dir.display()),
             format!("--port={}", options.port),
             "--username=postgres".into(),
-            format!("--dbname={database}"),
             "--set=ON_ERROR_STOP=1".into(),
             "--tuples-only".into(),
             "--no-align".into(),
@@ -131,6 +140,15 @@ fn psql(config: &Value, options: &Options, database: &str, sql: &str) -> Result<
         .as_mut()
         .unwrap()
         .insert("PGCONNECT_TIMEOUT".into(), "10".into());
+    spec.environment
+        .as_mut()
+        .unwrap()
+        .insert("PGDATABASE".into(), database.into());
+    Ok(spec)
+}
+
+fn psql(config: &Value, options: &Options, database: &str, sql: &str) -> Result<String> {
+    let spec = psql_spec(config, options, database, sql)?;
     let output = process::run(&spec)?;
     if !output.status.success() {
         return Err(invalid(format!(
@@ -168,7 +186,7 @@ fn refresh_database(
     quoted: &str,
     actual: &str,
     database_drift: bool,
-    collations: &[String],
+    collations: &[Collation],
 ) -> Result<()> {
     let items = parse_items(&psql(config, options, database, INDEX_SQL)?)?;
     for item in &items {
@@ -181,6 +199,17 @@ fn refresh_database(
         return Ok(());
     }
     let state = state_path(config, database)?;
+    // The key covers the default and every drifted named collation's actual
+    // version, so a further provider change restarts the rebuild.
+    let key = format!(
+        "{actual};{}",
+        collations
+            .iter()
+            .map(|c| format!("{}={}", c.name, c.actual))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let actual = key.as_str();
     let mut done = load_done(&state, actual);
     for item in &items {
         if done.contains(&item.qualified) {
@@ -210,7 +239,7 @@ fn refresh_database(
             config,
             options,
             database,
-            &format!("ALTER COLLATION {collation} REFRESH VERSION;"),
+            &format!("ALTER COLLATION {} REFRESH VERSION;", collation.name),
         )?;
     }
     let _ = std::fs::remove_file(&state);
@@ -262,11 +291,17 @@ pub fn run(config: &Value, options: &Options) -> Result<()> {
             continue;
         }
         let database_drift = v["recorded"] != v["actual"];
-        let collations: Vec<String> = psql(config, options, name, COLLATION_SQL)?
+        let mut collations = vec![];
+        for line in psql(config, options, name, COLLATION_SQL)?
             .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(str::to_owned)
-            .collect();
+            .filter(|l| !l.trim().is_empty())
+        {
+            let c = codec::decode_str(line)?;
+            collations.push(Collation {
+                name: super::string(&c, "name")?.to_owned(),
+                actual: c["actual"].as_str().unwrap_or_default().to_owned(),
+            });
+        }
         if !database_drift && collations.is_empty() {
             continue;
         }
@@ -274,7 +309,7 @@ pub fn run(config: &Value, options: &Options) -> Result<()> {
         let actual = v["actual"].as_str().unwrap_or_default();
         emit(
             json!({"event": "drift", "database": name, "recorded": v["recorded"],
-            "actual": v["actual"], "collations": collations}),
+            "actual": v["actual"], "collations": collations.iter().map(|c| &c.name).collect::<Vec<_>>()}),
         );
         if let Err(error) = refresh_database(
             config,
@@ -332,5 +367,31 @@ mod tests {
             "DROP INDEX CONCURRENTLY IF EXISTS public.\"a b\";"
         );
         assert!(parse_items("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn database_names_stay_literal_and_index_sql_covers_named_collations() {
+        let config = json!({"package": "/nix/store/pg"});
+        let options = Options {
+            socket_dir: "/run/postgresql".into(),
+            port: 5432,
+            dry_run: true,
+            fail_on_drift: false,
+            verify: false,
+            databases: vec![],
+        };
+        let name = "a=b host=evil 'q'";
+        let spec = psql_spec(&config, &options, name, "SELECT 1").unwrap();
+        assert_eq!(spec.environment.as_ref().unwrap()["PGDATABASE"], name);
+        assert!(
+            spec.argv
+                .iter()
+                .all(|a| !a.contains("dbname") && !a.contains(name))
+        );
+        // Any drifted named collation (libc or ICU) selects its key indexes.
+        assert!(
+            INDEX_SQL.contains("co.collprovider IN ('c', 'i') AND co.collversion IS DISTINCT FROM")
+        );
+        assert!(!INDEX_SQL.contains("datcollate NOT IN"));
     }
 }

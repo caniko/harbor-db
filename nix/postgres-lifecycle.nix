@@ -97,7 +97,15 @@
     (toString cfg.switchAdoption.port)
   ]);
   serviceUserCommand = "${pkgs.util-linux}/bin/runuser -u postgres -- ${command}";
-  collationArgs = lib.escapeShellArgs ["--socket-dir" "/run/postgresql" "--port" (toString (pg.settings.port or 5432))];
+  collationSocketDir = let
+    raw = pg.settings.unix_socket_directories or "/run/postgresql";
+    first =
+      if builtins.isList raw
+      then lib.head raw
+      else lib.head (lib.splitString "," raw);
+  in
+    lib.trim first;
+  collationArgs = lib.escapeShellArgs ["--socket-dir" collationSocketDir "--port" (toString (pg.settings.port or 5432))];
   collationHardening = {
     Type = "oneshot";
     User = "postgres";
