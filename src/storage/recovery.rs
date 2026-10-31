@@ -352,11 +352,22 @@ fn selected_backup(
     if meta.get("epoch_id").is_none() {
         return Err(invalid("missing backup epoch"));
     }
+    let manifest_sha256 = digest(&manifest)?;
+    check_manifest_checksum(&meta, &manifest_sha256)?;
     Ok((
         directory,
-        json!({"backup_id":identifier,"system_identifier":settings["system_identifier"],"major":major(config)?,"epoch_id":meta["epoch_id"],"manifest_sha256":digest(&manifest)?,"recovery_target_lsn":meta["post_backup_lsn"],"metadata_sha256":digest(&metadata)?}),
+        json!({"backup_id":identifier,"system_identifier":settings["system_identifier"],"major":major(config)?,"epoch_id":meta["epoch_id"],"manifest_sha256":manifest_sha256,"recovery_target_lsn":meta["post_backup_lsn"],"metadata_sha256":digest(&metadata)?}),
         None,
     ))
+}
+/// Finalization records the manifest digest; a manifest changed since is rejected.
+/// Metas written before the field existed carry none and stay accepted.
+fn check_manifest_checksum(meta: &Value, actual: &str) -> Result<()> {
+    match meta.get("checksum") {
+        None => Ok(()),
+        Some(c) if c.as_str() == Some(actual) => Ok(()),
+        Some(_) => Err(invalid("backup manifest changed after finalization")),
+    }
 }
 fn verify_timeout(config: &Value) -> Result<Duration> {
     let seconds = config["recovery"]["verify_timeout_seconds"]
@@ -1651,6 +1662,13 @@ pub fn prepare_at(
 mod tests {
     use super::*;
 
+    #[test]
+    fn manifest_checksum_mismatch_is_rejected() {
+        let meta = json!({"checksum": "aa"});
+        assert!(check_manifest_checksum(&meta, "aa").is_ok());
+        assert!(check_manifest_checksum(&meta, "bb").is_err());
+        assert!(check_manifest_checksum(&json!({}), "bb").is_ok());
+    }
     #[test]
     fn independent_executor_tolerates_an_unsearchable_source_primary_path() {
         use std::os::unix::fs::PermissionsExt;

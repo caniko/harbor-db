@@ -378,10 +378,11 @@ fn write_gap(root: &Path, slot: &str, reason: &str) -> Result<bool> {
     Ok(true)
 }
 /// Base started at `started` and verified: it post-dates the gap, so it closes it.
-fn gap_closed_by(root: &Path, started: u64) -> Result<bool> {
+/// Returns the closed marker's `detected_ms`, its identity for `remove_gap`.
+fn gap_closed_by(root: &Path, started: u64) -> Result<Option<u64>> {
     match durable::read_json(&gap_path(root)) {
-        Ok(gap) => Ok(gap["detected_ms"].as_u64().is_some_and(|t| t < started)),
-        Err(_) if !gap_path(root).exists() => Ok(false),
+        Ok(gap) => Ok(gap["detected_ms"].as_u64().filter(|t| *t < started)),
+        Err(_) if !gap_path(root).exists() => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -389,18 +390,33 @@ fn gap_closed_by(root: &Path, started: u64) -> Result<bool> {
 fn set_floor(root: &Path, started: u64) -> Result<()> {
     durable::atomic_write(&root.join("BASE_FLOOR"), format!("{started}\n").as_bytes())
 }
-fn remove_gap(root: &Path) -> Result<()> {
-    fs::remove_file(gap_path(root))?;
+/// Compare-and-remove: only the marker seen at check time (`detected_ms`) is
+/// cleared; a newer one the receiver wrote since survives.
+fn remove_gap(root: &Path, seen: u64) -> Result<()> {
+    let taken = root.join(format!("wal/.gap.clearing.{}", std::process::id()));
+    match fs::rename(gap_path(root), &taken) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
+    if durable::read_json(&taken)?["detected_ms"].as_u64() != Some(seen) {
+        // Newer marker: put it back unless an even newer one already exists.
+        match fs::hard_link(&taken, gap_path(root)) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
+            _ => {}
+        }
+    }
+    fs::remove_file(&taken)?;
     durable::sync_directory(&root.join("wal"))
 }
 /// Legacy-marker deployments: clear a gap after a verified later base.
 pub fn clear_gap(root: &Path, started: u64) -> Result<bool> {
-    if !gap_closed_by(root, started)? {
+    let Some(seen) = gap_closed_by(root, started)? else {
         return Ok(false);
-    }
+    };
     rotate(root)?;
     set_floor(root, started)?;
-    remove_gap(root)?;
+    remove_gap(root, seen)?;
     Ok(true)
 }
 
@@ -496,7 +512,7 @@ pub fn finalize(f: &Finalize) -> Result<Value> {
         .map(|b| format!("{b:02x}"))
         .collect();
     let closes_gap = gap_closed_by(f.root, f.started)?;
-    let epoch = if closes_gap {
+    let epoch = if closes_gap.is_some() {
         set_floor(f.root, f.started)?;
         rotate(f.root)?
     } else {
@@ -523,8 +539,8 @@ pub fn finalize(f: &Finalize) -> Result<Value> {
         &f.root.join("LAST_SUCCESS"),
         format!("{}\n", f.id).as_bytes(),
     )?;
-    if closes_gap {
-        remove_gap(f.root)?;
+    if let Some(seen) = closes_gap {
+        remove_gap(f.root, seen)?;
     }
     Ok(meta)
 }
@@ -970,6 +986,15 @@ mod tests {
         assert!(gap_path(&root).exists());
         assert!(clear_gap(&root, 101).unwrap());
         assert!(!gap_path(&root).exists());
+        // A marker replaced between check and clear survives.
+        durable::write_json(&gap_path(&root), &json!({"detected_ms": 200})).unwrap();
+        let seen = gap_closed_by(&root, 300).unwrap().unwrap();
+        durable::write_json(&gap_path(&root), &json!({"detected_ms": 250})).unwrap();
+        remove_gap(&root, seen).unwrap();
+        assert_eq!(
+            durable::read_json(&gap_path(&root)).unwrap()["detected_ms"],
+            250
+        );
         assert_ne!(generation(&root).unwrap(), before);
         fs::remove_dir_all(&root).unwrap();
     }
