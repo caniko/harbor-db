@@ -341,7 +341,10 @@ pub fn mark_gap(
         };
         // A hole inside any retained timeline is a gap too.
         let hole = has_hole(&archive);
-        if covered && !hole {
+        // So is WAL missing before the first archived segment the oldest base needs.
+        let lead = oldest_base_range(root, segment_bytes)
+            .is_ok_and(|(t, first, _, _)| leading_gap(&archive, t, first));
+        if covered && !hole && !lead {
             return Ok(false);
         }
         return write_gap(root, slot, "slot restart point is beyond the archive");
@@ -405,6 +408,13 @@ fn recover_clearing(root: &Path) -> Result<()> {
         }
     }
     durable::sync_directory(&root.join("wal"))
+}
+/// The archive's first segment on `timeline` starts after `first`, or it has none.
+fn leading_gap(archive: &Archive, timeline: u32, first: u64) -> bool {
+    archive
+        .range((timeline, 0)..=(timeline, u64::MAX))
+        .next()
+        .is_none_or(|(k, _)| k.1 > first)
 }
 /// A missing segment between the first and last retained segment of any timeline.
 fn has_hole(archive: &Archive) -> bool {
@@ -947,6 +957,13 @@ mod tests {
         assert!(!has_hole(&ok));
         let ancestor = archive(&[(1, 3, false), (1, 5, false), (2, 6, false), (2, 7, false)]);
         assert!(has_hole(&ancestor));
+    }
+    #[test]
+    fn wal_missing_before_the_archive_start_is_a_leading_gap() {
+        let tail = archive(&[(1, 110, false), (1, 120, false)]);
+        assert!(leading_gap(&tail, 1, 100));
+        assert!(!leading_gap(&tail, 1, 110));
+        assert!(leading_gap(&tail, 2, 100));
     }
     #[test]
     fn recovery_target_reads_last_success_metadata() {
