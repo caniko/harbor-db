@@ -828,7 +828,7 @@ in
             lib.any (a: !a.assertion && lib.hasInfix "must not embed a password" a.message)
             (named [{services.harbor-db.pgBackup.targets.thething.baseBackup.sqlConninfo = conninfo;}]).assertions;
         in
-          failing "host=h user=u password=secret" && failing "postgresql://u:secret@h/postgres" && !failing "postgresql://u@h/postgres" && !failing "host=h user=u passfile=/run/secrets/pgpass";
+          failing "host=h user=u password=secret" && failing "postgresql://u@h/db?%70assword=x" && failing "postgresql://u:secret@h/postgres" && !failing "postgresql://u@h/postgres" && !failing "host=h user=u passfile=/run/secrets/pgpass";
         message = "Passwords must not be rendered into the unit script.";
       }
       {
@@ -846,6 +846,14 @@ in
           && failing (localEval.extendModules {modules = [{services.harbor-db.pgBackup.targets.extra = {source.hostName = "10.0.0.2";} // meta;}];}).config
           && !failing localEval.config;
         message = "recoveryMeta must not combine with sourceLocalRecovery, for the legacy or named targets.";
+      }
+      {
+        name = "loopback-aliases-share-slot-endpoints";
+        assertion = let
+          failing = c: lib.any (a: !a.assertion && lib.hasInfix "distinct replication slot names" a.message) c.assertions;
+        in
+          failing (named [{services.harbor-db.pgBackup.targets.a = {source.hostName = "localhost";};} {services.harbor-db.pgBackup.targets.b = {source.hostName = "127.0.0.1";};}]);
+        message = "localhost and 127.0.0.1 are the same endpoint for slot uniqueness.";
       }
     ];
   }

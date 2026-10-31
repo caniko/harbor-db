@@ -593,8 +593,8 @@ in {
         }
         {
           # The connection string lands in the world-readable unit script.
-          assertion = base.sqlConninfo == null || builtins.match ".*[Pp]assword[[:space:]]*=.*" base.sqlConninfo == null && builtins.match "[a-z]+://[^/@]*:[^/@]*@.*" base.sqlConninfo == null;
-          message = "services.harbor-db.pgBackup baseBackup.sqlConninfo must not embed a password; use passfile=/path (the store is world-readable).${tag}";
+          assertion = base.sqlConninfo == null || builtins.match ".*[Pp]assword[[:space:]]*=.*" base.sqlConninfo == null && builtins.match "[a-z]+://[^/@]*:[^/@]*@.*" base.sqlConninfo == null && !lib.hasInfix "%" base.sqlConninfo;
+          message = "services.harbor-db.pgBackup baseBackup.sqlConninfo must not embed a password or use percent-encoding; use passfile=/path (the store is world-readable).${tag}";
         }
         {
           assertion = !base.recoveryMeta || ts.receiveWal.enable;
@@ -627,7 +627,11 @@ in {
       ])
       targetSources);
     slotClaims = lib.concatMap (t: let
-      endpoint = "${t.source.hostName}:${toString t.source.port}";
+      host =
+        if lib.elem t.source.hostName ["localhost" "::1"]
+        then "127.0.0.1"
+        else t.source.hostName;
+      endpoint = "${host}:${toString t.source.port}";
     in
       lib.optional t.ts.receiveWal.enable "${endpoint}/${t.ts.receiveWal.slotName}"
       ++ lib.optional t.ts.baseBackup.enable "${endpoint}/${t.ts.baseBackup.slotName}") (lib.attrValues targetSources);

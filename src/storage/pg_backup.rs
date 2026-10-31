@@ -340,7 +340,18 @@ pub fn mark_gap(
             Some(n) => restart / segment_bytes <= n + 1,
             None => !has_base,
         };
-        if covered {
+        // A hole inside the newest timeline's retained segments is a gap too.
+        let hole = archive.keys().map(|k| k.0).max().is_some_and(|t| {
+            let segs: Vec<u64> = archive
+                .range((t, 0)..=(t, u64::MAX))
+                .map(|(k, _)| k.1)
+                .collect();
+            match (segs.first(), segs.last()) {
+                (Some(&lo), Some(&hi)) => contiguous(&archive, t, lo, hi, true).is_err(),
+                _ => false,
+            }
+        });
+        if covered && !hole {
             return Ok(false);
         }
         return write_gap(root, slot, "slot restart point is beyond the archive");
@@ -567,8 +578,12 @@ pub fn health(h: &Health) -> Vec<String> {
                     };
                     match (legs, tree_sysid(&tree)) {
                         (Ok(legs), Ok(sysid)) => {
-                            for (t, lo, end) in legs {
-                                if let Err(e) = contiguous(&archive, t, lo, end, true)
+                            let last = legs.len().saturating_sub(1);
+                            for (i, (t, lo, end)) in legs.into_iter().enumerate() {
+                                // A .partial file has unknown fill: only the final leg's tail,
+                                // past the base stop, may be one.
+                                let partial_ok = i == last && end > stop / h.segment_bytes;
+                                if let Err(e) = contiguous(&archive, t, lo, end, partial_ok)
                                     .and_then(|()| same_cluster(&archive, t, lo, end, sysid))
                                 {
                                     fail(format!("WAL not usable from the oldest base: {e}"));
@@ -829,6 +844,12 @@ mod tests {
             "no metadata anywhere: all trees count"
         );
         fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
+    fn partial_only_segments_do_not_satisfy_a_leg_end() {
+        let have = archive(&[(1, 4, false), (1, 5, true)]);
+        assert!(contiguous(&have, 1, 4, 5, false).is_err());
+        assert!(contiguous(&have, 1, 4, 5, true).is_ok());
     }
     #[test]
     fn stale_wal_of_another_cluster_is_rejected() {
