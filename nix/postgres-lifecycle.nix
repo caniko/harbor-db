@@ -97,6 +97,18 @@
     (toString cfg.switchAdoption.port)
   ]);
   serviceUserCommand = "${pkgs.util-linux}/bin/runuser -u postgres -- ${command}";
+  collationArgs = lib.escapeShellArgs ["--socket-dir" "/run/postgresql" "--port" (toString (pg.settings.port or 5432))];
+  collationHardening = {
+    Type = "oneshot";
+    User = "postgres";
+    Group = "postgres";
+    UMask = "0077";
+    PrivateTmp = true;
+    NoNewPrivileges = true;
+    ProtectSystem = "strict";
+    # Sockets are local; the worker needs no network.
+    RestrictAddressFamilies = ["AF_UNIX"];
+  };
   preparation = cfg.recoveryPreparation;
   preparationManifest = pkgs.writeText "harbor-db-recovery-preparation.json" (builtins.toJSON {
     readiness_command = preparation.readinessCommand;
@@ -467,6 +479,16 @@ in {
           };
         };
       });
+    };
+    collation = {
+      check = {
+        enable = mkEnableOption "a scheduled read-only collation-version drift check (never reindexes)";
+        schedule = mkOption {
+          type = types.str;
+          default = "daily";
+          description = "systemd OnCalendar expression for the drift check.";
+        };
+      };
     };
     upgrade = mkOption {
       default = null;
@@ -869,6 +891,43 @@ in {
       fsync = lib.mkForce true;
       full_page_writes = lib.mkForce true;
       synchronous_commit = lib.mkForce "on";
+    };
+
+    # Explicit operator action: `systemctl start harbor-db-postgresql-collation-refresh`.
+    # Rebuilds libc-collation indexes online (REINDEX CONCURRENTLY, high IO; run
+    # large databases in a quiet window), then refreshes the recorded version.
+    systemd.services.harbor-db-postgresql-collation-refresh = {
+      description = "Rebuild collation-dependent PostgreSQL indexes and refresh collation versions";
+      requires = ["postgresql.service"];
+      after = ["postgresql.service"];
+      unitConfig.RequiresMountsFor = [cfg.stateDir] ++ cfg.requiredMounts;
+      serviceConfig =
+        collationHardening
+        // {
+          ExecStart = "${command} collation-refresh ${collationArgs}";
+          TimeoutStartSec = "infinity";
+          ReadWritePaths = [cfg.stateDir];
+        };
+    };
+    systemd.services.harbor-db-postgresql-collation-check = mkIf cfg.collation.check.enable {
+      description = "Read-only PostgreSQL collation-version drift check";
+      requires = ["postgresql.service"];
+      after = ["postgresql.service"];
+      serviceConfig =
+        collationHardening
+        // {
+          ExecStart = "${command} collation-refresh --dry-run --fail-on-drift ${collationArgs}";
+          TimeoutStartSec = "1h";
+          ReadWritePaths = [];
+        };
+    };
+    systemd.timers.harbor-db-postgresql-collation-check = mkIf cfg.collation.check.enable {
+      wantedBy = ["timers.target"];
+      timerConfig = {
+        OnCalendar = cfg.collation.check.schedule;
+        Persistent = true;
+        RandomizedDelaySec = "15m";
+      };
     };
 
     systemd.services.harbor-db-postgresql-upgrade = mkIf (cfg.upgrade != null) {

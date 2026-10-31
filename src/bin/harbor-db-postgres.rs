@@ -56,6 +56,26 @@ enum Operation {
     },
     /// Routine admission: backup health without record-certified evidence.
     InspectBackup,
+    /// Rebuild libc-collation indexes of databases whose recorded collation
+    /// version drifted, then refresh the version. Emits JSON lines.
+    CollationRefresh {
+        #[arg(long, default_value = "/run/postgresql")]
+        socket_dir: PathBuf,
+        #[arg(long, default_value_t = 5432)]
+        port: u16,
+        /// Print the plan only; change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// With --dry-run, exit nonzero when any database drifted.
+        #[arg(long, requires = "dry_run")]
+        fail_on_drift: bool,
+        /// Run bt_index_check where amcheck is already installed.
+        #[arg(long)]
+        verify: bool,
+        /// Restrict to these databases. Repeat for several.
+        #[arg(long = "database")]
+        databases: Vec<String>,
+    },
     FenceOpen {
         #[arg(long)]
         system_identifier: String,
@@ -281,6 +301,27 @@ fn operate(args: Args) -> Result<Option<Value>> {
             socket_dir,
             port,
         } => postgres::adopt_live(&config, &system_identifier, &socket_dir, port)?,
+        Operation::CollationRefresh {
+            socket_dir,
+            port,
+            dry_run,
+            fail_on_drift,
+            verify,
+            databases,
+        } => {
+            storage::collation::run(
+                &config,
+                &storage::collation::Options {
+                    socket_dir,
+                    port,
+                    dry_run,
+                    fail_on_drift,
+                    verify,
+                    databases,
+                },
+            )?;
+            return Ok(None);
+        }
         Operation::Check => {
             postgres::check(&config)?;
             return Ok(None);

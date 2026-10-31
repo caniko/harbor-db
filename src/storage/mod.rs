@@ -7,6 +7,7 @@ pub mod application_transition;
 pub mod backup;
 mod backup_manifest;
 pub mod codec;
+pub mod collation;
 pub mod custody;
 pub mod cutover;
 pub mod durable;

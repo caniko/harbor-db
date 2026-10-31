@@ -33,6 +33,7 @@ in
         dataDir = "/var/lib/postgres/18";
       };
       services.harbor-db.postgresql.enable = true;
+      services.harbor-db.postgresql.collation.check.enable = true;
       environment.systemPackages = [tool pkgs.postgresql_18 pkgs.python3];
       system.extraDependencies = pkgs.lib.optional interop legacyTool;
       # Model the existing unguarded primary for first-rollout live adoption.
@@ -152,5 +153,22 @@ in
       machine.succeed("rmdir /var/lib/postgres/18; mv /var/lib/postgres/preserved /var/lib/postgres/18")
       machine.succeed("systemctl reset-failed postgresql; systemctl start postgresql")
       verify_save()
+
+      # Collation-version drift: detected read-only, repaired only on request.
+      def psql(database, sql):
+          return machine.succeed(f"runuser -u postgres -- psql -d {database} -Atqc \"{sql}\"").strip()
+
+      psql("postgres", "CREATE DATABASE colltest")
+      psql("colltest", "CREATE TABLE w(t text); CREATE INDEX w_t ON w(t); INSERT INTO w SELECT md5(g::text) FROM generate_series(1,1000) g")
+      machine.succeed("systemctl start harbor-db-postgresql-collation-check")
+      # A glibc upgrade is simulated by recording a stale version (superuser catalog update).
+      psql("postgres", "UPDATE pg_database SET datcollversion = '0.0' WHERE datname = 'colltest'")
+      machine.fail("systemctl start harbor-db-postgresql-collation-check")
+      assert psql("postgres", "SELECT datcollversion FROM pg_database WHERE datname = 'colltest'") == "0.0"
+      filenode = psql("colltest", "SELECT relfilenode FROM pg_class WHERE relname = 'w_t'")
+      machine.succeed("systemctl start harbor-db-postgresql-collation-refresh")
+      assert psql("postgres", "SELECT datcollversion = pg_database_collation_actual_version(oid) FROM pg_database WHERE datname = 'colltest'") == "t"
+      assert psql("colltest", "SELECT relfilenode FROM pg_class WHERE relname = 'w_t'") != filenode
+      machine.succeed("systemctl start harbor-db-postgresql-collation-check")
     '';
   }
