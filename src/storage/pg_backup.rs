@@ -332,12 +332,21 @@ pub fn mark_gap(
     }
     if let Slot::Present(restart) = state {
         // A slot recreated while the receiver was down restarts past what the archive holds.
-        let newest = archive.keys().map(|k| k.1).max();
+        // Coverage counts only the server's own timeline: an ancestor's higher segment
+        // numbers say nothing about WAL after the fork.
+        let on_server = archive
+            .range((server_timeline, 0)..=(server_timeline, u64::MAX))
+            .next_back()
+            .map(|(k, _)| k.1);
         let has_base = fs::read_dir(root.join("base"))?.next().is_some();
-        // An empty archive next to retained bases means the WAL itself is gone.
-        let covered = match newest {
+        let covered = match on_server {
             Some(n) => restart / segment_bytes <= n + 1,
-            None => !has_base,
+            // Nothing archived on a promoted timeline yet: the receiver resumes at its fork.
+            None if server_timeline > 1 && !archive.is_empty() => {
+                parent_fork(root, server_timeline).is_some_and(|fork| restart <= fork)
+            }
+            // An empty archive next to retained bases means the WAL itself is gone.
+            None => archive.is_empty() && !has_base,
         };
         // A hole inside any retained timeline is a gap too.
         let hole = has_hole(&archive);
@@ -366,16 +375,40 @@ fn recovery_target(root: &Path) -> Option<(u64, u64)> {
     ))
 }
 /// LSN the archive must reach: the target counts when it lies on the newest timeline,
-/// otherwise a descendant chain would already have to cover it. A target on a timeline
-/// the archive never reached is unreachable.
-fn reach(target: Option<(u64, u64)>, newest: u32, stop: u64) -> Result<u64> {
-    match target {
-        Some((t, _)) if t > u64::from(newest) => Err(invalid(format!(
+/// otherwise it must lie on an ancestor before that ancestor's fork, so the descendant
+/// chain covers it. A target on an unarchived or sibling timeline is unreachable.
+fn reach(root: &Path, target: Option<(u64, u64)>, newest: u32, stop: u64) -> Result<u64> {
+    let Some((t, lsn)) = target else {
+        return Ok(stop);
+    };
+    if t > u64::from(newest) {
+        return Err(invalid(format!(
             "recovery target is on timeline {t}, newest archived WAL is on {newest}"
-        ))),
-        Some((t, lsn)) if t == u64::from(newest) => Ok(lsn.max(stop)),
-        _ => Ok(stop),
+        )));
     }
+    if t == u64::from(newest) {
+        return Ok(lsn.max(stop));
+    }
+    match fork_of(root, newest, t) {
+        Some(fork) if lsn <= fork => Ok(stop),
+        _ => Err(invalid(format!(
+            "recovery target on timeline {t} is not on the ancestry of timeline {newest}"
+        ))),
+    }
+}
+/// LSN where `timeline` forked from its immediate parent: the history file's last entry.
+fn parent_fork(root: &Path, timeline: u32) -> Option<u64> {
+    let text = fs::read_to_string(root.join("wal").join(format!("{timeline:08X}.history"))).ok()?;
+    parse_history(&text).ok()?.last().map(|(_, at)| *at)
+}
+/// LSN where `ancestor` forked on the way to `timeline`, from `timeline`'s history file.
+fn fork_of(root: &Path, timeline: u32, ancestor: u64) -> Option<u64> {
+    let text = fs::read_to_string(root.join("wal").join(format!("{timeline:08X}.history"))).ok()?;
+    parse_history(&text)
+        .ok()?
+        .into_iter()
+        .find(|(t, _)| u64::from(*t) == ancestor)
+        .map(|(_, at)| at)
 }
 /// An interrupted `remove_gap` leaves its marker as `.gap.clearing.*`; it still counts.
 fn gap_present(root: &Path) -> bool {
@@ -665,7 +698,7 @@ pub fn health(h: &Health) -> Vec<String> {
                         .range((newest, 0)..=(newest, u64::MAX))
                         .next_back()
                         .map_or(0, |(k, _)| k.1);
-                    let legs = match reach(recovery_target(h.root), newest, stop) {
+                    let legs = match reach(h.root, recovery_target(h.root), newest, stop) {
                         _ if newest < timeline => {
                             Err(invalid(format!("no WAL on timeline {timeline}")))
                         }
@@ -959,6 +992,22 @@ mod tests {
         assert!(has_hole(&ancestor));
     }
     #[test]
+    fn promoted_timeline_forks_from_the_last_history_entry() {
+        let root = std::env::temp_dir().join(format!("pgb-fork-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("wal")).unwrap();
+        assert_eq!(parent_fork(&root, 4), None);
+        fs::write(
+            root.join("wal/00000004.history"),
+            "1\t0/3000000\tx\n2\t0/9000000\tx\n",
+        )
+        .unwrap();
+        assert_eq!(parent_fork(&root, 4), Some(0x9000000));
+        assert_eq!(fork_of(&root, 4, 1), Some(0x3000000));
+        assert_eq!(fork_of(&root, 4, 3), None);
+        fs::remove_dir_all(&root).unwrap();
+    }
+    #[test]
     fn wal_missing_before_the_archive_start_is_a_leading_gap() {
         let tail = archive(&[(1, 110, false), (1, 120, false)]);
         assert!(leading_gap(&tail, 1, 100));
@@ -980,15 +1029,32 @@ mod tests {
         assert_eq!(recovery_target(&root), Some((2, 0x7000028)));
         // An ancestor-timeline base must still reach a target on the newest timeline.
         assert_eq!(
-            reach(recovery_target(&root), 2, 0x5000000).unwrap(),
+            reach(&root, recovery_target(&root), 2, 0x5000000).unwrap(),
             0x7000028
         );
+        // A target on a timeline with no archived WAL can never be reached.
+        assert!(reach(&root, recovery_target(&root), 1, 0x5000000).is_err());
+        // An older target timeline counts only on the newest timeline's ancestry.
+        fs::create_dir_all(root.join("wal")).unwrap();
+        assert!(reach(&root, recovery_target(&root), 3, 0x5000000).is_err());
+        fs::write(
+            root.join("wal/00000003.history"),
+            "1\t0/3000000\tx\n2\t0/8000000\tx\n",
+        )
+        .unwrap();
         assert_eq!(
-            reach(recovery_target(&root), 3, 0x5000000).unwrap(),
+            reach(&root, recovery_target(&root), 3, 0x5000000).unwrap(),
             0x5000000
         );
-        // A target on a timeline with no archived WAL can never be reached.
-        assert!(reach(recovery_target(&root), 1, 0x5000000).is_err());
+        // A sibling branch, or a target after the ancestor's fork, is unreachable.
+        fs::write(root.join("wal/00000003.history"), "1\t0/3000000\tx\n").unwrap();
+        assert!(reach(&root, recovery_target(&root), 3, 0x5000000).is_err());
+        fs::write(
+            root.join("wal/00000003.history"),
+            "1\t0/3000000\tx\n2\t0/6000000\tx\n",
+        )
+        .unwrap();
+        assert!(reach(&root, recovery_target(&root), 3, 0x5000000).is_err());
         fs::remove_dir_all(&root).unwrap();
     }
     #[test]
