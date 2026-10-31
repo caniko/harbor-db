@@ -855,5 +855,27 @@ in
           failing (named [{services.harbor-db.pgBackup.targets.a = {source.hostName = "localhost";};} {services.harbor-db.pgBackup.targets.b = {source.hostName = "127.0.0.1";};}]);
         message = "localhost and 127.0.0.1 are the same endpoint for slot uniqueness.";
       }
+      {
+        name = "backup-dir-is-systemd-safe-and-socket-dir-is-configured";
+        assertion = let
+          failing = c: lib.any (a: !a.assertion && lib.hasInfix "backupDir may contain only" a.message) c.assertions;
+          sock =
+            (localEval.extendModules {
+              modules = [
+                {
+                  services.postgresql.settings.unix_socket_directories = "/run/custom, /tmp";
+                  services.harbor-db.pgBackup.targetSettings.baseBackup = {
+                    recoveryMeta = true;
+                    sqlConninfo = null;
+                  };
+                }
+              ];
+            }).config.systemd.services.pg-basebackup.script;
+        in
+          failing (named [{services.harbor-db.pgBackup.targetSettings.backupDir = lib.mkForce "/srv/my backups";}])
+          && !failing thething
+          && lib.hasInfix "host=/run/custom port=" sock;
+        message = "backupDir must be systemd-safe and the marker connection must use the configured socket directory.";
+      }
     ];
   }

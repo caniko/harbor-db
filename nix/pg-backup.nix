@@ -25,6 +25,10 @@
     loopbackAddresses);
   listenAddresses = lib.unique (cfg.sourceSettings.listenAddresses ++ loopbackAddresses);
   storagePackage = harborDbStoragePackage;
+  socketDir = let
+    dirs = config.services.postgresql.settings.unix_socket_directories or "/run/postgresql";
+  in
+    lib.head (lib.filter (d: d != "") (map lib.trim (lib.splitString "," dirs)));
   durable = "${storagePackage}/bin/harbor-db-durable";
   pruneTool = "${storagePackage}/bin/harbor-db-backup-prune";
   pgBackupTool = "${storagePackage}/bin/harbor-db-pg-backup";
@@ -204,7 +208,7 @@
       if baseCfg.sqlConninfo != null
       then baseCfg.sqlConninfo
       else if sourceRole && isLegacy && lib.elem source.hostName ["127.0.0.1" "localhost" "::1"]
-      then "host=/run/postgresql port=${toString source.port} user=postgres dbname=postgres"
+      then "host=${socketDir} port=${toString source.port} user=postgres dbname=postgres"
       else null;
     admissionArgs = lib.concatStringsSep " " (
       lib.optional (baseCfg.admission.minRamBytes != null) "--min-ram-bytes ${toString baseCfg.admission.minRamBytes}"
@@ -650,6 +654,11 @@ in {
               message = "services.harbor-db.pgBackup.targets requires role target or both.";
             }
             {
+              # Paths reach systemd command lines unquoted.
+              assertion = !targetRole || builtins.match "/[A-Za-z0-9_./-]+" cfg.targetSettings.backupDir != null;
+              message = "services.harbor-db.pgBackup targetSettings.backupDir may contain only letters, digits and _ . / - (it is used unquoted in systemd commands).";
+            }
+            {
               assertion = let
                 roots = map (t: t.backupRoot) (lib.attrValues targetSources);
               in
@@ -728,7 +737,7 @@ in {
                 == []
                 || (config.services.postgresql.settings.max_replication_slots
                   >= receivers + bases
-                  && (bases == 0 || config.services.postgresql.settings.max_wal_senders >= receivers + 2 * bases));
+                  && config.services.postgresql.settings.max_wal_senders >= receivers + 2 * bases);
               message = "services.harbor-db.pgBackup local receiver plus base backups need one slot per receiver and base backup and one WAL sender per receiver plus two per base backup in the effective PostgreSQL settings.";
             }
             {
