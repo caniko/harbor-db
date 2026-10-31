@@ -4,6 +4,19 @@
 
 ### Added
 
+- `pgBackup` recovery-ready base backups (`targetSettings.baseBackup.recoveryMeta`,
+  `sqlConninfo`): `base/<id>.meta.json` plus `LAST_SUCCESS=<id>` as read by
+  `inspect-backup`; a durable `wal/.gap` marker when the receiver slot had to be
+  recreated, cleared (and the `GENERATION` epoch token rotated) by the next verified
+  base; `targetSettings.health` (`harbor-db-pg-backup backup-health` timer);
+  `baseBackup.admission.{minRamBytes,minSwapBytes}`. Retention now ignores
+  `<id>.meta.json` sidecars and removes them with their tree.
+- `pgBackup.targets.<name>`: additional named backup targets (units suffixed
+  `-<name>`, root `backupDir/<name>`) with the same per-target options, plus
+  `receiveWal.statusInterval` and best-effort bounded
+  `receiveWal.slotCreateTimeoutSeconds`. `source.hostName` may be null for
+  role=target with named targets.
+
 - PostgreSQL rollout `trusted_ancestors` (module option `rollout.trustedAncestors`):
   exact non-root-owned ancestor directories, each with its owner's uid, that the
   ancestry walk accepts when they have that owner and no group or world write

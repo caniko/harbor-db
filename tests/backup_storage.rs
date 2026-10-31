@@ -662,3 +662,47 @@ fn retention_projection_rejects_invalid_syntax_and_last_fields_before_deletion()
     assert_eq!(fs::read(&manifest).unwrap(), excessive.as_bytes());
     assert_eq!(fs::metadata(&manifest).unwrap().ino(), inode);
 }
+
+#[test]
+fn meta_sidecars_do_not_block_pruning_and_leave_with_their_tree() {
+    let root = fixture();
+    for name in ["old", "middle", "new"] {
+        fs::write(
+            root.path().join("base").join(format!("{name}.meta.json")),
+            "{}",
+        )
+        .unwrap();
+    }
+    backup::prune(root.path(), 1, 2, 1024 * 1024, Some(1_000_000.0)).unwrap();
+    assert!(!root.path().join("base/old").exists());
+    assert!(!root.path().join("base/old.meta.json").exists());
+    assert!(root.path().join("base/middle.meta.json").exists());
+    assert!(root.path().join("base/new.meta.json").exists());
+}
+
+#[test]
+fn repeated_failed_finalizes_never_displace_the_last_success_tree() {
+    let root = fixture();
+    // "old" is the metadata-backed LAST_SUCCESS; newer trees were published but never finalized.
+    fs::write(root.path().join("LAST_SUCCESS"), "old\n").unwrap();
+    fs::write(root.path().join("base/old.meta.json"), "{}").unwrap();
+    for (i, name) in ["f1", "f2", "f3"].iter().enumerate() {
+        let path = root.path().join("base").join(name);
+        fs::create_dir(&path).unwrap();
+        fs::copy(
+            root.path().join("base/old/backup_manifest"),
+            path.join("backup_manifest"),
+        )
+        .unwrap();
+        fs::File::open(&path)
+            .unwrap()
+            .set_times(
+                FileTimes::new()
+                    .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(500 + i as u64)),
+            )
+            .unwrap();
+    }
+    backup::prune(root.path(), 1, 2, 1024 * 1024, Some(1_000_000.0)).unwrap();
+    assert!(root.path().join("base/old").exists());
+    assert!(root.path().join("base/old.meta.json").exists());
+}
