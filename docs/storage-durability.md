@@ -318,11 +318,12 @@ timer; the unit fails while any database drifts and never reindexes.
 
 Affected indexes are those with a key column (INCLUDE columns excluded, hash
 indexes excluded) whose collation is the database default or an explicit libc
-collation other than C/POSIX, plus partial indexes with a text-like predicate
-(the predicate's collation is not recorded, so this errs toward rebuilding).
-Explicit ICU/builtin collations carry their own versions and are not touched.
-Check constraints, partition bounds and generated columns that depend on
-ordering are not analysed.
+collation other than C/POSIX, plus every partial or expression index (the
+collations used inside predicates and expressions are not recorded, so this errs
+toward rebuilding). Explicitly named libc/ICU collations whose
+`pg_collation.collversion` drifted count as drift too and are refreshed with
+`ALTER COLLATION ... REFRESH VERSION` after the rebuild. Check constraints,
+partition bounds and generated columns that depend on ordering are not analysed.
 
 Btree and most indexes use `REINDEX INDEX CONCURRENTLY`: no write blocking, but
 two full scans and extra disk and IO per index, so run large databases in a

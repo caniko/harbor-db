@@ -20,11 +20,15 @@ pub struct Options {
     pub databases: Vec<String>,
 }
 
-const DRIFT_SQL: &str = "SELECT json_build_object('database', datname, 'quoted', format('%I', datname), 'recorded', datcollversion, 'actual', pg_database_collation_actual_version(oid)) FROM pg_database WHERE datallowconn AND datname <> 'template0' AND datcollversion IS DISTINCT FROM pg_database_collation_actual_version(oid) ORDER BY datname;";
+const DRIFT_SQL: &str = "SELECT json_build_object('database', datname, 'quoted', format('%I', datname), 'recorded', datcollversion, 'actual', pg_database_collation_actual_version(oid)) FROM pg_database WHERE datallowconn AND datname <> 'template0' ORDER BY datname;";
 
-/// Indexes whose ordered key columns (INCLUDE columns excluded) resolve to the
-/// database default or an explicit libc collation other than C/POSIX. Partial
-/// indexes with a text-ish predicate are included because the predicate's
+/// Explicit libc/ICU collations whose recorded version differs from the provider's.
+const COLLATION_SQL: &str = "SELECT format('%I.%I', n.nspname, c.collname) FROM pg_collation c JOIN pg_namespace n ON n.oid = c.collnamespace WHERE c.collprovider IN ('c', 'i') AND c.collversion IS DISTINCT FROM pg_collation_actual_version(c.oid) ORDER BY 1;";
+
+/// database default or an explicit libc collation other than C/POSIX. Every
+/// partial or expression index is included because collations used inside the
+/// predicate or expression are not recorded for the default collation (safe
+/// direction).
 /// collation is not recorded for the default collation (safe direction).
 /// Explicit ICU/builtin collations carry their own versions and are ignored.
 const INDEX_SQL: &str = "
@@ -48,7 +52,7 @@ WHERE c.relkind = 'i' AND a.amname <> 'hash' AND (
     WHERE k.pos <= i.indnkeyatts AND k.coll <> 0 AND (
       (k.coll = 100 AND d.datlocprovider IN ('c', 'i') AND (d.datlocprovider = 'i' OR d.datcollate NOT IN ('C', 'POSIX')))
       OR EXISTS (SELECT 1 FROM pg_collation co WHERE co.oid = k.coll AND co.collprovider = 'c' AND co.collcollate NOT IN ('C', 'POSIX'))))
-  OR (i.indpred IS NOT NULL AND pg_get_expr(i.indpred, i.indrelid) ~* '(text|char|name)'))
+  OR i.indpred IS NOT NULL OR i.indexprs IS NOT NULL)
 ORDER BY pg_relation_size(c.oid), c.relname;";
 
 #[derive(Debug, PartialEq)]
@@ -163,6 +167,8 @@ fn refresh_database(
     database: &str,
     quoted: &str,
     actual: &str,
+    database_drift: bool,
+    collations: &[String],
 ) -> Result<()> {
     let items = parse_items(&psql(config, options, database, INDEX_SQL)?)?;
     for item in &items {
@@ -191,12 +197,22 @@ fn refresh_database(
     if options.verify {
         verify(config, options, database, &items)?;
     }
-    psql(
-        config,
-        options,
-        database,
-        &format!("ALTER DATABASE {quoted} REFRESH COLLATION VERSION;"),
-    )?;
+    if database_drift {
+        psql(
+            config,
+            options,
+            database,
+            &format!("ALTER DATABASE {quoted} REFRESH COLLATION VERSION;"),
+        )?;
+    }
+    for collation in collations {
+        psql(
+            config,
+            options,
+            database,
+            &format!("ALTER COLLATION {collation} REFRESH VERSION;"),
+        )?;
+    }
     let _ = std::fs::remove_file(&state);
     emit(json!({"event": "refreshed", "database": database, "version": actual}));
     Ok(())
@@ -208,9 +224,10 @@ fn verify(config: &Value, options: &Options, database: &str, items: &[Item]) -> 
         config,
         options,
         database,
-        "SELECT 1 FROM pg_extension WHERE extname = 'amcheck';",
+        "SELECT format('%I', n.nspname) FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'amcheck';",
     )?;
-    if installed.trim().is_empty() {
+    let schema = installed.trim();
+    if schema.is_empty() {
         emit(json!({"event": "verify-skipped", "database": database,
             "reason": "amcheck is not installed"}));
         return Ok(());
@@ -224,7 +241,7 @@ fn verify(config: &Value, options: &Options, database: &str, items: &[Item]) -> 
             options,
             database,
             &format!(
-                "SELECT bt_index_check(index => '{}'::regclass);",
+                "SELECT {schema}.bt_index_check(index => '{}'::regclass);",
                 item.qualified.replace('\'', "''")
             ),
         )?;
@@ -244,14 +261,30 @@ pub fn run(config: &Value, options: &Options) -> Result<()> {
         if !options.databases.is_empty() && !options.databases.iter().any(|d| d == name) {
             continue;
         }
+        let database_drift = v["recorded"] != v["actual"];
+        let collations: Vec<String> = psql(config, options, name, COLLATION_SQL)?
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        if !database_drift && collations.is_empty() {
+            continue;
+        }
         drift += 1;
         let actual = v["actual"].as_str().unwrap_or_default();
         emit(
-            json!({"event": "drift", "database": name, "recorded": v["recorded"], "actual": v["actual"]}),
+            json!({"event": "drift", "database": name, "recorded": v["recorded"],
+            "actual": v["actual"], "collations": collations}),
         );
-        if let Err(error) =
-            refresh_database(config, options, name, super::string(&v, "quoted")?, actual)
-        {
+        if let Err(error) = refresh_database(
+            config,
+            options,
+            name,
+            super::string(&v, "quoted")?,
+            actual,
+            database_drift,
+            &collations,
+        ) {
             emit(json!({"event": "failed", "database": name, "error": error.to_string()}));
             failures.push(name.to_owned());
         }
