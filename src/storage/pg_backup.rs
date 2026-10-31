@@ -302,9 +302,8 @@ pub fn mark_gap(
     if state == Slot::Lost {
         psql(psql_bin, conninfo, &format!("DROP_REPLICATION_SLOT {slot}"))?;
     }
-    if gap_path(root).exists() {
-        return Ok(false);
-    }
+    // A loss detected while a gap is already recorded refreshes its timestamp,
+    // so only a base started after the latest loss closes it.
     let archive = wal_segments(root, segment_bytes)?;
     let identify = psql(psql_bin, conninfo, "IDENTIFY_SYSTEM")?;
     let mut fields = identify.split('|');
