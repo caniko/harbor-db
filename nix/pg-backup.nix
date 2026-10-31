@@ -654,6 +654,11 @@ in {
               message = "services.harbor-db.pgBackup.targets requires role target or both.";
             }
             {
+              # Named targets are for remote sources; the local-source plumbing (pg_hba, replicator role, capacity) belongs to the legacy target.
+              assertion = lib.all (t: !lib.elem t.source.hostName ["127.0.0.1" "localhost" "::1"]) (lib.attrValues cfg.targets);
+              message = "services.harbor-db.pgBackup.targets.<name> must point at a remote source; use the single-source options for a loopback source.";
+            }
+            {
               # Paths reach systemd command lines unquoted.
               assertion = !targetRole || builtins.match "/[A-Za-z0-9_./-]+" cfg.targetSettings.backupDir != null;
               message = "services.harbor-db.pgBackup targetSettings.backupDir may contain only letters, digits and _ . / - (it is used unquoted in systemd commands).";
