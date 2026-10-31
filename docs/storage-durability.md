@@ -296,6 +296,47 @@ All completed backup directories, including expiration candidates, are classifie
 before deletion. Redirected/non-directory entries, malformed start/end LSNs,
 unknown timeline values and missing manifests preserve both backups and WAL.
 
+## Collation-version drift
+
+After a glibc upgrade a libc-provider database records the old
+`datcollversion` while `pg_database_collation_actual_version(oid)` reports the
+new one. Indexes ordered by that collation may be silently corrupt until
+rebuilt, and PostgreSQL only warns. `harbor-db-postgres collation-refresh`
+finds drifted connectable databases (template0 is skipped; C/POSIX databases
+have no version and never drift), lists the affected indexes and rebuilds them:
+
+```sh
+harbor-db-postgres --config /etc/harbor-db/postgresql.json collation-refresh --dry-run   # JSON-line plan
+systemctl start harbor-db-postgresql-collation-refresh                                   # repair
+```
+
+Flags: `--dry-run`, `--fail-on-drift` (with `--dry-run`, exit nonzero on drift),
+`--verify`, `--database NAME` (repeatable), `--socket-dir`, `--port`.
+`services.harbor-db.postgresql.collation.check.enable` (default false) with
+`collation.check.schedule` (default `daily`) runs the read-only check from a
+timer; the unit fails while any database drifts and never reindexes.
+
+Affected indexes (every access method, hash included) are those with a key
+column (INCLUDE columns excluded) whose collation is the drifted database
+default or any explicit libc/ICU collation whose `pg_collation.collversion`
+drifted, plus every partial or expression index (collations used inside
+predicates and expressions are not recorded, so this errs toward rebuilding).
+After the rebuild the database version and each drifted named collation are
+refreshed (`ALTER COLLATION ... REFRESH VERSION`). Check constraints, partition
+bounds and generated columns that depend on ordering are not analysed.
+
+Btree and most indexes use `REINDEX INDEX CONCURRENTLY`: no write blocking, but
+two full scans and extra disk and IO per index, so run large databases in a
+quiet window. Catalog, exclusion-constraint and invalid indexes cannot be
+rebuilt concurrently and use plain `REINDEX INDEX`, which blocks writes to the
+table for the rebuild. Invalid `_ccnew`/`_ccold` leftovers of an interrupted run
+are dropped first. `ALTER DATABASE ... REFRESH COLLATION VERSION` runs only after
+every index of that database succeeded, so an interrupted run stays visible as
+drift; progress is kept in `<stateDir>/collation-refresh-*.json` and a rerun
+skips indexes already rebuilt. `--verify` runs `bt_index_check` only where
+`amcheck` is already installed and reports `verify-skipped` otherwise; the
+extension is never created. The command exits nonzero if any database failed.
+
 ## Verification
 
 Native Linux tests:
@@ -305,7 +346,8 @@ PYTHONPATH=python python3 -B -m unittest discover -s tests -p '*lifecycle.py'
 ```
 
 Focused flake checks: `postgres-lifecycle-eval`, `postgres-lifecycle-test`,
-`pg-backup-eval`, `postgres-interrupted-upgrade` and `postgres-crash-rollback`.
+`pg-backup-eval`, `postgres-interrupted-upgrade` and `postgres-crash-rollback`
+(which also simulates collation drift and checks the check and refresh units).
 The VM checks use disposable databases, acknowledged structured saves, process
 SIGKILL, abrupt VM termination, compatible generation switching, missing storage
 and interruption after real initdb creates PG_VERSION. Application end-to-end
