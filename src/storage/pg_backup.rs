@@ -613,7 +613,8 @@ fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64, u64, PathBuf)>
         .filter(|e| !e.file_name().to_string_lossy().ends_with(".partial"))
         .map(|e| e.path())
         .collect();
-    trees.sort();
+    // Oldest first by publish time (names tie within a second); name breaks ties.
+    trees.sort_by_key(|t| (fs::metadata(t).and_then(|m| m.modified()).ok(), t.clone()));
     // Bases from before the last cleared gap cannot reach the newest WAL.
     let floor: u64 = fs::read_to_string(root.join("BASE_FLOOR"))
         .ok()
