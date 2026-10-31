@@ -339,17 +339,8 @@ pub fn mark_gap(
             Some(n) => restart / segment_bytes <= n + 1,
             None => !has_base,
         };
-        // A hole inside the newest timeline's retained segments is a gap too.
-        let hole = archive.keys().map(|k| k.0).max().is_some_and(|t| {
-            let segs: Vec<u64> = archive
-                .range((t, 0)..=(t, u64::MAX))
-                .map(|(k, _)| k.1)
-                .collect();
-            match (segs.first(), segs.last()) {
-                (Some(&lo), Some(&hi)) => contiguous(&archive, t, lo, hi, true).is_err(),
-                _ => false,
-            }
-        });
+        // A hole inside any retained timeline is a gap too.
+        let hole = has_hole(&archive);
         if covered && !hole {
             return Ok(false);
         }
@@ -359,6 +350,24 @@ pub fn mark_gap(
         return Ok(false);
     }
     write_gap(root, slot, "slot recreated")
+}
+/// `post_backup_lsn` of the base LAST_SUCCESS names, when it has metadata.
+fn recovery_target(root: &Path) -> Option<u64> {
+    let id = fs::read_to_string(root.join("LAST_SUCCESS")).ok()?;
+    let meta =
+        durable::read_json(&root.join("base").join(format!("{}.meta.json", id.trim()))).ok()?;
+    lsn(meta["post_backup_lsn"].as_str()?).ok()
+}
+/// A missing segment between the first and last retained segment of any timeline.
+fn has_hole(archive: &Archive) -> bool {
+    let timelines: std::collections::BTreeSet<u32> = archive.keys().map(|k| k.0).collect();
+    timelines.into_iter().any(|t| {
+        let mut segs = archive.range((t, 0)..=(t, u64::MAX)).map(|(k, _)| k.1);
+        match (segs.next(), segs.next_back()) {
+            (Some(lo), Some(hi)) => contiguous(archive, t, lo, hi, true).is_err(),
+            _ => false,
+        }
+    })
 }
 fn write_gap(root: &Path, slot: &str, reason: &str) -> Result<bool> {
     let generation = generation(root)?;
@@ -435,6 +444,16 @@ pub fn finalize(f: &Finalize) -> Result<Value> {
     if psql(f.sql_psql, f.sql_conninfo, "SELECT pg_is_in_recovery()")? == "t" {
         return Err(invalid(
             "recoveryMeta needs sqlConninfo to reach a primary, not a standby",
+        ));
+    }
+    let live = psql(
+        f.sql_psql,
+        f.sql_conninfo,
+        "SELECT system_identifier FROM pg_control_system()",
+    )?;
+    if live != system_identifier {
+        return Err(invalid(
+            "sqlConninfo reaches a different cluster than the base backup",
         ));
     }
     let marker = psql(
@@ -565,6 +584,8 @@ pub fn health(h: &Health) -> Vec<String> {
             match oldest_base_range(h.root, h.segment_bytes) {
                 Err(e) => fail(format!("retained base backups unusable: {e}")),
                 Ok((timeline, first, stop, tree)) => {
+                    // The newest published base's recovery target must be archived too.
+                    let stop = recovery_target(h.root).map_or(stop, |t| t.max(stop));
                     let newest = archive.keys().map(|k| k.0).max().unwrap_or(0);
                     let hi = archive
                         .range((newest, 0)..=(newest, u64::MAX))
@@ -850,6 +871,28 @@ mod tests {
         let have = archive(&[(1, 4, false), (1, 5, true)]);
         assert!(contiguous(&have, 1, 4, 5, false).is_err());
         assert!(contiguous(&have, 1, 4, 5, true).is_ok());
+    }
+    #[test]
+    fn holes_are_found_on_any_timeline() {
+        let ok = archive(&[(1, 3, false), (1, 4, false), (2, 5, false)]);
+        assert!(!has_hole(&ok));
+        let ancestor = archive(&[(1, 3, false), (1, 5, false), (2, 6, false), (2, 7, false)]);
+        assert!(has_hole(&ancestor));
+    }
+    #[test]
+    fn recovery_target_reads_last_success_metadata() {
+        let root = std::env::temp_dir().join(format!("pgb-target-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("base")).unwrap();
+        assert_eq!(recovery_target(&root), None);
+        fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
+        durable::write_json(
+            &root.join("base/b1.meta.json"),
+            &json!({"post_backup_lsn":"0/7000028"}),
+        )
+        .unwrap();
+        assert_eq!(recovery_target(&root), Some(0x7000028));
+        fs::remove_dir_all(&root).unwrap();
     }
     #[test]
     fn stale_wal_of_another_cluster_is_rejected() {

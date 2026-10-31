@@ -199,7 +199,7 @@ fn run(args: Args) -> Result<()> {
         )?;
     }
     g.wait("primary", "test \"$(systemctl is-active postgresql.service)\" = active; test \"$(systemctl show postgresql-setup.service -p Result --value)\" = success; test \"$(runuser -u postgres -- psql -Xw -At -d postgres -c \"SELECT count(*) FROM pg_roles WHERE rolname='replicator' AND rolreplication AND rolcanlogin\")\" = 1", "source-role-setup-complete")?;
-    g.sql("CREATE ROLE pgbackup_marker LOGIN; GRANT EXECUTE ON FUNCTION pg_create_restore_point(text), pg_switch_wal() TO pgbackup_marker", "least-privilege-marker-role")?;
+    g.sql("CREATE ROLE pgbackup_marker LOGIN; GRANT EXECUTE ON FUNCTION pg_create_restore_point(text), pg_switch_wal(), pg_control_system() TO pgbackup_marker", "least-privilege-marker-role")?;
     let (code, password) = g.exec("primary", "cat /run/backup-credential/password")?;
     require(
         code == 0 && password.len() == 64 && password.bytes().all(|b| b.is_ascii_hexdigit()),
