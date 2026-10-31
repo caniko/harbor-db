@@ -363,11 +363,15 @@ fn recovery_target(root: &Path) -> Option<(u64, u64)> {
     ))
 }
 /// LSN the archive must reach: the target counts when it lies on the newest timeline,
-/// otherwise a descendant chain would already have to cover it.
-fn reach(target: Option<(u64, u64)>, newest: u32, stop: u64) -> u64 {
+/// otherwise a descendant chain would already have to cover it. A target on a timeline
+/// the archive never reached is unreachable.
+fn reach(target: Option<(u64, u64)>, newest: u32, stop: u64) -> Result<u64> {
     match target {
-        Some((t, lsn)) if t == u64::from(newest) => lsn.max(stop),
-        _ => stop,
+        Some((t, _)) if t > u64::from(newest) => Err(invalid(format!(
+            "recovery target is on timeline {t}, newest archived WAL is on {newest}"
+        ))),
+        Some((t, lsn)) if t == u64::from(newest) => Ok(lsn.max(stop)),
+        _ => Ok(stop),
     }
 }
 /// An interrupted `remove_gap` leaves its marker as `.gap.clearing.*`; it still counts.
@@ -651,13 +655,15 @@ pub fn health(h: &Health) -> Vec<String> {
                         .range((newest, 0)..=(newest, u64::MAX))
                         .next_back()
                         .map_or(0, |(k, _)| k.1);
-                    let reach = reach(recovery_target(h.root), newest, stop);
-                    let legs = if newest < timeline {
-                        Err(invalid(format!("no WAL on timeline {timeline}")))
-                    } else if hi < reach / h.segment_bytes {
-                        Err(invalid("archived WAL ends before the recovery target"))
-                    } else {
-                        chain(h.root, h.segment_bytes, timeline, first, stop, newest, hi)
+                    let legs = match reach(recovery_target(h.root), newest, stop) {
+                        _ if newest < timeline => {
+                            Err(invalid(format!("no WAL on timeline {timeline}")))
+                        }
+                        Err(e) => Err(e),
+                        Ok(reach) if hi < reach / h.segment_bytes => {
+                            Err(invalid("archived WAL ends before the recovery target"))
+                        }
+                        Ok(_) => chain(h.root, h.segment_bytes, timeline, first, stop, newest, hi),
                     };
                     match (legs, tree_sysid(&tree)) {
                         (Ok(legs), Ok(sysid)) => {
@@ -956,8 +962,16 @@ mod tests {
         .unwrap();
         assert_eq!(recovery_target(&root), Some((2, 0x7000028)));
         // An ancestor-timeline base must still reach a target on the newest timeline.
-        assert_eq!(reach(recovery_target(&root), 2, 0x5000000), 0x7000028);
-        assert_eq!(reach(recovery_target(&root), 3, 0x5000000), 0x5000000);
+        assert_eq!(
+            reach(recovery_target(&root), 2, 0x5000000).unwrap(),
+            0x7000028
+        );
+        assert_eq!(
+            reach(recovery_target(&root), 3, 0x5000000).unwrap(),
+            0x5000000
+        );
+        // A target on a timeline with no archived WAL can never be reached.
+        assert!(reach(recovery_target(&root), 1, 0x5000000).is_err());
         fs::remove_dir_all(&root).unwrap();
     }
     #[test]
