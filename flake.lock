@@ -435,6 +435,10 @@
         "nixpkgs": "nixpkgs",
         "rs-harbor": [
           "harbor-rs"
+        ],
+        "treefmt-nix": [
+          "harbor-rs",
+          "treefmt-nix"
         ]
       }
     },

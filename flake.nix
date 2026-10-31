@@ -14,6 +14,7 @@
     };
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
+    treefmt-nix.follows = "harbor-rs/treefmt-nix";
   };
 
   outputs = {
@@ -21,8 +22,14 @@
     harbor-rs,
     harbor-meta,
     nixpkgs,
+    treefmt-nix,
     ...
   } @ outputArgs: let
+    treefmt = pkgs:
+      treefmt-nix.lib.evalModule pkgs {
+        imports = [harbor-meta.treefmtModules.nix harbor-meta.treefmtModules.toml harbor-rs.treefmtModules.rust];
+        projectRootFile = "flake.nix";
+      };
     # harbor's superproject root passes its shared formatter; a formal
     # argument would make standalone Nix resolve it as a registry flake.
     harborFormatting = outputArgs.harborFormatting or null;
@@ -318,14 +325,11 @@
         };
         postgres-lifecycle-oracle-test = pkgs.callPackage ./nix/test-postgres-oracle.nix {};
         harbor-db = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db;
-        # Inside harbor, formatting is owned by the monorepo's shared policy.
+        # Inside harbor, formatting is owned by the monorepo's shared policy;
+        # standalone, the same harbor treefmt modules check the whole tree.
         cargo-fmt =
           if harborFormatting == null
-          then
-            craneLib.cargoFmt {
-              inherit src;
-              pname = "harbor-db";
-            }
+          then (treefmt pkgs).config.build.check self
           else harborFormatting pkgs.stdenv.hostPlatform.system;
         cargo-test = craneLib.cargoTest (commonArgs
           // {
@@ -393,7 +397,7 @@
         };
       });
 
-    formatter = forAllSystems ({pkgs, ...}: pkgs.alejandra);
+    formatter = forAllSystems ({pkgs, ...}: (treefmt pkgs).config.build.wrapper);
 
     # Simit prebuild publication on trunk (secret ATTIC_TOKEN) of the
     # packages Canix consumes.
@@ -415,7 +419,7 @@
 
     devShells = forAllSystems ({pkgs, ...}: let
       packages = [
-        pkgs.alejandra
+        (treefmt pkgs).config.build.wrapper
         pkgs.cargo
         pkgs.cargo-nextest
         pkgs.clippy
