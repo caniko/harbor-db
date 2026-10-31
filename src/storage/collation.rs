@@ -44,7 +44,7 @@ JOIN pg_class t ON t.oid = i.indrelid
 JOIN pg_namespace tn ON tn.oid = t.relnamespace
 JOIN pg_am a ON a.oid = c.relam
 JOIN pg_database d ON d.datname = current_database()
-WHERE c.relkind = 'i' AND a.amname <> 'hash' AND (
+WHERE c.relkind = 'i' AND (
   EXISTS (
     SELECT 1 FROM unnest(i.indcollation::oid[]) WITH ORDINALITY k(coll, pos)
     WHERE k.pos <= i.indnkeyatts AND k.coll <> 0 AND (

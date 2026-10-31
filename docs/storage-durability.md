@@ -316,14 +316,14 @@ Flags: `--dry-run`, `--fail-on-drift` (with `--dry-run`, exit nonzero on drift),
 `collation.check.schedule` (default `daily`) runs the read-only check from a
 timer; the unit fails while any database drifts and never reindexes.
 
-Affected indexes are those with a key column (INCLUDE columns excluded, hash
-indexes excluded) whose collation is the database default or an explicit libc
-collation other than C/POSIX, plus every partial or expression index (the
-collations used inside predicates and expressions are not recorded, so this errs
-toward rebuilding). Explicitly named libc/ICU collations whose
-`pg_collation.collversion` drifted count as drift too and are refreshed with
-`ALTER COLLATION ... REFRESH VERSION` after the rebuild. Check constraints,
-partition bounds and generated columns that depend on ordering are not analysed.
+Affected indexes (every access method, hash included) are those with a key
+column (INCLUDE columns excluded) whose collation is the drifted database
+default or any explicit libc/ICU collation whose `pg_collation.collversion`
+drifted, plus every partial or expression index (collations used inside
+predicates and expressions are not recorded, so this errs toward rebuilding).
+After the rebuild the database version and each drifted named collation are
+refreshed (`ALTER COLLATION ... REFRESH VERSION`). Check constraints, partition
+bounds and generated columns that depend on ordering are not analysed.
 
 Btree and most indexes use `REINDEX INDEX CONCURRENTLY`: no write blocking, but
 two full scans and extra disk and IO per index, so run large databases in a
