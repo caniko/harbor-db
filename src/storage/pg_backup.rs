@@ -85,9 +85,13 @@ fn wal_segments(root: &Path, size: u64) -> Result<Archive> {
 fn verify_manifest(tree: &Path) -> Result<()> {
     let mut sidecar = tree.as_os_str().to_owned();
     sidecar.push(".meta.json");
-    let Ok(meta) = durable::read_json(Path::new(&sidecar)) else {
+    let sidecar = Path::new(&sidecar);
+    if !sidecar.exists() {
         return Ok(());
-    };
+    }
+    // A sidecar that is present but unreadable cannot vouch for its manifest.
+    let meta = durable::read_json(sidecar)
+        .map_err(|_| invalid("backup recovery metadata is unreadable"))?;
     match meta.get("checksum") {
         None => Ok(()),
         Some(recorded) if manifest_sha256(tree).ok().as_deref() == recorded.as_str() => Ok(()),
@@ -445,11 +449,11 @@ fn recovery_target(root: &Path, configured: bool) -> Result<Option<(u64, u64)>> 
     let path = root.join("base").join(format!("{}.meta.json", id.trim()));
     let meta = durable::read_json(&path).ok();
     verify_manifest(&tree)?;
+    // inspect-backup also requires the restore point to follow the backup stop.
     let target = meta.as_ref().and_then(|m| {
-        Some((
-            m["timeline"].as_u64()?,
-            lsn(m["post_backup_lsn"].as_str()?).ok()?,
-        ))
+        let post = lsn(m["post_backup_lsn"].as_str()?).ok()?;
+        let stop = lsn(m["backup_stop_lsn"].as_str()?).ok()?;
+        (post > stop).then_some((m["timeline"].as_u64()?, post))
     });
     target
         .map(Some)
@@ -1131,7 +1135,7 @@ mod tests {
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
         durable::write_json(
             &root.join("base/b1.meta.json"),
-            &json!({"timeline":2,"post_backup_lsn":"0/7000028"}),
+            &json!({"timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028"}),
         )
         .unwrap();
         assert_eq!(recovery_target(&root, false).unwrap(), Some((2, 0x7000028)));
@@ -1147,20 +1151,30 @@ mod tests {
         let sum = manifest_sha256(&root.join("base/b1")).unwrap();
         durable::write_json(
             &root.join("base/b1.meta.json"),
-            &json!({"timeline":2,"post_backup_lsn":"0/7000028","checksum":sum}),
+            &json!({"timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028","checksum":sum}),
         )
         .unwrap();
         assert!(recovery_target(&root, false).is_ok());
+        // A restore point at or before the backup stop is rejected, as inspect-backup does.
+        durable::write_json(
+            &root.join("base/b1.meta.json"),
+            &json!({"timeline":2,"backup_stop_lsn":"0/7000028","post_backup_lsn":"0/7000028","checksum":sum}),
+        )
+        .unwrap();
+        assert!(recovery_target(&root, false).is_err());
+        // An unreadable sidecar cannot vouch for its manifest.
+        fs::write(root.join("base/b1.meta.json"), "not json").unwrap();
+        assert!(recovery_target(&root, false).is_err());
         // A present checksum that is not a string is malformed, not absent.
         durable::write_json(
             &root.join("base/b1.meta.json"),
-            &json!({"timeline":2,"post_backup_lsn":"0/7000028","checksum":null}),
+            &json!({"timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028","checksum":null}),
         )
         .unwrap();
         assert!(recovery_target(&root, false).is_err());
         durable::write_json(
             &root.join("base/b1.meta.json"),
-            &json!({"timeline":2,"post_backup_lsn":"0/7000028","checksum":sum}),
+            &json!({"timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028","checksum":sum}),
         )
         .unwrap();
         fs::write(root.join("base/b1/backup_manifest"), "tampered").unwrap();
@@ -1188,7 +1202,7 @@ mod tests {
         fs::write(root.join("LAST_SUCCESS"), "2026-11-01T12:00:00+00:00\n").unwrap();
         durable::write_json(
             &root.join("base/b1.meta.json"),
-            &json!({"timeline":2,"post_backup_lsn":"0/7000028"}),
+            &json!({"timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028"}),
         )
         .unwrap();
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
