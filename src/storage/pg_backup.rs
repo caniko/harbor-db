@@ -359,6 +359,13 @@ pub fn mark_gap(
         }
         state => state?,
     };
+    // Pruning deletes segments one by one under BACKUP_LOCK; scanning mid-prune would
+    // see holes that are not gaps. The lock is non-blocking and base backups hold it for
+    // hours, so a busy lock defers the check like an unreachable source does.
+    let Ok(_lease) = durable::backup_lock(&root.join("BACKUP_LOCK")) else {
+        eprintln!("backup root busy (prune or base backup); WAL gap check deferred");
+        return Ok(false);
+    };
     // An invalidated slot cannot be resumed and --if-not-exists would keep it: replace it.
     if state == Slot::Lost {
         psql(psql_bin, conninfo, &format!("DROP_REPLICATION_SLOT {slot}"))?;

@@ -756,7 +756,7 @@ in {
               # Local streams: each running receiver holds one sender and slot, and a
               # streaming base backup needs two sender connections and its own slot.
               assertion = let
-                local = lib.filter (t: sourceRole && lib.elem t.source.hostName ["127.0.0.1" "localhost" "::1"] && t.source.port == config.services.postgresql.settings.port) (lib.attrValues targetSources);
+                local = lib.filter (t: sourceRole && t.source.hostName != null && isLoopback t.source.hostName && t.source.port == config.services.postgresql.settings.port) (lib.attrValues targetSources);
                 count = f: lib.length (lib.filter f local);
                 receivers = count (t: t.ts.receiveWal.enable);
                 bases = count (t: t.ts.baseBackup.enable);
