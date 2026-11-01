@@ -74,6 +74,9 @@ enum Action {
         max_wal_age_seconds: u64,
         #[arg(long)]
         max_base_age_seconds: Option<u64>,
+        /// The target publishes recovery metadata: LAST_SUCCESS must name a finalized base.
+        #[arg(long)]
+        recovery_meta: bool,
     },
     /// systemd ExecCondition: exit 1 (skip) when memory is short, 255 (fail) when unreadable.
     Admit {
@@ -137,6 +140,7 @@ fn run() -> Result<ExitCode> {
             receiver_unit,
             max_wal_age_seconds,
             max_base_age_seconds,
+            recovery_meta,
         } => {
             let failures = pg_backup::health(&pg_backup::Health {
                 root: &root,
@@ -147,6 +151,7 @@ fn run() -> Result<ExitCode> {
                 systemctl: systemctl.as_deref().zip(receiver_unit.as_deref()),
                 max_wal_age: max_wal_age_seconds,
                 max_base_age: max_base_age_seconds,
+                recovery_meta,
             });
             for failure in &failures {
                 eprintln!("harbor-db-pg-backup: unhealthy: {failure}");

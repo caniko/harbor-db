@@ -778,7 +778,8 @@ in
               ];
             }).config.systemd.services.pg-basebackup.script;
         in
-          lib.hasInfix "host=/run/postgresql port=55432 user=postgres" script;
+          # The conninfo is shell-escaped in the script, so match its parts.
+          lib.hasInfix "/run/postgresql" script && lib.hasInfix "port=55432 user=postgres" script;
         message = "The local restore-point connection must use the configured PostgreSQL port.";
       }
       {
@@ -874,7 +875,8 @@ in
         in
           failing (named [{services.harbor-db.pgBackup.targetSettings.backupDir = lib.mkForce "/srv/my backups";}])
           && !failing thething
-          && lib.hasInfix "host=/run/custom port=" sock;
+          && lib.hasInfix "/run/custom" sock
+          && !lib.hasInfix "/tmp" sock;
         message = "backupDir must be systemd-safe and the marker connection must use the configured socket directory.";
       }
     ];

@@ -436,7 +436,8 @@
             "--systemctl ${config.systemd.package}/bin/systemctl --receiver-unit pg-receivewal${suffix}.service"
             "--max-wal-age-seconds ${toString healthCfg.maxWalAgeSeconds}"
           ]
-          ++ lib.optional (healthCfg.maxBaseAgeSeconds != null) "--max-base-age-seconds ${toString healthCfg.maxBaseAgeSeconds}");
+          ++ lib.optional (healthCfg.maxBaseAgeSeconds != null) "--max-base-age-seconds ${toString healthCfg.maxBaseAgeSeconds}"
+          ++ lib.optional baseCfg.recoveryMeta "--recovery-meta");
       };
     };
 

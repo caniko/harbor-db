@@ -409,7 +409,7 @@ pub fn mark_gap(
 /// The newest base's recovery target and the timeline it lies on.
 /// Roots without any sidecar keep legacy timestamp markers and have no target; once
 /// recovery metadata is in use, an unusable `LAST_SUCCESS` sidecar is an error.
-fn recovery_target(root: &Path) -> Result<Option<(u64, u64)>> {
+fn recovery_target(root: &Path, configured: bool) -> Result<Option<(u64, u64)>> {
     let uses_sidecars = fs::read_dir(root.join("base"))?
         .flatten()
         .any(|e| e.file_name().to_string_lossy().ends_with(".meta.json"));
@@ -417,7 +417,7 @@ fn recovery_target(root: &Path) -> Result<Option<(u64, u64)>> {
     // so metadata mode survives even if every sidecar has been lost.
     let id_marker = fs::read_to_string(root.join("LAST_SUCCESS"))
         .is_ok_and(|m| !m.trim().is_empty() && root.join("base").join(m.trim()).is_dir());
-    let uses_meta = uses_sidecars || id_marker;
+    let uses_meta = configured || uses_sidecars || id_marker;
     if !uses_meta {
         return Ok(None);
     }
@@ -717,6 +717,8 @@ pub struct Health<'a> {
     pub systemctl: Option<(&'a Path, &'a str)>,
     pub max_wal_age: u64,
     pub max_base_age: Option<u64>,
+    /// Configured recoveryMeta: metadata mode regardless of what is left on disk.
+    pub recovery_meta: bool,
 }
 fn age(path: &Path) -> Result<u64> {
     let modified = fs::metadata(path)?.modified()?;
@@ -767,7 +769,7 @@ pub fn health(h: &Health) -> Vec<String> {
                         .range((newest, 0)..=(newest, u64::MAX))
                         .next_back()
                         .map_or(0, |(k, _)| k.1);
-                    let needed = recovery_target(h.root)
+                    let needed = recovery_target(h.root, h.recovery_meta)
                         .and_then(|target| reach(h.root, target, newest, stop));
                     let complete_through =
                         complete_through(needed.as_ref().ok().copied(), stop, h.segment_bytes);
@@ -1097,19 +1099,19 @@ mod tests {
         let root = std::env::temp_dir().join(format!("pgb-target-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("base")).unwrap();
-        assert_eq!(recovery_target(&root).unwrap(), None);
+        assert_eq!(recovery_target(&root, false).unwrap(), None);
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
         durable::write_json(
             &root.join("base/b1.meta.json"),
             &json!({"timeline":2,"post_backup_lsn":"0/7000028"}),
         )
         .unwrap();
-        assert_eq!(recovery_target(&root).unwrap(), Some((2, 0x7000028)));
+        assert_eq!(recovery_target(&root, false).unwrap(), Some((2, 0x7000028)));
         // Once sidecars are in use, a LAST_SUCCESS without a usable one fails closed.
         fs::write(root.join("LAST_SUCCESS"), "b2\n").unwrap();
-        assert!(recovery_target(&root).is_err());
+        assert!(recovery_target(&root, false).is_err());
         fs::write(root.join("base/b2.meta.json"), "{}").unwrap();
-        assert!(recovery_target(&root).is_err());
+        assert!(recovery_target(&root, false).is_err());
         // A manifest changed after finalization is rejected, as inspect-backup does.
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
         fs::create_dir_all(root.join("base/b1")).unwrap();
@@ -1120,25 +1122,30 @@ mod tests {
             &json!({"timeline":2,"post_backup_lsn":"0/7000028","checksum":sum}),
         )
         .unwrap();
-        assert!(recovery_target(&root).is_ok());
+        assert!(recovery_target(&root, false).is_ok());
         fs::write(root.join("base/b1/backup_manifest"), "tampered").unwrap();
-        assert!(recovery_target(&root).is_err());
+        assert!(recovery_target(&root, false).is_err());
         fs::write(root.join("base/b1/backup_manifest"), "original").unwrap();
         fs::write(root.join("LAST_SUCCESS"), "b2\n").unwrap();
         // So does a marker that cannot be read, or none at all.
         fs::write(root.join("LAST_SUCCESS"), [0xff, 0xfe]).unwrap();
-        assert!(recovery_target(&root).is_err());
+        assert!(recovery_target(&root, false).is_err());
         fs::remove_file(root.join("LAST_SUCCESS")).unwrap();
-        assert!(recovery_target(&root).is_err());
+        assert!(recovery_target(&root, false).is_err());
         // An ID marker still means metadata mode after every sidecar is gone.
         for sidecar in ["b1", "b2"] {
             let _ = fs::remove_file(root.join(format!("base/{sidecar}.meta.json")));
         }
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
-        assert!(recovery_target(&root).is_err());
-        // A legacy timestamp marker without sidecars has no target.
+        assert!(recovery_target(&root, false).is_err());
+        // A legacy timestamp marker without sidecars has no target...
         fs::write(root.join("LAST_SUCCESS"), "2026-11-01T12:00:00+00:00\n").unwrap();
-        assert_eq!(recovery_target(&root).unwrap(), None);
+        assert_eq!(recovery_target(&root, false).unwrap(), None);
+        // ...unless recoveryMeta is configured: then nothing on disk downgrades it.
+        assert!(recovery_target(&root, true).is_err());
+        fs::remove_file(root.join("LAST_SUCCESS")).unwrap();
+        assert!(recovery_target(&root, true).is_err());
+        fs::write(root.join("LAST_SUCCESS"), "2026-11-01T12:00:00+00:00\n").unwrap();
         durable::write_json(
             &root.join("base/b1.meta.json"),
             &json!({"timeline":2,"post_backup_lsn":"0/7000028"}),
@@ -1147,32 +1154,32 @@ mod tests {
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
         // An ancestor-timeline base must still reach a target on the newest timeline.
         assert_eq!(
-            reach(&root, recovery_target(&root).unwrap(), 2, 0x5000000).unwrap(),
+            reach(&root, recovery_target(&root, false).unwrap(), 2, 0x5000000).unwrap(),
             0x7000028
         );
         // A target on a timeline with no archived WAL can never be reached.
-        assert!(reach(&root, recovery_target(&root).unwrap(), 1, 0x5000000).is_err());
+        assert!(reach(&root, recovery_target(&root, false).unwrap(), 1, 0x5000000).is_err());
         // An older target timeline counts only on the newest timeline's ancestry.
         fs::create_dir_all(root.join("wal")).unwrap();
-        assert!(reach(&root, recovery_target(&root).unwrap(), 3, 0x5000000).is_err());
+        assert!(reach(&root, recovery_target(&root, false).unwrap(), 3, 0x5000000).is_err());
         fs::write(
             root.join("wal/00000003.history"),
             "1\t0/3000000\tx\n2\t0/8000000\tx\n",
         )
         .unwrap();
         assert_eq!(
-            reach(&root, recovery_target(&root).unwrap(), 3, 0x5000000).unwrap(),
+            reach(&root, recovery_target(&root, false).unwrap(), 3, 0x5000000).unwrap(),
             0x5000000
         );
         // A sibling branch, or a target after the ancestor's fork, is unreachable.
         fs::write(root.join("wal/00000003.history"), "1\t0/3000000\tx\n").unwrap();
-        assert!(reach(&root, recovery_target(&root).unwrap(), 3, 0x5000000).is_err());
+        assert!(reach(&root, recovery_target(&root, false).unwrap(), 3, 0x5000000).is_err());
         fs::write(
             root.join("wal/00000003.history"),
             "1\t0/3000000\tx\n2\t0/6000000\tx\n",
         )
         .unwrap();
-        assert!(reach(&root, recovery_target(&root).unwrap(), 3, 0x5000000).is_err());
+        assert!(reach(&root, recovery_target(&root, false).unwrap(), 3, 0x5000000).is_err());
         fs::remove_dir_all(&root).unwrap();
     }
     #[test]
