@@ -9,6 +9,13 @@
   inherit (lib) mkEnableOption mkIf mkMerge mkOption types;
   cfg = config.services.harbor-db.pgBackup;
   sourceRole = lib.elem cfg.role ["source" "both"];
+  # localhost, 127.0.0.0/8 and the IPv6 loopback, in their common spellings.
+  isLoopback = host: let
+    h = lib.toLower host;
+  in
+    lib.elem h ["localhost" "::1" "0:0:0:0:0:0:0:1"]
+    || builtins.match "127\\.[0-9.]*" h != null
+    || builtins.match "::ffff:127\\.[0-9.]*" h != null;
   targetRole = lib.elem cfg.role ["target" "both"];
   loopbackAddresses = lib.optionals cfg.targetSettings.sourceLocalRecovery.enable (
     lib.optional (lib.elem cfg.source.hostName ["127.0.0.1" "localhost"]) "127.0.0.1"
@@ -208,7 +215,8 @@
       if baseCfg.sqlConninfo != null
       then baseCfg.sqlConninfo
       else if sourceRole && isLegacy && lib.elem source.hostName ["127.0.0.1" "localhost" "::1"]
-      then "host=${socketDir} port=${toString source.port} user=postgres dbname=postgres"
+      # libpq conninfo values: single-quoted, with backslash and quote escaped.
+      then "host='${lib.replaceStrings ["\\" "'"] ["\\\\" "\\'"] socketDir}' port=${toString source.port} user=postgres dbname=postgres"
       else null;
     admissionArgs = lib.concatStringsSep " " (
       lib.optional (baseCfg.admission.minRamBytes != null) "--min-ram-bytes ${toString baseCfg.admission.minRamBytes}"
@@ -663,7 +671,7 @@ in {
             }
             {
               # Named targets are for remote sources; the local-source plumbing (pg_hba, replicator role, capacity) belongs to the legacy target.
-              assertion = lib.all (t: !lib.elem t.source.hostName ["127.0.0.1" "localhost" "::1"]) (lib.attrValues cfg.targets);
+              assertion = lib.all (t: !isLoopback t.source.hostName) (lib.attrValues cfg.targets);
               message = "services.harbor-db.pgBackup.targets.<name> must point at a remote source; use the single-source options for a loopback source.";
             }
             {

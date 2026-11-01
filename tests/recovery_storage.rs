@@ -1287,11 +1287,12 @@ fn routine_admission_survives_a_newer_base_but_transitions_require_its_evidence(
     // Without certified evidence, routine verification must check checksums;
     // preflight defers byte verification entirely.
     assert_eq!(fs::read_to_string(f.p("verify.log")).unwrap(), "verify\n");
+    // Same `now` as above: with f.now a slow runner trips the freshness check
+    // before the backup binding this asserts.
     for err in [
-        recovery::evidence_check(&f.config, Some(f.now)).unwrap_err(),
-        evidence_preflight(&f.config, Some(f.now)).unwrap_err(),
-        recovery::live_check(&f.config, Path::new("/run/postgresql"), 5432, Some(f.now))
-            .unwrap_err(),
+        recovery::evidence_check(&f.config, Some(now)).unwrap_err(),
+        evidence_preflight(&f.config, Some(now)).unwrap_err(),
+        recovery::live_check(&f.config, Path::new("/run/postgresql"), 5432, Some(now)).unwrap_err(),
     ] {
         assert!(err.to_string().contains("different backup"), "{err}");
     }

@@ -106,6 +106,8 @@ fn tree_sysid(tree: &Path) -> Result<u64> {
 }
 /// Every archived segment `first..=last` belongs to the cluster `sysid`: stale
 /// files of a replaced cluster must never satisfy continuity.
+// ponytail: reads one 32-byte header per retained segment each run (linear in retention;
+// ~1 s on Atlas today); cache verified segment headers if retention grows by orders.
 fn same_cluster(archive: &Archive, timeline: u32, first: u64, last: u64, sysid: u64) -> Result<()> {
     for segment in first..=last {
         if let Some((partial, path)) = archive.get(&(timeline, segment)) {
