@@ -580,6 +580,11 @@ in
         message = "continuous WAL streaming must restart after failure";
       }
       {
+        name = "receiver-write-confinement";
+        assertion = receive.ProtectSystem == "strict" && receive.ReadWritePaths == ["/var/backups/pgbackup/10.0.0.2"];
+        message = "the WAL receiver may write only its own backup root";
+      }
+      {
         name = "source-replication-hba";
         assertion = lib.hasInfix "host replication replicator 10.0.0.2/32 scram-sha-256" sourcePostgresql.authentication;
         message = "source role must render the allowed replication host in pg_hba.conf";

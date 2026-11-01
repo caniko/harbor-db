@@ -310,6 +310,8 @@
         RestartSteps = 6;
         RestartMaxDelaySec = "5min";
         PrivateTmp = true;
+        ProtectSystem = "strict";
+        ReadWritePaths = [backupRoot];
         AmbientCapabilities = "";
         CapabilityBoundingSet = "";
         NoNewPrivileges = true;
