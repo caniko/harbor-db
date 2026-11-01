@@ -688,8 +688,8 @@ in {
               message = "services.harbor-db.pgBackup targets sharing a source host and port need distinct replication slot names.";
             }
             {
-              assertion = cfg.source.hostName != null || (cfg.role == "target" && cfg.targets != {});
-              message = "services.harbor-db.pgBackup.source.hostName is required unless role=target with named targets.";
+              assertion = !targetRole || cfg.source.hostName != null || (cfg.role == "target" && cfg.targets != {});
+              message = "services.harbor-db.pgBackup.source.hostName is required for target roles unless role=target with named targets.";
             }
             {
               assertion = sourceRole -> config.services.postgresql.enable or false;

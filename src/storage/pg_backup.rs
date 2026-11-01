@@ -109,7 +109,11 @@ fn tree_sysid(tree: &Path) -> Result<u64> {
 fn same_cluster(archive: &Archive, timeline: u32, first: u64, last: u64, sysid: u64) -> Result<()> {
     for segment in first..=last {
         if let Some((partial, path)) = archive.get(&(timeline, segment)) {
-            let found = segment_sysid(path)?;
+            // A .partial shorter than a header is unwritten: its cluster is unknown.
+            let found = match segment_sysid(path) {
+                Err(_) if *partial => 0,
+                other => other?,
+            };
             if found != sysid && !(*partial && found == 0) {
                 return Err(invalid(format!(
                     "WAL segment {segment} (timeline {timeline}) belongs to another cluster; use a fresh backup root"
@@ -1168,6 +1172,13 @@ mod tests {
             same_cluster(&have, 1, 4, 5, 77).is_ok(),
             "unwritten partial is tolerated"
         );
+        fs::write(dir.join("short"), [0u8; 8]).unwrap();
+        have.insert((1, 6), (true, dir.join("short")));
+        assert!(
+            same_cluster(&have, 1, 4, 6, 77).is_ok(),
+            "a partial shorter than a header is unknown"
+        );
+        have.remove(&(1, 6));
         assert!(same_cluster(&have, 1, 4, 5, 78).is_err());
         // Replacement detection reads past an unwritten newest partial.
         assert_eq!(newest_sysid(&have), Some(77));
