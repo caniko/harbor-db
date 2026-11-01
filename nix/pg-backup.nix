@@ -15,7 +15,8 @@
   in
     lib.elem h ["localhost" "::1" "0:0:0:0:0:0:0:1"]
     || builtins.match "127\\.[0-9.]*" h != null
-    || builtins.match "::ffff:127\\.[0-9.]*" h != null;
+    || builtins.match "::ffff:127\\.[0-9.]*" h != null
+    || builtins.match "::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}" h != null;
   targetRole = lib.elem cfg.role ["target" "both"];
   loopbackAddresses = lib.optionals cfg.targetSettings.sourceLocalRecovery.enable (
     lib.optional (lib.elem cfg.source.hostName ["127.0.0.1" "localhost"]) "127.0.0.1"

@@ -449,11 +449,18 @@ fn recovery_target(root: &Path, configured: bool) -> Result<Option<(u64, u64)>> 
     let path = root.join("base").join(format!("{}.meta.json", id.trim()));
     let meta = durable::read_json(&path).ok();
     verify_manifest(&tree)?;
-    // inspect-backup also requires the restore point to follow the backup stop.
+    // inspect-backup also requires the sidecar to name this backup and this cluster,
+    // carry its major and epoch, and put the restore point after the backup stop.
+    let id = id.trim();
     let target = meta.as_ref().and_then(|m| {
+        let sysid: u64 = m["system_identifier"].as_str()?.parse().ok()?;
+        let identity = m["backup_id"].as_str() == Some(id)
+            && m["pg_major"].is_u64()
+            && m["epoch_id"].as_str().is_some_and(|e| !e.is_empty())
+            && tree_sysid(&tree).ok() == Some(sysid);
         let post = lsn(m["post_backup_lsn"].as_str()?).ok()?;
         let stop = lsn(m["backup_stop_lsn"].as_str()?).ok()?;
-        (post > stop).then_some((m["timeline"].as_u64()?, post))
+        (identity && post > stop).then_some((m["timeline"].as_u64()?, post))
     });
     target
         .map(Some)
@@ -1132,13 +1139,34 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("base")).unwrap();
         assert_eq!(recovery_target(&root, false).unwrap(), None);
+        // The sidecar must name this backup and cluster (control file sysid 42).
+        fs::create_dir_all(root.join("base/b1/global")).unwrap();
+        fs::write(root.join("base/b1/global/pg_control"), 42u64.to_ne_bytes()).unwrap();
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
         durable::write_json(
             &root.join("base/b1.meta.json"),
-            &json!({"timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028"}),
+            &json!({"backup_id":"b1","pg_major":18,"epoch_id":"e1","system_identifier":"42","timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028"}),
         )
         .unwrap();
         assert_eq!(recovery_target(&root, false).unwrap(), Some((2, 0x7000028)));
+        for wrong in [
+            json!({"backup_id":"b9","pg_major":18,"epoch_id":"e1","system_identifier":"42"}),
+            json!({"backup_id":"b1","pg_major":18,"epoch_id":"e1","system_identifier":"43"}),
+            json!({"backup_id":"b1","epoch_id":"e1","system_identifier":"42"}),
+            json!({"backup_id":"b1","pg_major":18,"system_identifier":"42"}),
+        ] {
+            let mut meta = wrong;
+            meta["timeline"] = json!(2);
+            meta["backup_stop_lsn"] = json!("0/7000000");
+            meta["post_backup_lsn"] = json!("0/7000028");
+            durable::write_json(&root.join("base/b1.meta.json"), &meta).unwrap();
+            assert!(recovery_target(&root, false).is_err(), "{meta}");
+        }
+        durable::write_json(
+            &root.join("base/b1.meta.json"),
+            &json!({"backup_id":"b1","pg_major":18,"epoch_id":"e1","system_identifier":"42","timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028"}),
+        )
+        .unwrap();
         // Once sidecars are in use, a LAST_SUCCESS without a usable one fails closed.
         fs::write(root.join("LAST_SUCCESS"), "b2\n").unwrap();
         assert!(recovery_target(&root, false).is_err());
@@ -1151,14 +1179,14 @@ mod tests {
         let sum = manifest_sha256(&root.join("base/b1")).unwrap();
         durable::write_json(
             &root.join("base/b1.meta.json"),
-            &json!({"timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028","checksum":sum}),
+            &json!({"backup_id":"b1","pg_major":18,"epoch_id":"e1","system_identifier":"42","timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028","checksum":sum}),
         )
         .unwrap();
         assert!(recovery_target(&root, false).is_ok());
         // A restore point at or before the backup stop is rejected, as inspect-backup does.
         durable::write_json(
             &root.join("base/b1.meta.json"),
-            &json!({"timeline":2,"backup_stop_lsn":"0/7000028","post_backup_lsn":"0/7000028","checksum":sum}),
+            &json!({"backup_id":"b1","pg_major":18,"epoch_id":"e1","system_identifier":"42","timeline":2,"backup_stop_lsn":"0/7000028","post_backup_lsn":"0/7000028","checksum":sum}),
         )
         .unwrap();
         assert!(recovery_target(&root, false).is_err());
@@ -1168,13 +1196,13 @@ mod tests {
         // A present checksum that is not a string is malformed, not absent.
         durable::write_json(
             &root.join("base/b1.meta.json"),
-            &json!({"timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028","checksum":null}),
+            &json!({"backup_id":"b1","pg_major":18,"epoch_id":"e1","system_identifier":"42","timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028","checksum":null}),
         )
         .unwrap();
         assert!(recovery_target(&root, false).is_err());
         durable::write_json(
             &root.join("base/b1.meta.json"),
-            &json!({"timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028","checksum":sum}),
+            &json!({"backup_id":"b1","pg_major":18,"epoch_id":"e1","system_identifier":"42","timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028","checksum":sum}),
         )
         .unwrap();
         fs::write(root.join("base/b1/backup_manifest"), "tampered").unwrap();
@@ -1202,7 +1230,7 @@ mod tests {
         fs::write(root.join("LAST_SUCCESS"), "2026-11-01T12:00:00+00:00\n").unwrap();
         durable::write_json(
             &root.join("base/b1.meta.json"),
-            &json!({"timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028"}),
+            &json!({"backup_id":"b1","pg_major":18,"epoch_id":"e1","system_identifier":"42","timeline":2,"backup_stop_lsn":"0/7000000","post_backup_lsn":"0/7000028"}),
         )
         .unwrap();
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
