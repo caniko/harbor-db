@@ -463,6 +463,11 @@ fn fork_of(root: &Path, timeline: u32, ancestor: u64) -> Option<u64> {
         .find(|(t, _)| u64::from(*t) == ancestor)
         .map(|(_, at)| at)
 }
+/// Last segment that must be complete: the one holding the recovery target (or the
+/// base stop); only a later tail may still be a `.partial`.
+fn complete_through(target: Option<u64>, stop: u64, segment_bytes: u64) -> u64 {
+    target.unwrap_or(stop).max(stop) / segment_bytes
+}
 /// An interrupted `remove_gap` leaves its marker as `.gap.clearing.*`; it still counts.
 fn gap_present(root: &Path) -> bool {
     gap_path(root).exists() || clearing_markers(root).next().is_some()
@@ -751,9 +756,11 @@ pub fn health(h: &Health) -> Vec<String> {
                         .range((newest, 0)..=(newest, u64::MAX))
                         .next_back()
                         .map_or(0, |(k, _)| k.1);
-                    let legs = match recovery_target(h.root)
-                        .and_then(|target| reach(h.root, target, newest, stop))
-                    {
+                    let needed = recovery_target(h.root)
+                        .and_then(|target| reach(h.root, target, newest, stop));
+                    let complete_through =
+                        complete_through(needed.as_ref().ok().copied(), stop, h.segment_bytes);
+                    let legs = match needed {
                         _ if newest < timeline => {
                             Err(invalid(format!("no WAL on timeline {timeline}")))
                         }
@@ -768,8 +775,8 @@ pub fn health(h: &Health) -> Vec<String> {
                             let last = legs.len().saturating_sub(1);
                             for (i, (t, lo, end)) in legs.into_iter().enumerate() {
                                 // A .partial file has unknown fill: only the final leg's tail,
-                                // past the base stop, may be one.
-                                let partial_ok = i == last && end > stop / h.segment_bytes;
+                                // past the stop and the recovery target, may be one.
+                                let partial_ok = i == last && end > complete_through;
                                 if let Err(e) = contiguous(&archive, t, lo, end, partial_ok)
                                     .and_then(|()| same_cluster(&archive, t, lo, end, sysid))
                                 {
@@ -1045,6 +1052,14 @@ mod tests {
         assert!(!has_hole(&ok));
         let ancestor = archive(&[(1, 3, false), (1, 5, false), (2, 6, false), (2, 7, false)]);
         assert!(has_hole(&ancestor));
+    }
+    #[test]
+    fn the_target_segment_must_be_complete() {
+        let mib = 1 << 20;
+        // Target in segment 9, stop in 5: a partial is allowed only from segment 10.
+        assert_eq!(complete_through(Some(9 * mib + 40), 5 * mib, mib), 9);
+        assert_eq!(complete_through(None, 5 * mib, mib), 5);
+        assert_eq!(complete_through(Some(3 * mib), 5 * mib, mib), 5);
     }
     #[test]
     fn a_source_that_cannot_be_reached_is_classified() {
