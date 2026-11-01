@@ -647,6 +647,9 @@ in {
       ])
       targetSources);
     slotClaims = lib.concatMap (t: let
+      # ponytail: best-effort aliasing (case, trailing dot, loopback). CNAMEs, hosts
+      # entries or alternate IPv6 spellings can still name one server; such a clash
+      # surfaces at runtime as a receiver that cannot acquire its active slot.
       # DNS names are case-insensitive (RFC 4343) and a trailing root dot is the same name.
       name = lib.removeSuffix "." (lib.toLower t.source.hostName);
       host =
