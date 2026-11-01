@@ -104,6 +104,56 @@
         }
       ];
     }).config;
+  recoveryReady =
+    (localEval.extendModules {
+      modules = [
+        {
+          services.harbor-db.pgBackup.targetSettings = {
+            health.enable = true;
+            baseBackup = {
+              recoveryMeta = true;
+              admission = {
+                minRamBytes = 1073741824;
+                minSwapBytes = 536870912;
+              };
+            };
+          };
+        }
+      ];
+    }).config;
+  named = modules:
+    (import (pkgs.path + "/nixos/lib/eval-config.nix") {
+      system = "x86_64-linux";
+      modules =
+        [
+          ./pg-backup.nix
+          {
+            system.stateVersion = "24.11";
+            services.harbor-db.pgBackup = {
+              enable = true;
+              role = "target";
+              targetSettings = {
+                backupDir = "/data/scratch/pgbackup";
+                replicatorPasswordFile = "/run/secrets/pg-replicator-password";
+              };
+              targets.thething = {
+                source.hostName = "10.0.0.2";
+                retain = {
+                  baseBackupDays = 7;
+                  walDays = 8;
+                };
+                baseBackup.maxRate = "20M";
+                receiveWal = {
+                  statusInterval = 1;
+                  slotCreateTimeoutSeconds = 10;
+                };
+              };
+            };
+          }
+        ]
+        ++ modules;
+    }).config;
+  thething = named [];
   walSizeAccepted = size: let
     selected = eval.extendModules {
       modules = [{services.harbor-db.pgBackup.targetSettings.walSegmentBytes = lib.mkForce size;}];
@@ -592,6 +642,243 @@ in
         name = "source-local-private-recovery-namespace";
         assertion = lib.elem "f /var/backups/pgbackup/127.0.0.1/recovery/PROTOCOL 0600 postgres postgres - source-local-v1" localEval.config.systemd.tmpfiles.rules && lib.elem "f /var/backups/pgbackup/127.0.0.1/locks/mutate 0600 postgres postgres -" localEval.config.systemd.tmpfiles.rules;
         message = "The capture namespace and mutation inode must be provisioned outside completed backup directories with private ownership.";
+      }
+      {
+        name = "recovery-ready-backup-opt-in";
+        assertion = let
+          script = recoveryReady.systemd.services.pg-basebackup.script;
+          units = recoveryReady.systemd.services;
+        in
+          lib.hasInfix "harbor-db-pg-backup finalize" script
+          && !(lib.hasInfix "harbor-db-pg-backup" localBackup)
+          && !(lib.hasInfix "harbor-db-pg-backup" base)
+          && lib.any (c: lib.hasInfix "admit --min-ram-bytes 1073741824 --min-swap-bytes 536870912" c) (lib.toList units.pg-basebackup.serviceConfig.ExecCondition)
+          && lib.any (c: lib.hasInfix "mark-gap" c) (lib.toList units.pg-receivewal.serviceConfig.ExecStartPre)
+          && units ? pg-backup-health
+          && recoveryReady.systemd.timers ? pg-backup-health
+          && !(eval.config.systemd.services ? pg-backup-health)
+          && eval.config.systemd.services.pg-basebackup.serviceConfig.ExecCondition == [];
+        message = "recoveryMeta, gap tracking, health and admission are opt-in and leave default units unchanged.";
+      }
+      {
+        name = "recovery-meta-requires-source-sql";
+        assertion = let
+          accepted = let
+            selected =
+              (eval.extendModules {
+                modules = [{services.harbor-db.pgBackup.targetSettings.baseBackup.recoveryMeta = true;}];
+              }).config;
+          in
+            lib.all (a: a.assertion || !lib.hasInfix "recoveryMeta requires" a.message) selected.assertions;
+        in
+          !accepted
+          && (let
+            ok =
+              (eval.extendModules {
+                modules = [
+                  {
+                    services.harbor-db.pgBackup.targetSettings.baseBackup = {
+                      recoveryMeta = true;
+                      sqlConninfo = "host=10.0.0.2 user=marker";
+                    };
+                  }
+                ];
+              }).config;
+          in
+            lib.all (a: a.assertion || !lib.hasInfix "recoveryMeta requires" a.message) ok.assertions);
+        message = "A target-only host must name a source SQL connection before enabling recoveryMeta.";
+      }
+      {
+        name = "named-targets-use-suffixed-units-and-private-roots";
+        assertion = let
+          services = thething.systemd.services;
+          receive = services.pg-receivewal-thething.serviceConfig;
+          both = named [{services.harbor-db.pgBackup.source.hostName = "10.0.0.9";}];
+        in
+          lib.hasInfix "/data/scratch/pgbackup/thething" services.pg-basebackup-thething.script
+          && services ? pg-backup-prune-thething
+          && thething.systemd.timers ? pg-basebackup-thething
+          && !(services ? pg-receivewal)
+          && !(services ? pg-basebackup)
+          && lib.any (c: lib.hasPrefix "-" c && lib.hasInfix "/timeout 10s " c && lib.hasInfix "--create-slot --if-not-exists" c) (lib.toList receive.ExecStartPre)
+          && lib.hasInfix "--status-interval=1" receive.ExecStart
+          && lib.hasInfix "--status-interval=1 " (lib.head (lib.toList receive.ExecStartPre))
+          && lib.elem "d /data/scratch/pgbackup/thething 0750 postgres postgres -" thething.systemd.tmpfiles.rules
+          && both.systemd.services ? pg-receivewal
+          && both.systemd.services ? pg-receivewal-thething
+          && lib.hasInfix "retain_days=7" services.pg-backup-prune-thething.script
+          && lib.hasInfix "wal_retain=8" services.pg-backup-prune-thething.script;
+        message = "Named targets must get -<name> units, a backupDir/<name> root, bounded best-effort slot creation and a configurable status interval, alongside the legacy target.";
+      }
+      {
+        name = "named-targets-carry-recovery-options";
+        assertion = let
+          selected = named [
+            {
+              services.harbor-db.pgBackup.targets.thething = {
+                health.enable = true;
+                baseBackup = {
+                  recoveryMeta = true;
+                  sqlConninfo = "host=10.0.0.2 user=marker";
+                  admission.minRamBytes = 1;
+                };
+              };
+            }
+          ];
+          unsupported = named [{services.harbor-db.pgBackup.targets.thething.baseBackup.recoveryMeta = true;}];
+          failing = c: lib.any (a: !a.assertion && lib.hasInfix "services.harbor-db.pgBackup" a.message) c.assertions;
+        in
+          lib.hasInfix "harbor-db-pg-backup finalize" selected.systemd.services.pg-basebackup-thething.script
+          && lib.hasInfix "/data/scratch/pgbackup/thething" (builtins.elemAt (lib.toList selected.systemd.services.pg-backup-health-thething.serviceConfig.ExecStart) 0)
+          && lib.any (c: lib.hasInfix "mark-gap" c) (lib.toList selected.systemd.services.pg-receivewal-thething.serviceConfig.ExecStartPre)
+          && !failing selected
+          && failing unsupported
+          && !(failing thething)
+          && failing (named [{services.harbor-db.pgBackup.targets.legacy.source.hostName = "10.0.0.3";}]);
+        message = "recoveryMeta, gap tracking, health and admission must work per named target, require an explicit SQL connection remotely, and reserve the legacy name.";
+      }
+      {
+        name = "local-streams-need-sender-and-slot-headroom";
+        assertion = let
+          # A named loopback target adds its own receiver and base backup.
+          namedLocalRejected =
+            lib.any (a: !a.assertion && lib.hasInfix "local receiver plus base backups" a.message)
+            (localEval.extendModules {
+              modules = [{services.harbor-db.pgBackup.targets.extra.source.hostName = "127.0.0.1";}];
+            }).config.assertions;
+          rejected = slots: senders:
+            lib.any (a: !a.assertion && lib.hasInfix "local receiver plus base backups" a.message)
+            (localEval.extendModules {
+              modules = [
+                {
+                  services.postgresql.settings = {
+                    max_replication_slots = lib.mkForce slots;
+                    max_wal_senders = lib.mkForce senders;
+                  };
+                }
+              ];
+            }).config.assertions;
+        in
+          rejected 1 1 && rejected 2 2 && !rejected 2 3 && namedLocalRejected;
+        message = "A loopback receiver plus streaming base backups need two slots and three WAL senders.";
+      }
+      {
+        name = "local-marker-connection-carries-the-source-port";
+        assertion = let
+          script =
+            (localEval.extendModules {
+              modules = [
+                {
+                  services.postgresql.settings.port = lib.mkForce 55432;
+                  services.harbor-db.pgBackup = {
+                    source.port = lib.mkForce 55432;
+                    targetSettings.baseBackup.recoveryMeta = true;
+                  };
+                }
+              ];
+            }).config.systemd.services.pg-basebackup.script;
+        in
+          # The conninfo is shell-escaped in the script, so match its parts.
+          lib.hasInfix "/run/postgresql" script && lib.hasInfix "port=55432 user=postgres" script;
+        message = "The local restore-point connection must use the configured PostgreSQL port.";
+      }
+      {
+        name = "named-targets-on-one-source-need-distinct-base-slots";
+        assertion = let
+          failing = c: lib.any (a: !a.assertion && lib.hasInfix "distinct replication slot names" a.message) c.assertions;
+          second = {
+            source.hostName = "10.0.0.2";
+            receiveWal.slotName = "other_wal";
+          };
+        in
+          failing (named [{services.harbor-db.pgBackup.targets.second = second;}])
+          && !failing (named [{services.harbor-db.pgBackup.targets.second = second // {baseBackup.slotName = "other_base";};}]);
+        message = "Targets sharing a source must not share the temporary base-backup slot either.";
+      }
+      {
+        name = "recovery-meta-needs-receiver-and-modern-postgresql";
+        assertion = let
+          failing = text: modules:
+            lib.any (a: !a.assertion && lib.hasInfix text a.message) (named modules).assertions;
+          meta = {
+            services.harbor-db.pgBackup.targets.thething.baseBackup = {
+              recoveryMeta = true;
+              sqlConninfo = "host=10.0.0.2 user=marker";
+            };
+          };
+        in
+          !failing "requires receiveWal.enable" [meta]
+          && failing "requires receiveWal.enable" [meta {services.harbor-db.pgBackup.targets.thething.receiveWal.enable = false;}]
+          && failing "PostgreSQL 15 or newer" [meta {services.harbor-db.pgBackup.targets.thething.package = pkgs.postgresql_14;}]
+          && !failing "PostgreSQL 15 or newer" [meta];
+        message = "recoveryMeta needs a receiver and a PostgreSQL 15+ package.";
+      }
+      {
+        name = "colliding-target-roots-are-rejected";
+        assertion = let
+          failing = c: lib.any (a: !a.assertion && lib.hasInfix "backup roots collide" a.message) c.assertions;
+        in
+          failing (named [{services.harbor-db.pgBackup.source.hostName = "thething";}])
+          && !failing (named [{services.harbor-db.pgBackup.source.hostName = "10.0.0.9";}]);
+        message = "A legacy host-named root must not equal a named target's root.";
+      }
+      {
+        name = "marker-connection-rejects-embedded-passwords";
+        assertion = let
+          failing = conninfo:
+            lib.any (a: !a.assertion && lib.hasInfix "must not embed a password" a.message)
+            (named [{services.harbor-db.pgBackup.targets.thething.baseBackup.sqlConninfo = conninfo;}]).assertions;
+        in
+          failing "host=h user=u password=secret" && failing "postgresql://u@h/db?%70assword=x" && failing "postgresql://u:secret@h/postgres" && !failing "postgresql://u@h/postgres" && !failing "host=h user=u passfile=/run/secrets/pgpass";
+        message = "Passwords must not be rendered into the unit script.";
+      }
+      {
+        name = "recovery-meta-excludes-source-local-recovery";
+        assertion = let
+          failing = c: lib.any (a: !a.assertion && lib.hasInfix "cannot be combined with sourceLocalRecovery" a.message) c.assertions;
+          meta = {
+            baseBackup = {
+              recoveryMeta = true;
+              sqlConninfo = "host=h user=u";
+            };
+          };
+        in
+          failing (localEval.extendModules {modules = [{services.harbor-db.pgBackup.targetSettings = meta;}];}).config
+          # A named target has its own root and LAST_SUCCESS; only the legacy target is source-local.
+          && !failing (localEval.extendModules {modules = [{services.harbor-db.pgBackup.targets.extra = {source.hostName = "10.0.0.2";} // meta;}];}).config
+          && !failing localEval.config;
+        message = "recoveryMeta must not combine with sourceLocalRecovery on the legacy target; named targets stay independent.";
+      }
+      {
+        name = "loopback-aliases-share-slot-endpoints";
+        assertion = let
+          failing = c: lib.any (a: !a.assertion && lib.hasInfix "distinct replication slot names" a.message) c.assertions;
+        in
+          failing (named [{services.harbor-db.pgBackup.targets.a = {source.hostName = "localhost";};} {services.harbor-db.pgBackup.targets.b = {source.hostName = "127.0.0.1";};}]);
+        message = "localhost and 127.0.0.1 are the same endpoint for slot uniqueness.";
+      }
+      {
+        name = "backup-dir-is-systemd-safe-and-socket-dir-is-configured";
+        assertion = let
+          failing = c: lib.any (a: !a.assertion && lib.hasInfix "backupDir may contain only" a.message) c.assertions;
+          sock =
+            (localEval.extendModules {
+              modules = [
+                {
+                  services.postgresql.settings.unix_socket_directories = "/run/custom, /tmp";
+                  services.harbor-db.pgBackup.targetSettings.baseBackup = {
+                    recoveryMeta = true;
+                    sqlConninfo = null;
+                  };
+                }
+              ];
+            }).config.systemd.services.pg-basebackup.script;
+        in
+          failing (named [{services.harbor-db.pgBackup.targetSettings.backupDir = lib.mkForce "/srv/my backups";}])
+          && !failing thething
+          && lib.hasInfix "/run/custom" sock
+          && !lib.hasInfix "/tmp" sock;
+        message = "backupDir must be systemd-safe and the marker connection must use the configured socket directory.";
       }
     ];
   }

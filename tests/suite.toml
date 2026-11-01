@@ -3674,6 +3674,8 @@ selectors = [
   "python_and_native_cli_fifo_anchor_preserves_inode_and_recovery_through_peer_continuation",
   "python_and_native_cli_unused_surrogates_and_last_decoded_keys_accept_retention",
   "retention_projection_rejects_invalid_syntax_and_last_fields_before_deletion",
+  "meta_sidecars_do_not_block_pruning_and_leave_with_their_tree",
+  "repeated_failed_finalizes_never_displace_the_last_success_tree",
 ]
 
 [[coverage]]
@@ -7128,6 +7130,7 @@ resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
 selectors = [
   "managed_backup_outlives_the_short_probe_deadline",
   "independent_executor_tolerates_an_unsearchable_source_primary_path",
+  "manifest_checksum_mismatch_is_rejected",
 ]
 
 [[cases]]

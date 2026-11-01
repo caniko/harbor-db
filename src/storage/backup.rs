@@ -48,7 +48,11 @@ pub fn prune(
     let mut backups = Vec::new();
     for entry in fs::read_dir(&base)? {
         let entry = entry?;
-        if entry.file_name().to_string_lossy().ends_with(".partial") {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // `<id>.meta.json` sidecars belong to the tree they name.
+        if name.ends_with(".partial")
+            || (name.ends_with(".meta.json") && entry.file_type()?.is_file())
+        {
             continue;
         }
         if !entry.file_type()?.is_dir() {
@@ -60,10 +64,32 @@ pub fn prune(
     if backups.is_empty() {
         return Ok(());
     }
+    // The tree LAST_SUCCESS names is the recovery target: failed-finalize trees
+    // (no sidecar) must never displace it.
+    // An unreadable marker aborts: pruning blind could delete the only recovery base.
+    let last_success = match fs::read_to_string(root.join("LAST_SUCCESS")) {
+        Ok(text) => text.trim().to_owned(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    // In metadata mode the marker must name a published, finalized tree; a malformed
+    // one would leave nothing pinned.
+    let uses_meta = fs::read_dir(&base)?
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with(".meta.json"));
+    if uses_meta
+        && !(base.join(&last_success).is_dir()
+            && base.join(format!("{last_success}.meta.json")).is_file())
+    {
+        return Err(invalid(
+            "LAST_SUCCESS names no finalized backup; refusing to prune",
+        ));
+    }
     let mut floors = BTreeMap::<u64, u64>::new();
     let mut expired = Vec::new();
     for (index, (path, time)) in backups.iter().enumerate() {
         let retain = index < 2
+            || (!last_success.is_empty() && path.file_name().is_some_and(|n| *n == *last_success))
             || *time >= now - base_days as f64 * 86400.0
             || protection.as_ref().is_some_and(|p| {
                 path.file_name()
@@ -104,6 +130,10 @@ pub fn prune(
         }
     }
     for path in expired {
+        // Drop the sidecar first: a tree without metadata is simply not recoverable.
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(".meta.json");
+        let _ = fs::remove_file(sidecar);
         fs::remove_dir_all(path)?;
     }
     durable::sync_directory(&base)?;
