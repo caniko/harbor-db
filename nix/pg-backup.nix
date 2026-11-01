@@ -647,11 +647,12 @@ in {
       ])
       targetSources);
     slotClaims = lib.concatMap (t: let
-      # DNS names are case-insensitive (RFC 4343).
+      # DNS names are case-insensitive (RFC 4343) and a trailing root dot is the same name.
+      name = lib.removeSuffix "." (lib.toLower t.source.hostName);
       host =
-        if lib.elem (lib.toLower t.source.hostName) ["localhost" "::1"]
+        if lib.elem name ["localhost" "::1"]
         then "127.0.0.1"
-        else lib.toLower t.source.hostName;
+        else name;
       endpoint = "${host}:${toString t.source.port}";
     in
       lib.optional t.ts.receiveWal.enable "${endpoint}/${t.ts.receiveWal.slotName}"

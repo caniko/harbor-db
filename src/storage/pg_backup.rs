@@ -80,6 +80,20 @@ fn wal_segments(root: &Path, size: u64) -> Result<Archive> {
     Ok(out)
 }
 /// System identifier in the long page header of a segment's first page (0 while unwritten).
+/// Same check inspect-backup makes: a manifest changed after finalization (or a
+/// malformed recorded checksum) makes the base unusable. No sidecar, no check.
+fn verify_manifest(tree: &Path) -> Result<()> {
+    let mut sidecar = tree.as_os_str().to_owned();
+    sidecar.push(".meta.json");
+    let Ok(meta) = durable::read_json(Path::new(&sidecar)) else {
+        return Ok(());
+    };
+    match meta.get("checksum") {
+        None => Ok(()),
+        Some(recorded) if manifest_sha256(tree).ok().as_deref() == recorded.as_str() => Ok(()),
+        Some(_) => Err(invalid("backup manifest changed after finalization")),
+    }
+}
 /// Hex SHA-256 of a base's `backup_manifest`, as recorded in its sidecar.
 fn manifest_sha256(tree: &Path) -> Result<String> {
     let manifest = fs::read(tree.join("backup_manifest"))?;
@@ -430,12 +444,7 @@ fn recovery_target(root: &Path, configured: bool) -> Result<Option<(u64, u64)>> 
     let tree = root.join("base").join(id.trim());
     let path = root.join("base").join(format!("{}.meta.json", id.trim()));
     let meta = durable::read_json(&path).ok();
-    // Same check inspect-backup makes: a manifest changed after finalization is unusable.
-    if let Some(recorded) = meta.as_ref().and_then(|m| m.get("checksum"))
-        && manifest_sha256(&tree).ok().as_deref() != recorded.as_str()
-    {
-        return Err(invalid("backup manifest changed after finalization"));
-    }
+    verify_manifest(&tree)?;
     let target = meta.as_ref().and_then(|m| {
         Some((
             m["timeline"].as_u64()?,
@@ -851,6 +860,8 @@ fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64, u64, PathBuf)>
     let oldest = trees
         .first()
         .ok_or_else(|| invalid("no retained base backup"))?;
+    // The anchor's range is trusted only while its manifest matches its sidecar.
+    verify_manifest(oldest)?;
     let (timeline, first, stop) = manifest_range(oldest, size)?;
     Ok((timeline, first, stop, oldest.clone()))
 }
@@ -1050,6 +1061,18 @@ mod tests {
         fs::write(root.join("base/b-valid.meta.json"), "{}").unwrap();
         let (_, first, _, tree) = oldest_base_range(&root, size).unwrap();
         assert_eq!((first, tree.ends_with("b-valid")), (5, true));
+        // The anchor's manifest must still match its recorded checksum.
+        let sum = manifest_sha256(&root.join("base/b-valid")).unwrap();
+        durable::write_json(
+            &root.join("base/b-valid.meta.json"),
+            &json!({"checksum": sum}),
+        )
+        .unwrap();
+        assert!(oldest_base_range(&root, size).is_ok());
+        let edited =
+            json!({"WAL-Ranges":[{"Timeline":1,"Start-LSN":"0/5800000","End-LSN":"0/6000000"}]});
+        durable::write_json(&root.join("base/b-valid/backup_manifest"), &edited).unwrap();
+        assert!(oldest_base_range(&root, size).is_err());
         fs::remove_file(root.join("base/b-valid.meta.json")).unwrap();
         assert_eq!(
             oldest_base_range(&root, size).unwrap().1,
