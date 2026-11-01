@@ -330,10 +330,19 @@ pub fn mark_gap(
             );
         }
     }
+    let oldest = oldest_base_range(root, segment_bytes).ok();
+    // ponytail: coverage is proven only within one timeline. A server on another timeline
+    // than the oldest retained base records a gap, so the next base anchors on the new
+    // timeline; prove multi-timeline legs here if promotions ever become routine.
+    if timeline_changed(oldest.as_ref().map(|o| o.0), server_timeline) {
+        return write_gap(
+            root,
+            slot,
+            "timeline changed since the oldest retained base; take a new base backup",
+        );
+    }
     if let Slot::Present(restart) = state {
         // A slot recreated while the receiver was down restarts past what the archive holds.
-        // Coverage counts only the server's own timeline: an ancestor's higher segment
-        // numbers say nothing about WAL after the fork.
         let on_server = archive
             .range((server_timeline, 0)..=(server_timeline, u64::MAX))
             .next_back()
@@ -341,18 +350,13 @@ pub fn mark_gap(
         let has_base = fs::read_dir(root.join("base"))?.next().is_some();
         let covered = match on_server {
             Some(n) => restart / segment_bytes <= n + 1,
-            // Nothing archived on a promoted timeline yet: the receiver resumes at its fork.
-            None if server_timeline > 1 && !archive.is_empty() => {
-                parent_fork(root, server_timeline).is_some_and(|fork| restart <= fork)
-            }
             // An empty archive next to retained bases means the WAL itself is gone.
             None => archive.is_empty() && !has_base,
         };
         // A hole inside any retained timeline is a gap too.
         let hole = has_hole(&archive);
         // So is WAL missing before the first archived segment the oldest base needs.
-        let lead = oldest_base_range(root, segment_bytes)
-            .is_ok_and(|(t, first, _, _)| leading_gap(&archive, t, first));
+        let lead = oldest.is_some_and(|(t, first, _, _)| leading_gap(&archive, t, first));
         if covered && !hole && !lead {
             return Ok(false);
         }
@@ -396,11 +400,6 @@ fn reach(root: &Path, target: Option<(u64, u64)>, newest: u32, stop: u64) -> Res
         ))),
     }
 }
-/// LSN where `timeline` forked from its immediate parent: the history file's last entry.
-fn parent_fork(root: &Path, timeline: u32) -> Option<u64> {
-    let text = fs::read_to_string(root.join("wal").join(format!("{timeline:08X}.history"))).ok()?;
-    parse_history(&text).ok()?.last().map(|(_, at)| *at)
-}
 /// LSN where `ancestor` forked on the way to `timeline`, from `timeline`'s history file.
 fn fork_of(root: &Path, timeline: u32, ancestor: u64) -> Option<u64> {
     let text = fs::read_to_string(root.join("wal").join(format!("{timeline:08X}.history"))).ok()?;
@@ -441,6 +440,10 @@ fn recover_clearing(root: &Path) -> Result<()> {
         }
     }
     durable::sync_directory(&root.join("wal"))
+}
+/// The server left the oldest retained base's timeline (0 means unknown).
+fn timeline_changed(base: Option<u32>, server: u32) -> bool {
+    base.is_some_and(|t| server != 0 && t != server)
 }
 /// The archive's first segment on `timeline` starts after `first`, or it has none.
 fn leading_gap(archive: &Archive, timeline: u32, first: u64) -> bool {
@@ -992,20 +995,12 @@ mod tests {
         assert!(has_hole(&ancestor));
     }
     #[test]
-    fn promoted_timeline_forks_from_the_last_history_entry() {
-        let root = std::env::temp_dir().join(format!("pgb-fork-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("wal")).unwrap();
-        assert_eq!(parent_fork(&root, 4), None);
-        fs::write(
-            root.join("wal/00000004.history"),
-            "1\t0/3000000\tx\n2\t0/9000000\tx\n",
-        )
-        .unwrap();
-        assert_eq!(parent_fork(&root, 4), Some(0x9000000));
-        assert_eq!(fork_of(&root, 4, 1), Some(0x3000000));
-        assert_eq!(fork_of(&root, 4, 3), None);
-        fs::remove_dir_all(&root).unwrap();
+    fn a_promotion_past_the_oldest_base_is_a_gap() {
+        assert!(timeline_changed(Some(1), 2));
+        assert!(timeline_changed(Some(3), 2));
+        assert!(!timeline_changed(Some(2), 2));
+        assert!(!timeline_changed(Some(2), 0));
+        assert!(!timeline_changed(None, 2));
     }
     #[test]
     fn wal_missing_before_the_archive_start_is_a_leading_gap() {
