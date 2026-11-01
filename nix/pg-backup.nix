@@ -400,6 +400,8 @@
               --sql-psql ${ts.package}/bin/psql --sql-conninfo ${lib.escapeShellArg sqlConninfo}
           ''
           else ''
+            # Sidecars left from an earlier recoveryMeta would keep health in metadata mode.
+            rm -f "$backup_root"/base/*.meta.json
             printf '%s\n' "$(date --iso-8601=seconds)" | ${durable} write "$backup_root/LAST_SUCCESS"
             ${lib.optionalString gapTracking "${pgBackupTool} clear-gap --root \"$backup_root\" --started-ms \"$started_ms\""}
           ''
@@ -636,10 +638,11 @@ in {
       ])
       targetSources);
     slotClaims = lib.concatMap (t: let
+      # DNS names are case-insensitive (RFC 4343).
       host =
-        if lib.elem t.source.hostName ["localhost" "::1"]
+        if lib.elem (lib.toLower t.source.hostName) ["localhost" "::1"]
         then "127.0.0.1"
-        else t.source.hostName;
+        else lib.toLower t.source.hostName;
       endpoint = "${host}:${toString t.source.port}";
     in
       lib.optional t.ts.receiveWal.enable "${endpoint}/${t.ts.receiveWal.slotName}"
