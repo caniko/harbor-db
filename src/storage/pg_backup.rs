@@ -359,17 +359,29 @@ pub fn mark_gap(
         }
         state => state?,
     };
-    // Pruning deletes segments one by one under BACKUP_LOCK; scanning mid-prune would
-    // see holes that are not gaps. The lock is non-blocking and base backups hold it for
-    // hours, so a busy lock defers the check like an unreachable source does.
-    let Ok(_lease) = durable::backup_lock(&root.join("BACKUP_LOCK")) else {
-        eprintln!("backup root busy (prune or base backup); WAL gap check deferred");
-        return Ok(false);
-    };
     // An invalidated slot cannot be resumed and --if-not-exists would keep it: replace it.
     if state == Slot::Lost {
         psql(psql_bin, conninfo, &format!("DROP_REPLICATION_SLOT {slot}"))?;
     }
+    // A slot about to be created over existing history is a gap; deciding that needs no
+    // archive scan, so it never waits for the lock and is never skipped.
+    let Slot::Present(restart) = state else {
+        let has_history = ["base", "wal"]
+            .iter()
+            .any(|d| fs::read_dir(root.join(d)).is_ok_and(|mut e| e.next().is_some()));
+        return if has_history {
+            write_gap(root, slot, "slot recreated")
+        } else {
+            Ok(false)
+        };
+    };
+    // Only a present slot needs the coverage scan. Pruning deletes segments one by one
+    // under BACKUP_LOCK, so scan under it too; the lock is non-blocking and base backups
+    // hold it for hours, so a busy lock defers. The slot is resumed, never recreated.
+    let Ok(_lease) = durable::backup_lock(&root.join("BACKUP_LOCK")) else {
+        eprintln!("backup root busy (prune or base backup); WAL gap check deferred");
+        return Ok(false);
+    };
     // A loss detected while a gap is already recorded refreshes its timestamp,
     // so only a base started after the latest loss closes it.
     let archive = wal_segments(root, segment_bytes)?;
@@ -407,31 +419,25 @@ pub fn mark_gap(
             "timeline changed since the oldest retained base; take a new base backup",
         );
     }
-    if let Slot::Present(restart) = state {
-        // A slot recreated while the receiver was down restarts past what the archive holds.
-        let on_server = archive
-            .range((server_timeline, 0)..=(server_timeline, u64::MAX))
-            .next_back()
-            .map(|(k, _)| k.1);
-        let has_base = fs::read_dir(root.join("base"))?.next().is_some();
-        let covered = match on_server {
-            Some(n) => restart / segment_bytes <= n + 1,
-            // An empty archive next to retained bases means the WAL itself is gone.
-            None => archive.is_empty() && !has_base,
-        };
-        // A hole inside any retained timeline is a gap too.
-        let hole = has_hole(&archive);
-        // So is WAL missing before the first archived segment the oldest base needs.
-        let lead = oldest.is_some_and(|(t, first, _, _)| leading_gap(&archive, t, first));
-        if covered && !hole && !lead {
-            return Ok(false);
-        }
-        return write_gap(root, slot, "slot restart point is beyond the archive");
-    }
-    if archive.is_empty() && fs::read_dir(root.join("base"))?.next().is_none() {
+    // A slot recreated while the receiver was down restarts past what the archive holds.
+    let on_server = archive
+        .range((server_timeline, 0)..=(server_timeline, u64::MAX))
+        .next_back()
+        .map(|(k, _)| k.1);
+    let has_base = fs::read_dir(root.join("base"))?.next().is_some();
+    let covered = match on_server {
+        Some(n) => restart / segment_bytes <= n + 1,
+        // An empty archive next to retained bases means the WAL itself is gone.
+        None => archive.is_empty() && !has_base,
+    };
+    // A hole inside any retained timeline is a gap too.
+    let hole = has_hole(&archive);
+    // So is WAL missing before the first archived segment the oldest base needs.
+    let lead = oldest.is_some_and(|(t, first, _, _)| leading_gap(&archive, t, first));
+    if covered && !hole && !lead {
         return Ok(false);
     }
-    write_gap(root, slot, "slot recreated")
+    write_gap(root, slot, "slot restart point is beyond the archive")
 }
 /// `post_backup_lsn` of the base LAST_SUCCESS names, when it has metadata.
 /// The newest base's recovery target and the timeline it lies on.
@@ -461,8 +467,11 @@ fn recovery_target(root: &Path, configured: bool) -> Result<Option<(u64, u64)>> 
     let id = id.trim();
     let target = meta.as_ref().and_then(|m| {
         let sysid: u64 = m["system_identifier"].as_str()?.parse().ok()?;
+        let major: Option<u64> = fs::read_to_string(tree.join("PG_VERSION"))
+            .ok()
+            .and_then(|v| v.trim().parse().ok());
         let identity = m["backup_id"].as_str() == Some(id)
-            && m["pg_major"].is_u64()
+            && m["pg_major"].as_u64().is_some_and(|v| Some(v) == major)
             && m["epoch_id"].as_str().is_some_and(|e| !e.is_empty())
             && tree_sysid(&tree).ok() == Some(sysid);
         let post = lsn(m["post_backup_lsn"].as_str()?).ok()?;
@@ -1149,6 +1158,7 @@ mod tests {
         // The sidecar must name this backup and cluster (control file sysid 42).
         fs::create_dir_all(root.join("base/b1/global")).unwrap();
         fs::write(root.join("base/b1/global/pg_control"), 42u64.to_ne_bytes()).unwrap();
+        fs::write(root.join("base/b1/PG_VERSION"), "18\n").unwrap();
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
         durable::write_json(
             &root.join("base/b1.meta.json"),
@@ -1160,6 +1170,7 @@ mod tests {
             json!({"backup_id":"b9","pg_major":18,"epoch_id":"e1","system_identifier":"42"}),
             json!({"backup_id":"b1","pg_major":18,"epoch_id":"e1","system_identifier":"43"}),
             json!({"backup_id":"b1","epoch_id":"e1","system_identifier":"42"}),
+            json!({"backup_id":"b1","pg_major":17,"epoch_id":"e1","system_identifier":"42"}),
             json!({"backup_id":"b1","pg_major":18,"system_identifier":"42"}),
         ] {
             let mut meta = wrong;
