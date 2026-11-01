@@ -11,7 +11,7 @@
   sourceRole = lib.elem cfg.role ["source" "both"];
   # localhost, 127.0.0.0/8 and the IPv6 loopback, in their common spellings.
   isLoopback = host: let
-    h = lib.toLower host;
+    h = lib.removeSuffix "." (lib.toLower host);
   in
     lib.elem h ["localhost" "::1" "0:0:0:0:0:0:0:1"]
     || builtins.match "127\\.[0-9.]*" h != null
