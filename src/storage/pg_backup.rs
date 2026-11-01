@@ -375,11 +375,12 @@ fn recovery_target(root: &Path) -> Result<Option<(u64, u64)>> {
     let uses_meta = fs::read_dir(root.join("base"))?
         .flatten()
         .any(|e| e.file_name().to_string_lossy().ends_with(".meta.json"));
-    let marker = root.join("LAST_SUCCESS");
-    if !uses_meta || !marker.exists() {
+    if !uses_meta {
         return Ok(None);
     }
-    let id = fs::read_to_string(&marker).map_err(|_| invalid("LAST_SUCCESS is unreadable"))?;
+    // inspect-backup selects through the marker, so missing or unreadable is unusable.
+    let id = fs::read_to_string(root.join("LAST_SUCCESS"))
+        .map_err(|_| invalid("LAST_SUCCESS is missing or unreadable"))?;
     let path = root.join("base").join(format!("{}.meta.json", id.trim()));
     let meta = durable::read_json(&path).ok();
     let target = meta.as_ref().and_then(|m| {
@@ -1043,8 +1044,10 @@ mod tests {
         assert!(recovery_target(&root).is_err());
         fs::write(root.join("base/b2.meta.json"), "{}").unwrap();
         assert!(recovery_target(&root).is_err());
-        // So does a marker that cannot be read at all.
+        // So does a marker that cannot be read, or none at all.
         fs::write(root.join("LAST_SUCCESS"), [0xff, 0xfe]).unwrap();
+        assert!(recovery_target(&root).is_err());
+        fs::remove_file(root.join("LAST_SUCCESS")).unwrap();
         assert!(recovery_target(&root).is_err());
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
         // An ancestor-timeline base must still reach a target on the newest timeline.
