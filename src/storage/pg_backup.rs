@@ -408,9 +408,14 @@ pub fn mark_gap(
 /// Roots without any sidecar keep legacy timestamp markers and have no target; once
 /// recovery metadata is in use, an unusable `LAST_SUCCESS` sidecar is an error.
 fn recovery_target(root: &Path) -> Result<Option<(u64, u64)>> {
-    let uses_meta = fs::read_dir(root.join("base"))?
+    let uses_sidecars = fs::read_dir(root.join("base"))?
         .flatten()
         .any(|e| e.file_name().to_string_lossy().ends_with(".meta.json"));
+    // A legacy marker is a timestamp; one naming a base directory is an ID marker,
+    // so metadata mode survives even if every sidecar has been lost.
+    let id_marker = fs::read_to_string(root.join("LAST_SUCCESS"))
+        .is_ok_and(|m| !m.trim().is_empty() && root.join("base").join(m.trim()).is_dir());
+    let uses_meta = uses_sidecars || id_marker;
     if !uses_meta {
         return Ok(None);
     }
@@ -1123,6 +1128,20 @@ mod tests {
         assert!(recovery_target(&root).is_err());
         fs::remove_file(root.join("LAST_SUCCESS")).unwrap();
         assert!(recovery_target(&root).is_err());
+        // An ID marker still means metadata mode after every sidecar is gone.
+        for sidecar in ["b1", "b2"] {
+            let _ = fs::remove_file(root.join(format!("base/{sidecar}.meta.json")));
+        }
+        fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
+        assert!(recovery_target(&root).is_err());
+        // A legacy timestamp marker without sidecars has no target.
+        fs::write(root.join("LAST_SUCCESS"), "2026-11-01T12:00:00+00:00\n").unwrap();
+        assert_eq!(recovery_target(&root).unwrap(), None);
+        durable::write_json(
+            &root.join("base/b1.meta.json"),
+            &json!({"timeline":2,"post_backup_lsn":"0/7000028"}),
+        )
+        .unwrap();
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
         // An ancestor-timeline base must still reach a target on the newest timeline.
         assert_eq!(
