@@ -239,6 +239,11 @@ pub fn parse_slot(output: &str) -> Slot {
         lsn(restart).map_or(Slot::Lost, Slot::Present)
     }
 }
+/// psql exits 2 when it cannot connect at all.
+const UNREACHABLE: &str = "psql could not connect: ";
+fn unreachable(e: &super::StorageError) -> bool {
+    e.to_string().contains(UNREACHABLE)
+}
 fn psql(psql: &Path, conninfo: &str, sql: &str) -> Result<String> {
     let output = Command::new(psql)
         .args([
@@ -254,8 +259,13 @@ fn psql(psql: &Path, conninfo: &str, sql: &str) -> Result<String> {
         ])
         .output()?;
     if !output.status.success() {
+        let prefix = if output.status.code() == Some(2) {
+            UNREACHABLE
+        } else {
+            "psql failed: "
+        };
         return Err(invalid(format!(
-            "psql failed: {}",
+            "{prefix}{}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
@@ -297,8 +307,16 @@ pub fn mark_gap(
     conninfo: &str,
     slot: &str,
 ) -> Result<bool> {
+    // An unreachable source defers the check: the receiver cannot stream either, and
+    // Restart= reruns this before it next connects (health still checks contiguity).
+    let state = match slot_state(psql_bin, conninfo, slot) {
+        Err(e) if unreachable(&e) => {
+            eprintln!("source unreachable; WAL gap check deferred to the next receiver start");
+            return Ok(false);
+        }
+        state => state?,
+    };
     // An invalidated slot cannot be resumed and --if-not-exists would keep it: replace it.
-    let state = slot_state(psql_bin, conninfo, slot)?;
     if state == Slot::Lost {
         psql(psql_bin, conninfo, &format!("DROP_REPLICATION_SLOT {slot}"))?;
     }
@@ -1010,6 +1028,11 @@ mod tests {
         assert!(!has_hole(&ok));
         let ancestor = archive(&[(1, 3, false), (1, 5, false), (2, 6, false), (2, 7, false)]);
         assert!(has_hole(&ancestor));
+    }
+    #[test]
+    fn a_source_that_cannot_be_reached_is_classified() {
+        assert!(unreachable(&invalid(format!("{UNREACHABLE}timeout"))));
+        assert!(!unreachable(&invalid("psql failed: syntax error")));
     }
     #[test]
     fn a_promotion_past_the_oldest_base_is_a_gap() {

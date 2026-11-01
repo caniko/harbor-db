@@ -233,6 +233,11 @@
       '';
     pgReceivewalCmd = "${wrapBin "bin/pg_receivewal"} -h ${sourceId} -p ${toString source.port} -U replicator";
     replicationConninfo = "host=${sourceId} port=${toString source.port} user=replicator replication=true connect_timeout=10";
+    # The gap probe honours the same bound as best-effort slot creation.
+    gapConninfo =
+      if ts.receiveWal.slotCreateTimeoutSeconds == null
+      then replicationConninfo
+      else lib.replaceStrings ["connect_timeout=10"] ["connect_timeout=${toString ts.receiveWal.slotCreateTimeoutSeconds}"] replicationConninfo;
     createSlot = "${pgReceivewalCmd} -D ${walDir} --status-interval=${toString (
       if ts.receiveWal.statusInterval == null
       then 5
@@ -281,7 +286,7 @@
         User = "postgres";
         ExecStartPre =
           lib.optional localRecovery "${sourceLocalTablespaceCheck}"
-          ++ lib.optional gapTracking "${pgBackupTool} mark-gap --root ${backupRoot} --segment-bytes ${toString ts.walSegmentBytes} --psql ${psqlWrapped} --conninfo \"${replicationConninfo}\" --slot ${ts.receiveWal.slotName}"
+          ++ lib.optional gapTracking "${pgBackupTool} mark-gap --root ${backupRoot} --segment-bytes ${toString ts.walSegmentBytes} --psql ${psqlWrapped} --conninfo \"${gapConninfo}\" --slot ${ts.receiveWal.slotName}"
           ++ [
             (
               if ts.receiveWal.slotCreateTimeoutSeconds == null
@@ -597,7 +602,7 @@ in {
         }
         {
           # The connection string lands in the world-readable unit script.
-          assertion = base.sqlConninfo == null || builtins.match ".*[Pp]assword[[:space:]]*=.*" base.sqlConninfo == null && builtins.match "[a-z]+://[^/@]*:[^/@]*@.*" base.sqlConninfo == null && !lib.hasInfix "%" base.sqlConninfo;
+          assertion = base.sqlConninfo == null || builtins.match ".*password[[:space:]]*=.*" (lib.toLower base.sqlConninfo) == null && builtins.match "[a-z]+://[^/@]*:[^/@]*@.*" (lib.toLower base.sqlConninfo) == null && !lib.hasInfix "%" base.sqlConninfo;
           message = "services.harbor-db.pgBackup baseBackup.sqlConninfo must not embed a password or use percent-encoding; use passfile=/path (the store is world-readable).${tag}";
         }
         {

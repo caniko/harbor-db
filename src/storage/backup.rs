@@ -66,9 +66,12 @@ pub fn prune(
     }
     // The tree LAST_SUCCESS names is the recovery target: failed-finalize trees
     // (no sidecar) must never displace it.
-    let last_success = fs::read_to_string(root.join("LAST_SUCCESS"))
-        .map(|t| t.trim().to_owned())
-        .unwrap_or_default();
+    // An unreadable marker aborts: pruning blind could delete the only recovery base.
+    let last_success = match fs::read_to_string(root.join("LAST_SUCCESS")) {
+        Ok(text) => text.trim().to_owned(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
     let mut floors = BTreeMap::<u64, u64>::new();
     let mut expired = Vec::new();
     for (index, (path, time)) in backups.iter().enumerate() {
