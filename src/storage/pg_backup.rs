@@ -372,15 +372,14 @@ pub fn mark_gap(
 /// Roots without any sidecar keep legacy timestamp markers and have no target; once
 /// recovery metadata is in use, an unusable `LAST_SUCCESS` sidecar is an error.
 fn recovery_target(root: &Path) -> Result<Option<(u64, u64)>> {
-    let Ok(id) = fs::read_to_string(root.join("LAST_SUCCESS")) else {
-        return Ok(None);
-    };
     let uses_meta = fs::read_dir(root.join("base"))?
         .flatten()
         .any(|e| e.file_name().to_string_lossy().ends_with(".meta.json"));
-    if !uses_meta {
+    let marker = root.join("LAST_SUCCESS");
+    if !uses_meta || !marker.exists() {
         return Ok(None);
     }
+    let id = fs::read_to_string(&marker).map_err(|_| invalid("LAST_SUCCESS is unreadable"))?;
     let path = root.join("base").join(format!("{}.meta.json", id.trim()));
     let meta = durable::read_json(&path).ok();
     let target = meta.as_ref().and_then(|m| {
@@ -1043,6 +1042,9 @@ mod tests {
         fs::write(root.join("LAST_SUCCESS"), "b2\n").unwrap();
         assert!(recovery_target(&root).is_err());
         fs::write(root.join("base/b2.meta.json"), "{}").unwrap();
+        assert!(recovery_target(&root).is_err());
+        // So does a marker that cannot be read at all.
+        fs::write(root.join("LAST_SUCCESS"), [0xff, 0xfe]).unwrap();
         assert!(recovery_target(&root).is_err());
         fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
         // An ancestor-timeline base must still reach a target on the newest timeline.
