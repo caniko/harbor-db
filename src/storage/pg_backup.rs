@@ -77,6 +77,22 @@ fn wal_segments(root: &Path, size: u64) -> Result<Archive> {
     Ok(out)
 }
 /// System identifier in the long page header of a segment's first page (0 while unwritten).
+/// Hex SHA-256 of a base's `backup_manifest`, as recorded in its sidecar.
+fn manifest_sha256(tree: &Path) -> Result<String> {
+    let manifest = fs::read(tree.join("backup_manifest"))?;
+    Ok(Sha256::digest(&manifest)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
+}
+/// System identifier of the newest segment with a written header.
+fn newest_sysid(archive: &Archive) -> Option<u64> {
+    archive
+        .values()
+        .rev()
+        .map(|(_, path)| segment_sysid(path).unwrap_or(0))
+        .find(|id| *id != 0)
+}
 fn segment_sysid(path: &Path) -> Result<u64> {
     let mut header = [0u8; 32];
     fs::File::open(path)?.read_exact(&mut header)?;
@@ -338,15 +354,13 @@ pub fn mark_gap(
             "timeline went backwards; use a fresh backup root",
         );
     }
-    if let Some((_, path)) = archive.values().next_back() {
-        let found = segment_sysid(path).unwrap_or(0);
-        if found != 0 && found != server {
-            return write_gap(
-                root,
-                slot,
-                "system identifier changed; use a fresh backup root",
-            );
-        }
+    // The newest segment with a written header; an unwritten .partial reads 0.
+    if newest_sysid(&archive).is_some_and(|found| found != server) {
+        return write_gap(
+            root,
+            slot,
+            "system identifier changed; use a fresh backup root",
+        );
     }
     let oldest = oldest_base_range(root, segment_bytes).ok();
     // ponytail: coverage is proven only within one timeline. A server on another timeline
@@ -399,8 +413,15 @@ fn recovery_target(root: &Path) -> Result<Option<(u64, u64)>> {
     // inspect-backup selects through the marker, so missing or unreadable is unusable.
     let id = fs::read_to_string(root.join("LAST_SUCCESS"))
         .map_err(|_| invalid("LAST_SUCCESS is missing or unreadable"))?;
+    let tree = root.join("base").join(id.trim());
     let path = root.join("base").join(format!("{}.meta.json", id.trim()));
     let meta = durable::read_json(&path).ok();
+    // Same check inspect-backup makes: a manifest changed after finalization is unusable.
+    if let Some(recorded) = meta.as_ref().and_then(|m| m["checksum"].as_str())
+        && manifest_sha256(&tree).ok().as_deref() != Some(recorded)
+    {
+        return Err(invalid("backup manifest changed after finalization"));
+    }
     let target = meta.as_ref().and_then(|m| {
         Some((
             m["timeline"].as_u64()?,
@@ -634,11 +655,7 @@ pub fn finalize(f: &Finalize) -> Result<Value> {
         .parse()
         .map_err(|_| invalid("invalid system identifier"))?;
     same_cluster(&archive, timeline, first, last, sysid)?;
-    let manifest = fs::read(tree.join("backup_manifest"))?;
-    let checksum: String = Sha256::digest(&manifest)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let checksum = manifest_sha256(&tree)?;
     let closes_gap = gap_closed_by(f.root, f.started)?;
     let epoch = if closes_gap.is_some() {
         set_floor(f.root, f.started)?;
@@ -1067,6 +1084,21 @@ mod tests {
         assert!(recovery_target(&root).is_err());
         fs::write(root.join("base/b2.meta.json"), "{}").unwrap();
         assert!(recovery_target(&root).is_err());
+        // A manifest changed after finalization is rejected, as inspect-backup does.
+        fs::write(root.join("LAST_SUCCESS"), "b1\n").unwrap();
+        fs::create_dir_all(root.join("base/b1")).unwrap();
+        fs::write(root.join("base/b1/backup_manifest"), "original").unwrap();
+        let sum = manifest_sha256(&root.join("base/b1")).unwrap();
+        durable::write_json(
+            &root.join("base/b1.meta.json"),
+            &json!({"timeline":2,"post_backup_lsn":"0/7000028","checksum":sum}),
+        )
+        .unwrap();
+        assert!(recovery_target(&root).is_ok());
+        fs::write(root.join("base/b1/backup_manifest"), "tampered").unwrap();
+        assert!(recovery_target(&root).is_err());
+        fs::write(root.join("base/b1/backup_manifest"), "original").unwrap();
+        fs::write(root.join("LAST_SUCCESS"), "b2\n").unwrap();
         // So does a marker that cannot be read, or none at all.
         fs::write(root.join("LAST_SUCCESS"), [0xff, 0xfe]).unwrap();
         assert!(recovery_target(&root).is_err());
@@ -1122,7 +1154,10 @@ mod tests {
             "unwritten partial is tolerated"
         );
         assert!(same_cluster(&have, 1, 4, 5, 78).is_err());
+        // Replacement detection reads past an unwritten newest partial.
+        assert_eq!(newest_sysid(&have), Some(77));
         have.insert((1, 5), (false, write("c", 78)));
+        assert_eq!(newest_sysid(&have), Some(78));
         assert!(same_cluster(&have, 1, 4, 5, 77).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
