@@ -147,8 +147,35 @@ fn same_cluster(archive: &Archive, timeline: u32, first: u64, last: u64, sysid: 
     Ok(())
 }
 /// WAL range of one published base: `(timeline, first segment, stop LSN)`.
+/// PostgreSQL's own manifest integrity check (parse_manifest.c): SHA-256 over every byte
+/// through the second-to-last newline must equal `Manifest-Checksum`. Applies to legacy
+/// bases too, which carry no sidecar digest.
+fn check_manifest_self_checksum(bytes: &[u8], manifest: &Value) -> Result<()> {
+    let Some(recorded) = manifest.get("Manifest-Checksum") else {
+        return Ok(());
+    };
+    let mut newlines = bytes.iter().rposition(|b| *b == b'\n').into_iter();
+    let penultimate = newlines
+        .next()
+        .and_then(|last| bytes[..last].iter().rposition(|b| *b == b'\n'))
+        .ok_or_else(|| invalid("backup manifest is truncated"))?;
+    let actual: String = Sha256::digest(&bytes[..=penultimate])
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if recorded.as_str() == Some(actual.as_str()) {
+        Ok(())
+    } else {
+        Err(invalid(
+            "backup manifest checksum does not match its contents",
+        ))
+    }
+}
 fn manifest_range(tree: &Path, size: u64) -> Result<(u32, u64, u64)> {
-    let manifest = durable::read_json(&tree.join("backup_manifest"))?;
+    let bytes = fs::read(tree.join("backup_manifest"))?;
+    let manifest: Value =
+        serde_json::from_slice(&bytes).map_err(|_| invalid("backup manifest is not valid JSON"))?;
+    check_manifest_self_checksum(&bytes, &manifest)?;
     let ranges = manifest["WAL-Ranges"]
         .as_array()
         .filter(|r| !r.is_empty())
@@ -1120,6 +1147,22 @@ mod tests {
         assert!(!has_hole(&ok));
         let ancestor = archive(&[(1, 3, false), (1, 5, false), (2, 6, false), (2, 7, false)]);
         assert!(has_hole(&ancestor));
+    }
+    #[test]
+    fn manifest_self_checksum_follows_postgresql() {
+        let body = "{ \"PostgreSQL-Backup-Manifest-Version\": 1,\n\"WAL-Ranges\": [\n{ \"Timeline\": 1, \"Start-LSN\": \"0/2000028\", \"End-LSN\": \"0/2000100\" }\n],\n";
+        let sum: String = Sha256::digest(body.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let good = format!("{body}\"Manifest-Checksum\": \"{sum}\"}}\n");
+        let parsed: Value = serde_json::from_str(&good).unwrap();
+        assert!(check_manifest_self_checksum(good.as_bytes(), &parsed).is_ok());
+        let edited = good.replace("0/2000028", "0/3000028");
+        let parsed: Value = serde_json::from_str(&edited).unwrap();
+        assert!(check_manifest_self_checksum(edited.as_bytes(), &parsed).is_err());
+        // Manifests without the field (test fixtures) are not checked.
+        assert!(check_manifest_self_checksum(b"{}\n", &json!({})).is_ok());
     }
     #[test]
     fn the_target_segment_must_be_complete() {
