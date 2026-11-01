@@ -72,6 +72,8 @@ fn preserves_two_latest_and_recovery_floor() {
             .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
             .unwrap();
     }
+    // Finalize writes the sidecar, then the marker naming the newest base.
+    fs::write(root.path().join("LAST_SUCCESS"), "new\n").unwrap();
     backup::prune(root.path(), 1, 2, 1024 * 1024, Some(1_000_000.0)).unwrap();
     assert!(!root.path().join("base/old").exists());
     assert!(root.path().join("base/middle").exists());
@@ -673,6 +675,8 @@ fn meta_sidecars_do_not_block_pruning_and_leave_with_their_tree() {
         )
         .unwrap();
     }
+    // Finalize writes the sidecar, then the marker naming the newest base.
+    fs::write(root.path().join("LAST_SUCCESS"), "new\n").unwrap();
     backup::prune(root.path(), 1, 2, 1024 * 1024, Some(1_000_000.0)).unwrap();
     assert!(!root.path().join("base/old").exists());
     assert!(!root.path().join("base/old.meta.json").exists());
@@ -705,4 +709,10 @@ fn repeated_failed_finalizes_never_displace_the_last_success_tree() {
     backup::prune(root.path(), 1, 2, 1024 * 1024, Some(1_000_000.0)).unwrap();
     assert!(root.path().join("base/old").exists());
     assert!(root.path().join("base/old.meta.json").exists());
+    // A malformed or truncated marker pins nothing, so pruning must refuse.
+    for marker in ["ol\n", "", "f1\n"] {
+        fs::write(root.path().join("LAST_SUCCESS"), marker).unwrap();
+        assert!(backup::prune(root.path(), 1, 2, 1024 * 1024, Some(1_000_000.0)).is_err());
+        assert!(root.path().join("base/old").exists());
+    }
 }

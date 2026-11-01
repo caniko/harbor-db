@@ -72,6 +72,19 @@ pub fn prune(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.into()),
     };
+    // In metadata mode the marker must name a published, finalized tree; a malformed
+    // one would leave nothing pinned.
+    let uses_meta = fs::read_dir(&base)?
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with(".meta.json"));
+    if uses_meta
+        && !(base.join(&last_success).is_dir()
+            && base.join(format!("{last_success}.meta.json")).is_file())
+    {
+        return Err(invalid(
+            "LAST_SUCCESS names no finalized backup; refusing to prune",
+        ));
+    }
     let mut floors = BTreeMap::<u64, u64>::new();
     let mut expired = Vec::new();
     for (index, (path, time)) in backups.iter().enumerate() {
