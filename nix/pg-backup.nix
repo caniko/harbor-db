@@ -689,7 +689,8 @@ in {
             }
             {
               # source-local-v1 keeps a timestamp in LAST_SUCCESS; recoveryMeta writes the backup id.
-              assertion = !cfg.targetSettings.sourceLocalRecovery.enable || lib.all (t: !t.ts.baseBackup.recoveryMeta) (lib.attrValues targetSources);
+              # Only the legacy target runs source-local recovery; named targets have their own roots.
+              assertion = !cfg.targetSettings.sourceLocalRecovery.enable || !(targetSources.legacy.ts.baseBackup.recoveryMeta or false);
               message = "services.harbor-db.pgBackup baseBackup.recoveryMeta cannot be combined with sourceLocalRecovery (it changes the LAST_SUCCESS contract).";
             }
             {

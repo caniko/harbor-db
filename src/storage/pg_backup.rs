@@ -47,9 +47,12 @@ pub fn parse_segment(name: &str, size: u64) -> Option<(u32, u64, bool)> {
         return None;
     }
     let part = |range: std::ops::Range<usize>| u64::from_str_radix(&stem[range], 16).ok();
+    let per_log = (1u64 << 32) / size;
+    // A segment field past the per-log count is not a canonical WAL name.
+    let segment = part(16..24).filter(|s| *s < per_log)?;
     Some((
         u32::try_from(part(0..8)?).ok()?,
-        part(8..16)? * ((1u64 << 32) / size) + part(16..24)?,
+        part(8..16)? * per_log + segment,
         partial,
     ))
 }
@@ -428,8 +431,8 @@ fn recovery_target(root: &Path, configured: bool) -> Result<Option<(u64, u64)>> 
     let path = root.join("base").join(format!("{}.meta.json", id.trim()));
     let meta = durable::read_json(&path).ok();
     // Same check inspect-backup makes: a manifest changed after finalization is unusable.
-    if let Some(recorded) = meta.as_ref().and_then(|m| m["checksum"].as_str())
-        && manifest_sha256(&tree).ok().as_deref() != Some(recorded)
+    if let Some(recorded) = meta.as_ref().and_then(|m| m.get("checksum"))
+        && manifest_sha256(&tree).ok().as_deref() != recorded.as_str()
     {
         return Err(invalid("backup manifest changed after finalization"));
     }
@@ -940,6 +943,8 @@ mod tests {
         let size = 16 << 20;
         let name = segment_name(1, 0x1ff, size);
         assert_eq!(name, "0000000100000001000000FF");
+        // 16 MiB segments give 256 per log: a segment field of 0x100 is not canonical.
+        assert!(parse_segment("000000010000000000000100", 16 << 20).is_none());
         assert_eq!(parse_segment(&name, size), Some((1, 0x1ff, false)));
         assert_eq!(
             parse_segment(&format!("{name}.partial"), size),
@@ -1123,6 +1128,18 @@ mod tests {
         )
         .unwrap();
         assert!(recovery_target(&root, false).is_ok());
+        // A present checksum that is not a string is malformed, not absent.
+        durable::write_json(
+            &root.join("base/b1.meta.json"),
+            &json!({"timeline":2,"post_backup_lsn":"0/7000028","checksum":null}),
+        )
+        .unwrap();
+        assert!(recovery_target(&root, false).is_err());
+        durable::write_json(
+            &root.join("base/b1.meta.json"),
+            &json!({"timeline":2,"post_backup_lsn":"0/7000028","checksum":sum}),
+        )
+        .unwrap();
         fs::write(root.join("base/b1/backup_manifest"), "tampered").unwrap();
         assert!(recovery_target(&root, false).is_err());
         fs::write(root.join("base/b1/backup_manifest"), "original").unwrap();

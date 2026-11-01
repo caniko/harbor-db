@@ -844,9 +844,10 @@ in
           };
         in
           failing (localEval.extendModules {modules = [{services.harbor-db.pgBackup.targetSettings = meta;}];}).config
-          && failing (localEval.extendModules {modules = [{services.harbor-db.pgBackup.targets.extra = {source.hostName = "10.0.0.2";} // meta;}];}).config
+          # A named target has its own root and LAST_SUCCESS; only the legacy target is source-local.
+          && !failing (localEval.extendModules {modules = [{services.harbor-db.pgBackup.targets.extra = {source.hostName = "10.0.0.2";} // meta;}];}).config
           && !failing localEval.config;
-        message = "recoveryMeta must not combine with sourceLocalRecovery, for the legacy or named targets.";
+        message = "recoveryMeta must not combine with sourceLocalRecovery on the legacy target; named targets stay independent.";
       }
       {
         name = "loopback-aliases-share-slot-endpoints";
