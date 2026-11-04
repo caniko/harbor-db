@@ -10,6 +10,8 @@
 
 [Mandatory cutover admission and historical corpus custody](docs/cutover-admission.md)
 
+[Rehearsal on a restored production copy](docs/rehearsal.md): `harbor-db-rehearse`, `postgres.superuserExtensions` and `rehearsal`, with `phase = "maintenance"` operations.
+
 `harbor-db` provides secure generic lifecycle-operation plans and NixOS
 systemd wiring for project-owned work.
 

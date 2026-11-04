@@ -129,6 +129,19 @@ fn v1_database_shape_still_decodes_without_generic_metadata() {
 }
 
 #[test]
+fn maintenance_phase_decodes_and_round_trips() {
+    let text = r#"{"version":1,"name":"m","operations":[{"id":"reindex","backend":"postgres","phase":"maintenance","apply":{"program":"/bin/true"}}]}"#;
+    let decoded: MigrationPlan = serde_json::from_str(text).expect("maintenance plan decodes");
+    decoded.validate().expect("maintenance plan validates");
+    assert_eq!(decoded.operations[0].phase, Phase::Maintenance);
+    assert!(
+        serde_json::to_string(&decoded)
+            .unwrap()
+            .contains("\"phase\":\"maintenance\"")
+    );
+}
+
+#[test]
 fn credential_references_cannot_escape_the_systemd_directory() {
     let mut operation = operation("provision", &[]);
     operation.apply.credential_args = vec!["../password".to_owned()];

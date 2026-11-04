@@ -216,7 +216,7 @@ fn committed_inventory_is_individual_and_migration_bound() {
             .iter()
             .filter(|case| case.id.starts_with("rust."))
             .count(),
-        20
+        21
     );
     assert!(!suite.coverage(Profile::Full).is_complete());
     assert!(suite.capabilities.iter().any(|capability| {
@@ -332,6 +332,7 @@ sources = list(pathlib.Path('tests').rglob('*.rs'))
 prefixes = {'src/planner/tests.rs': 'tests::',
             'src/bin/home-manager-backup.rs': 'tests::',
              'src/storage/backup_manifest.rs': 'storage::backup_manifest::tests::',
+             'src/storage/rehearsal.rs': 'storage::rehearsal::tests::',
              'src/storage/recovery.rs': 'storage::recovery::tests::',
              'src/storage/application_transition.rs': 'storage::application_transition::tests::',
               'src/storage/recovery_capture.rs': 'storage::recovery_capture::tests::',

@@ -2891,6 +2891,7 @@ operations = [
   "nixos.postgres-writer-fence",
   "nixos.postgres-rollout",
   "nixos.cutover",
+  "nixos.rehearsal",
 ]
 required = [
   "positive",
@@ -3960,6 +3961,7 @@ selectors = [
   "typedb_operations_validate_and_keep_secrets_out_of_plans",
   "generic_metadata_and_credential_refs_are_wire_safe",
   "v1_database_shape_still_decodes_without_generic_metadata",
+  "maintenance_phase_decodes_and_round_trips",
   "credential_references_cannot_escape_the_systemd_directory",
   "apply_runs_dependencies_before_selected_operation",
   "operator_operation_requires_selection_and_confirmation",
@@ -7318,3 +7320,158 @@ source = "nix.aarch64-linux.postgres-lifecycle-test"
 path = "python-regressions-acceptance.json"
 kind = "semantic"
 required = true
+
+# Rehearsal on a restored production copy: harbor-db-rehearse and the
+# services.harbor-db.projects.<name>.rehearsal / postgres.superuserExtensions
+# module surface. Rust-only; the PR14 Python baseline has no counterpart.
+[[capabilities]]
+id = "postgres-rehearsal"
+operations = ["harbor-db-rehearse.run"]
+required = [
+  "positive",
+  "rejection",
+  "repetition",
+  "concurrency",
+  "interruption",
+  "recovery",
+  "compatibility",
+]
+
+[[inventories]]
+origin = "rust"
+id_prefix = "native.rehearsal-unit."
+selector_prefix = "storage::rehearsal::tests::"
+source = "src/storage/rehearsal.rs"
+argv_prefix = ["cargo", "test", "--locked", "--all-features", "--lib"]
+argv_suffix = ["--", "--exact"]
+profile = "fast"
+maturity = "crystallized"
+deadline_seconds = 120
+resources = { cpu = 1, memory_mib = 512, disk_mib = 128, exclusive = [] }
+selectors = [
+  "toc_filter_drops_only_listed_extensions_and_their_comments",
+  "toc_yields_extensions_and_acl_entries_only",
+  "acl_sql_yields_every_grantee_and_default_privilege_owner",
+  "work_directory_overlap_is_refused_in_both_directions",
+  "plan_rejects_unknown_fields_and_wrong_or_missing_schema",
+  "steps_cannot_retarget_the_connection",
+]
+
+[[coverage]]
+case = "native.rehearsal-unit.storage::rehearsal::tests::plan_rejects_unknown_fields_and_wrong_or_missing_schema"
+capability = "postgres-rehearsal"
+operation = "harbor-db-rehearse.run"
+dimension = "rejection"
+evidence = "parse_plan rejects unknown top-level, step and live-source fields, a missing schema id, a wrong schema id, and a source that names both dump and live, before any file or process exists."
+
+[[coverage]]
+case = "native.rehearsal-unit.storage::rehearsal::tests::steps_cannot_retarget_the_connection"
+capability = "postgres-rehearsal"
+operation = "harbor-db-rehearse.run"
+dimension = "rejection"
+evidence = "A step whose env sets DATABASE_URL or any PG* variable is rejected at plan parse time, so a step cannot point the rehearsal at the live database; ordinary variables are accepted."
+
+[[coverage]]
+case = "native.rehearsal-unit.storage::rehearsal::tests::work_directory_overlap_is_refused_in_both_directions"
+capability = "postgres-rehearsal"
+operation = "harbor-db-rehearse.run"
+dimension = "rejection"
+evidence = "A work directory inside, or containing, the source (dump path or live data/socket directory) is refused, because cleanup removes the run directory."
+
+[[coverage]]
+case = "native.rehearsal-unit.storage::rehearsal::tests::acl_sql_yields_every_grantee_and_default_privilege_owner"
+capability = "postgres-rehearsal"
+operation = "harbor-db-rehearse.run"
+dimension = "compatibility"
+evidence = "Roles are extracted from the GRANT, REVOKE and ALTER DEFAULT PRIVILEGES text pg_restore prints, including quoted names with embedded quotes, comma lists, WITH GRANT OPTION and FOR ROLE targets, and PUBLIC/CURRENT_USER are ignored."
+
+[[inventories]]
+origin = "rust"
+id_prefix = "native.rehearsal."
+selector_prefix = ""
+source = "tests/rehearsal.rs"
+argv_prefix = [
+  "cargo",
+  "test",
+  "--locked",
+  "--all-features",
+  "--test",
+  "rehearsal",
+]
+argv_suffix = ["--", "--exact"]
+profile = "integration"
+maturity = "crystallized"
+platforms = ["x86_64-linux", "aarch64-linux"]
+depends_on = ["prerequisite.disposable-postgres"]
+deadline_seconds = 600
+resources = { cpu = 2, memory_mib = 1024, disk_mib = 1024, exclusive = [] }
+selectors = [
+  "dump_rehearsal_runs_steps_as_the_owner_and_leaves_nothing_behind",
+  "live_rehearsal_failing_step_stops_the_run_and_keep_retains_a_stopped_cluster",
+  "probes_are_read_only_and_a_failing_probe_fails_the_rehearsal",
+  "untrusted_superuser_extension_is_created_before_the_owner_migrates",
+  "unsafe_work_directory_and_bad_plans_are_refused_before_any_mutation",
+]
+
+[[coverage]]
+case = "native.rehearsal.dump_rehearsal_runs_steps_as_the_owner_and_leaves_nothing_behind"
+capability = "postgres-rehearsal"
+operation = "harbor-db-rehearse.run"
+dimension = "positive"
+evidence = "The actual CLI restores a real -Fd dump into a private cluster and runs migrate, check and maintenance shell steps as the non-superuser owner with the injected connection variables and a scrubbed environment, honouring a non-zero expect_exit. The receipt carries plan digest, source identity, restore seconds, step exit codes/tails and probe results; restored and migrated tables are owned by the owner, ACLs and default ACLs (including a default ACL of another role) are restored exactly through NOLOGIN stand-ins, extensions from the TOC plus the plan are created by the superuser, and the work directory is empty afterwards while the source is unchanged."
+
+[[coverage]]
+case = "native.rehearsal.live_rehearsal_failing_step_stops_the_run_and_keep_retains_a_stopped_cluster"
+capability = "postgres-rehearsal"
+operation = "harbor-db-rehearse.run"
+dimension = "compatibility"
+evidence = "A live source is dumped with pg_dump -Fd -j -Z zstd:3 as a non-owner-OS role over a Unix socket; the receipt records the live database, server version, dump size and TOC digest, and the locale defaults to the source datcollate. Real PostgreSQL clusters of the test package serve as both source and rehearsal."
+
+[[coverage]]
+case = "native.rehearsal.live_rehearsal_failing_step_stops_the_run_and_keep_retains_a_stopped_cluster"
+capability = "postgres-rehearsal"
+operation = "harbor-db-rehearse.run"
+dimension = "recovery"
+evidence = "A step exiting 3 against expect_exit 0 stops the run, later steps and probes do not run, the CLI exits 1 and still publishes a failed receipt with the exit code and stderr tail. With keep the work directory remains but pg_ctl status reports the disposable cluster stopped and its PID carrier is gone."
+
+[[coverage]]
+case = "native.rehearsal.probes_are_read_only_and_a_failing_probe_fails_the_rehearsal"
+capability = "postgres-rehearsal"
+operation = "harbor-db-rehearse.run"
+dimension = "rejection"
+evidence = "A write probe fails against the read-only session default, the rehearsal is failed with the probe named, the earlier probe result is retained, and the cluster and work directory are removed."
+
+[[coverage]]
+case = "native.rehearsal.untrusted_superuser_extension_is_created_before_the_owner_migrates"
+capability = "postgres-rehearsal"
+operation = "harbor-db-rehearse.run"
+dimension = "compatibility"
+evidence = "With postgis in the test package, the untrusted extension is created by the superuser before the restore, its TOC entries and extension-owned spatial_ref_sys data are filtered, an ACL on that extension-owned table restores, and the non-superuser owner then migrates a geometry table. Skips with a printed message when the package has no postgis."
+
+[[coverage]]
+case = "native.rehearsal.unsafe_work_directory_and_bad_plans_are_refused_before_any_mutation"
+capability = "postgres-rehearsal"
+operation = "harbor-db-rehearse.run"
+dimension = "rejection"
+evidence = "The actual CLI refuses a work directory containing the dump (leaving the dump intact), a step env overriding PGHOST and an unknown plan field; each exits 1 with its diagnostic, publishes no receipt and leaves the work directory empty."
+
+[[coverage]]
+case = "rust.lib.tests::maintenance_phase_decodes_and_round_trips"
+capability = "plan-library"
+operation = "plan.decode"
+dimension = "compatibility"
+evidence = "src/planner/tests.rs: a plan operation with phase maintenance decodes, validates and serializes back to the same wire spelling, matching the Nix phase enum."
+
+[[coverage]]
+case = "nix.x86_64-linux.module-eval"
+capability = "nixos"
+operation = "nixos.rehearsal"
+dimension = "positive"
+evidence = "nix/module-eval.nix evaluates a project with postgres.superuserExtensions, a maintenance operation and rehearsal.enable. The rehearse unit is a oneshot without timer or wantedBy; its plan has the documented schema, runner migrate/check steps plus the maintenance operation and its check, the live source, owner, extensions and receipt directory under stateDirectory; the apply unit alone carries the superuser CREATE EXTENSION ExecStartPre."
+
+[[coverage]]
+case = "nix.x86_64-linux.module-eval"
+capability = "nixos"
+operation = "nixos.rehearsal"
+dimension = "rejection"
+evidence = "Evaluation rejects rehearsal without stateDirectory, superuserExtensions without a database, and a rehearsed runner that uses credentials; DATABASE_URL and PG* project environment never reach rehearsal steps."

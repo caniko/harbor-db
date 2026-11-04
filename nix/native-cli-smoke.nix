@@ -23,6 +23,7 @@
     "harbor-db-provision"
     "harbor-db-application-backup"
     "harbor-db-postgres-drill"
+    "harbor-db-rehearse"
     "harbor-db-transition"
     "harbor-db-transition-start"
     "harbor-db-cutover"

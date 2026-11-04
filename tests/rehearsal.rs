@@ -65,6 +65,12 @@ impl Source {
             "srcdb",
             "CREATE TABLE records(id int PRIMARY KEY, note text); INSERT INTO records VALUES (1,'alpha'),(2,'beta'); GRANT SELECT ON records TO reader; ALTER DEFAULT PRIVILEGES FOR ROLE src_owner IN SCHEMA public GRANT SELECT ON TABLES TO etl_default",
         );
+        // Set by the superuser for a role that is not the owner, as in production.
+        source.sql(
+            None,
+            "srcdb",
+            "ALTER DEFAULT PRIVILEGES FOR ROLE reader IN SCHEMA public GRANT SELECT ON TABLES TO etl_default",
+        );
         source
     }
 
@@ -223,6 +229,7 @@ fn migrate_check_maintain(plan: &mut Value) {
         {"name": "grants_kept", "sql": "select has_table_privilege('reader', 'records', 'SELECT') and not has_table_privilege('etl_default', 'records', 'INSERT')"},
         {"name": "standins_cannot_login", "sql": "select count(*) from pg_roles where rolname in ('reader', 'etl_default') and not rolcanlogin"},
         {"name": "owner_may_use_the_new_extension", "sql": "select levenshtein('kitten', 'sitting')"},
+        {"name": "default_acl_of_another_role", "sql": "select count(*) from pg_default_acl a join pg_roles r on r.oid = a.defaclrole where r.rolname = 'reader'"},
         {"name": "owner_is_superuser", "sql": "select rolsuper from pg_roles where rolname = current_user"},
         {"name": "extension_owner_is_not_the_owner", "sql": "select count(*) from pg_extension e join pg_roles r on r.oid = e.extowner where e.extname = 'pg_trgm' and r.rolname <> 'src_owner'"},
     ]);
@@ -307,6 +314,7 @@ fn dump_rehearsal_runs_steps_as_the_owner_and_leaves_nothing_behind() {
     assert_eq!(receipt["standin_roles"], json!(["etl_default", "reader"]));
     assert_eq!(probe(&receipt, "grants_kept"), "t");
     assert_eq!(probe(&receipt, "standins_cannot_login"), "2");
+    assert_eq!(probe(&receipt, "default_acl_of_another_role"), "1");
     // Source extensions plus the migration's own, created by the superuser.
     assert_eq!(receipt["extensions"], json!(["fuzzystrmatch", "pg_trgm"]));
     assert_eq!(probe(&receipt, "owner_may_use_the_new_extension"), "3");

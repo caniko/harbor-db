@@ -262,13 +262,29 @@ pub fn parse_plan(bytes: &[u8]) -> Result<Plan> {
     Ok(plan)
 }
 
-/// Keep `restore.list` free of the extensions the superuser already created.
+fn is_default_acl(line: &str) -> bool {
+    let words: Vec<_> = line.split_whitespace().collect();
+    !line.starts_with(';') && words.get(3) == Some(&"DEFAULT") && words.get(4) == Some(&"ACL")
+}
+
+/// `ALTER DEFAULT PRIVILEGES FOR ROLE x` needs to be x or a superuser, so the
+/// owner-role pass leaves these entries to a second superuser pass.
+fn default_acl_toc(toc: &str) -> String {
+    toc.lines()
+        .filter(|line| is_default_acl(line))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+/// The owner-role pass's list: no extension entries (the superuser already
+/// created them), no extension member data, no default ACLs.
 fn filter_toc(toc: &str, extensions: &[String], config_tables: &str) -> String {
     let skip: Vec<Vec<&str>> = config_tables
         .lines()
         .map(|line| line.split(' ').collect())
         .collect();
     toc.lines()
+        .filter(|line| !is_default_acl(line))
         .filter(|line| {
             let words: Vec<_> = line.split_whitespace().collect();
             !words.windows(4).any(|w| {
@@ -865,6 +881,18 @@ fn execute(
     args.extend(cluster.endpoint(&cluster.user, &plan.database));
     args.push(dump.display().to_string());
     pg(package, "pg_restore", args, &[], deadline)?;
+    // Default privileges as the superuser, without --role, as production set them.
+    let default_acl = run_dir.join("default-acl.list");
+    durable::atomic_write(&default_acl, default_acl_toc(&toc).as_bytes())?;
+    let mut args = vec![
+        "--exit-on-error".into(),
+        "--no-owner".into(),
+        "-L".into(),
+        default_acl.display().to_string(),
+    ];
+    args.extend(cluster.endpoint(&cluster.user, &plan.database));
+    args.push(dump.display().to_string());
+    pg(package, "pg_restore", args, &[], deadline)?;
     receipt.restore_seconds = Some(seconds(started));
 
     let logs = run_dir.join("logs");
@@ -1064,12 +1092,15 @@ mod tests {
 
     #[test]
     fn toc_filter_drops_only_listed_extensions_and_their_comments() {
-        let toc = "; header\n3; 3079 1 EXTENSION - postgis o\n4; 0 0 COMMENT - EXTENSION postgis \n5; 3079 2 EXTENSION - pgcrypto o\n6; 0 0 COMMENT - EXTENSION pgcrypto \n7; 1259 3 TABLE public postgis_notes o\n8; 0 1 TABLE DATA public spatial_ref_sys o\n9; 0 2 TABLE DATA public records o\n";
+        let toc = "; header\n3; 3079 1 EXTENSION - postgis o\n4; 0 0 COMMENT - EXTENSION postgis \n5; 3079 2 EXTENSION - pgcrypto o\n6; 0 0 COMMENT - EXTENSION pgcrypto \n7; 1259 3 TABLE public postgis_notes o\n8; 0 1 TABLE DATA public spatial_ref_sys o\n9; 0 2 TABLE DATA public records o\n10; 826 0 DEFAULT ACL public DEFAULT PRIVILEGES FOR TABLES o\n";
         let kept = filter_toc(toc, &["postgis".into()], "public spatial_ref_sys");
         assert!(!kept.contains("postgis o") && !kept.contains("COMMENT - EXTENSION postgis"));
         assert!(kept.contains("pgcrypto o") && kept.contains("COMMENT - EXTENSION pgcrypto"));
         assert!(kept.contains("TABLE public postgis_notes"));
         assert!(!kept.contains("spatial_ref_sys") && kept.contains("TABLE DATA public records"));
+        // Default ACLs wait for the superuser pass.
+        assert!(!kept.contains("DEFAULT ACL"));
+        assert_eq!(default_acl_toc(toc).lines().count(), 1);
     }
 
     #[test]
@@ -1105,8 +1136,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let data = root.path().join("data");
         fs::create_dir_all(data.join("work")).unwrap();
-        assert!(check_work_directory(&data.join("work"), &[data.clone()]).is_err());
-        assert!(check_work_directory(root.path(), &[data.clone()]).is_err());
+        assert!(check_work_directory(&data.join("work"), std::slice::from_ref(&data)).is_err());
+        assert!(check_work_directory(root.path(), std::slice::from_ref(&data)).is_err());
         fs::create_dir(root.path().join("other")).unwrap();
         check_work_directory(&root.path().join("other"), &[data]).unwrap();
     }
