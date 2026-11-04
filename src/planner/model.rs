@@ -68,6 +68,9 @@ pub enum Phase {
     Backfill,
     /// An explicit operational or potentially destructive change.
     Operational,
+    /// Re-runnable upkeep such as index rebuilds; also rehearsed on a restored
+    /// production copy by `services.harbor-db.projects.<name>.rehearsal`.
+    Maintenance,
 }
 
 /// Whether an operation may run during normal deployment activation.

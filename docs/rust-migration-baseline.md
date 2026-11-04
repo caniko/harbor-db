@@ -18,6 +18,10 @@ unregistered public commands, modified legacy parity oracles, and PR gates
 removed from either the catalog or Simit configuration. Newly added prototype
 cases and new qualification gates may extend this baseline. Updating the pinned
 PR head requires a deliberate source-delta review and new baseline evidence.
+Commands that did not exist at the PR head, such as `harbor-db-rehearse`
+([rehearsal](rehearsal.md)), are Rust-only extensions: they have no Python peer
+and are absent from the PR14 module mapping and `pr14_cli_parity`, but are
+registered in `tests/suite.toml` with their own capability.
 
 Version-two application provisioning adds strict post-schema reconciliation.
 Its current regression fixture establishes declared tables explicitly while

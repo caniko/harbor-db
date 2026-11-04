@@ -45,6 +45,12 @@
           description = "Optional on-demand restore command that repairs pending operations and verifies.";
         };
 
+        preStart = mkOption {
+          type = types.listOf types.str;
+          default = [];
+          description = "systemd ExecStartPre lines for the apply unit only; the check and restore units never run them.";
+        };
+
         user = mkOption {
           type = types.nullOr types.str;
           default = null;
@@ -179,9 +185,9 @@
         };
 
         phase = mkOption {
-          type = types.enum ["schema" "backfill" "operational"];
+          type = types.enum ["schema" "backfill" "operational" "maintenance"];
           default = "schema";
-          description = "Lifecycle phase used for reporting and deployment policy.";
+          description = "Lifecycle phase used for reporting and deployment policy. Maintenance operations (index rebuilds, re-runnable upkeep) are also rehearsed by `rehearsal`.";
         };
 
         safety = mkOption {
@@ -346,6 +352,117 @@
         default = {};
         description = "Optional grants applied after the migration command succeeds.";
       };
+
+      database = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Project database name. Defaults to postgres.provision.database when provisioning is enabled.";
+      };
+
+      superuserExtensions = mkOption {
+        type = types.listOf (types.strMatching "[A-Za-z_][A-Za-z0-9_-]*");
+        default = [];
+        example = ["postgis"];
+        description = ''
+          Extensions only a superuser may create (for example postgis). The apply unit runs
+          `CREATE EXTENSION IF NOT EXISTS` for each as the PostgreSQL superuser, in database
+          `postgres.database`, before the non-superuser owner's migration command. Rehearsals
+          create the same extensions before restoring the production copy.
+        '';
+      };
+    };
+  };
+
+  rehearsalType = types.submodule {
+    options = {
+      enable = mkEnableOption "the on-demand rehearsal unit (migrations and maintenance on a restored production copy)";
+
+      source = {
+        database = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = "Live database to copy. Defaults to the project database.";
+        };
+
+        host = mkOption {
+          type = types.str;
+          default = "/run/postgresql";
+          description = "Unix-socket directory of the live server. The unit user must authenticate without a password.";
+        };
+
+        user = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = "PostgreSQL role for pg_dump when it differs from the unit's OS user.";
+        };
+      };
+
+      owner = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Non-superuser owner role created in the copy. Defaults to postgres.provision.ownerRole, then the project user.";
+      };
+
+      user = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          OS user of the rehearsal unit (defaults to the project user; initdb refuses root).
+          It must be able to pg_dump the live database over `source.host` without a password
+          and write `workDirectory`. For example, grant it read access the way a read-only
+          operator role is granted: `GRANT pg_read_all_data TO <role>;` (PostgreSQL 14+), or
+          `GRANT SELECT ON ALL TABLES/SEQUENCES IN SCHEMA public` plus matching
+          `ALTER DEFAULT PRIVILEGES FOR ROLE <owner>`; pg_dump also needs sequence state.
+        '';
+      };
+
+      workDirectory = mkOption {
+        type = types.strMatching "/[^\n]*";
+        example = "/data/scratch/harbor-db-rehearsal";
+        description = "Existing directory for the dump and disposable cluster. It needs space for both; each run's subdirectory is removed unless `keep` is set.";
+      };
+
+      package = mkOption {
+        type = types.package;
+        default =
+          if config.services.postgresql.enable or false
+          then config.services.postgresql.finalPackage
+          else pkgs.postgresql;
+        defaultText = "config.services.postgresql.finalPackage or pkgs.postgresql";
+        description = "PostgreSQL package providing initdb, pg_ctl, pg_dump, pg_restore and psql, with the extensions the project needs.";
+      };
+
+      jobs = mkOption {
+        type = types.ints.between 1 64;
+        default = 4;
+        description = "Parallel jobs for pg_dump and pg_restore.";
+      };
+
+      timeoutSeconds = mkOption {
+        type = types.ints.between 1 86400;
+        default = 14400;
+        description = "Deadline for the whole rehearsal, excluding the bounded cleanup.";
+      };
+
+      probes = mkOption {
+        type = types.listOf (types.submodule {
+          options = {
+            name = mkOption {type = types.str;};
+            sql = mkOption {
+              type = types.str;
+              description = "Read-only SQL run as the owner after the steps; its output goes into the receipt.";
+            };
+          };
+        });
+        default = [];
+        description = "SQL probes recorded in the receipt.";
+      };
+
+      keep = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Keep the (stopped) work directory for inspection instead of removing it.";
+      };
     };
   };
 
@@ -453,6 +570,17 @@
         type = postgresType;
         default = {};
         description = "PostgreSQL-specific ordering and post-operation helpers.";
+      };
+
+      rehearsal = mkOption {
+        type = rehearsalType;
+        default = {};
+        description = ''
+          On-demand `harbor-db-<name>-rehearse.service`: restore a copy of the live database
+          into a disposable private cluster and run the runner's migrate/check steps and the
+          `maintenance` operations as the non-superuser owner. Receipts land in
+          `<stateDirectory>/rehearsals/`. The unit has no timer and is never wanted by a target.
+        '';
       };
     };
   });
@@ -676,9 +804,145 @@
       exec ${command}
     ''}";
 
+  projectDatabase = project:
+    if project.postgres.database != null
+    then project.postgres.database
+    else if project.postgres.provision.enable
+    then project.postgres.provision.database
+    else null;
+
+  # Untrusted extensions must exist before the non-superuser owner migrates.
+  # `+` runs the line unsandboxed as root so it can drop to the superuser; it
+  # belongs to the apply unit only, so readiness checks stay read-only.
+  superuserExtensionsPreStart = project:
+    lib.optional (project.postgres.superuserExtensions != []) ("+"
+      + lib.escapeShellArgs ([
+          "${pkgs.util-linux}/bin/runuser"
+          "-u"
+          (config.services.postgresql.superUser or "postgres")
+          "--"
+          "${project.postgres.package}/bin/psql"
+          "-X"
+          "-v"
+          "ON_ERROR_STOP=1"
+          "-d"
+          (toString (projectDatabase project))
+        ]
+        ++ lib.concatMap (extension: ["-c" "CREATE EXTENSION IF NOT EXISTS \"${extension}\""]) project.postgres.superuserExtensions));
+
+  rehearsalProjects = lib.filterAttrs (_: project: project.rehearsal.enable) enabledProjects;
+
+  rehearsalOwner = project:
+    if project.rehearsal.owner != null
+    then project.rehearsal.owner
+    else if project.postgres.provision.enable
+    then project.postgres.provision.ownerRole
+    else project.user;
+
+  rehearsalUser = project:
+    if project.rehearsal.user != null
+    then project.rehearsal.user
+    else project.user;
+
+  rehearsalDatabase = project:
+    if project.rehearsal.source.database != null
+    then project.rehearsal.source.database
+    else projectDatabase project;
+
+  rehearsalReceiptDirectory = project: "/var/lib/${project.stateDirectory}/rehearsals";
+
+  # The rehearsal engine owns the connection, so unit environment that would
+  # retarget it is dropped; credentials cannot be reproduced and are rejected.
+  rehearsalStepEnvironment = project:
+    lib.filterAttrs (key: _: key != "DATABASE_URL" && !(lib.hasPrefix "PG" key)) project.environment;
+
+  rehearsalMaintenanceOperations = project: let
+    maintenance = lib.filterAttrs (_: operation: operation.phase == "maintenance") (enabledOperations project);
+    ordered = lib.toposort (a: b: lib.elem a.name b.value.dependsOn) (lib.mapAttrsToList lib.nameValuePair maintenance);
+    # ponytail: dependsOn cycles are reported by `harbor-db apply`; here they fall back to name order.
+  in
+    if ordered ? result
+    then ordered.result
+    else lib.mapAttrsToList lib.nameValuePair maintenance;
+
+  rehearsalSteps = name: project: let
+    argv = spec: [spec.program] ++ spec.args;
+    step = stepName: kind: spec: {
+      name = stepName;
+      inherit kind;
+      argv = argv spec;
+      env = rehearsalStepEnvironment project;
+    };
+    checkStep = stepName: runner: lib.optional (runnerCheckSpec name runner != null) (step stepName "check" (runnerCheckSpec name runner));
+    runnerSteps =
+      [(step "migrate" "migrate" (runnerCommandSpec name "apply" project.runner project.runner.args))]
+      ++ checkStep "check" project.runner;
+    maintenanceSteps = lib.concatMap (operation:
+      [(step "maintenance-${operation.name}" "maintenance" (runnerCommandSpec operation.name "apply" operation.value.runner operation.value.runner.args))]
+      ++ checkStep "maintenance-${operation.name}-check" operation.value.runner)
+    (rehearsalMaintenanceOperations project);
+  in
+    runnerSteps ++ maintenanceSteps;
+
+  rehearsalPlan = name: project: let
+    rehearsal = project.rehearsal;
+  in
+    pkgs.writeText "harbor-db-${name}-rehearsal-plan.json" (builtins.toJSON {
+      schema = "harbor-db.rehearsal-plan.v1";
+      package = toString rehearsal.package;
+      source.live =
+        {
+          host = rehearsal.source.host;
+          database = rehearsalDatabase project;
+        }
+        // optionalAttrs (rehearsal.source.user != null) {user = rehearsal.source.user;};
+      owner = rehearsalOwner project;
+      database = projectDatabase project;
+      superuser_extensions = project.postgres.superuserExtensions;
+      steps = rehearsalSteps name project;
+      probes = map (probe: {inherit (probe) name sql;}) rehearsal.probes;
+      work_directory = rehearsal.workDirectory;
+      timeout_seconds = rehearsal.timeoutSeconds;
+      jobs = rehearsal.jobs;
+      keep = rehearsal.keep;
+    });
+
+  rehearsalService = name: project: let
+    rehearsal = project.rehearsal;
+  in {
+    description = "${project.description} rehearsal on a restored production copy";
+    after = project.postgres.setupUnits;
+    inherit (project) path;
+    # On demand only: no timer and no wantedBy, and activation never starts it.
+    restartIfChanged = false;
+    stopIfChanged = false;
+    serviceConfig =
+      {
+        Type = "oneshot";
+        User = rehearsalUser project;
+        StateDirectory = project.stateDirectory;
+        ExecStart = lib.escapeShellArgs (map toString [
+          "${toString cfg.package}/bin/harbor-db-rehearse"
+          "--plan"
+          (rehearsalPlan name project)
+          "--receipt-dir"
+          (rehearsalReceiptDirectory project)
+        ]);
+        # The engine's own deadline plus its bounded cluster cleanup.
+        TimeoutStartSec = rehearsal.timeoutSeconds + 600;
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectHome = true;
+        ProtectSystem = "strict";
+        ReadWritePaths = [rehearsal.workDirectory];
+      }
+      // optionalAttrs (project.group != null) {Group = project.group;};
+  };
+
   projectToMigration = name: project: {
     enable = true;
     inherit (project) description user group environment path;
+    preStart = superuserExtensionsPreStart project;
     loadCredentials = project.loadCredentials ++ lib.concatMap (operation: operation.loadCredentials) (operationValues project);
     credentials = projectCredentialSources project;
     command = projectApplyCommand name project;
@@ -746,6 +1010,9 @@
       serviceConfigFor migration
       // {
         ExecStart = migration.command;
+      }
+      // optionalAttrs (migration.preStart != []) {
+        ExecStartPre = migration.preStart ++ lib.toList (migration.serviceConfig.ExecStartPre or []);
       };
   };
 
@@ -968,11 +1235,39 @@ in {
               (lib.attrValues operations);
             message = "services.harbor-db.projects.${name}: every enabled operation needs a read-only check when project checks are configured";
           }
+          {
+            assertion = project.postgres.superuserExtensions == [] || projectDatabase project != null;
+            message = "services.harbor-db.projects.${name}: postgres.superuserExtensions needs postgres.database (or postgres.provision)";
+          }
+        ]
+        ++ lib.optionals project.rehearsal.enable [
+          {
+            assertion = runnerConfigured project.runner;
+            message = "services.harbor-db.projects.${name}.rehearsal: set runner.command or runner.executable; its migrate and check steps are what gets rehearsed";
+          }
+          {
+            assertion = rehearsalDatabase project != null && projectDatabase project != null;
+            message = "services.harbor-db.projects.${name}.rehearsal: set postgres.database (or postgres.provision, or rehearsal.source.database) so the rehearsal knows the database";
+          }
+          {
+            assertion = rehearsalOwner project != null && rehearsalUser project != null;
+            message = "services.harbor-db.projects.${name}.rehearsal: set rehearsal.owner and rehearsal.user, or the project user";
+          }
+          {
+            assertion = project.stateDirectory != null;
+            message = "services.harbor-db.projects.${name}.rehearsal: stateDirectory is required; receipts are written to <stateDirectory>/rehearsals";
+          }
+          {
+            assertion = lib.all (runner: runner.credentialArgs == [] && runner.credentialEnvironment == {}) ([project.runner] ++ map (operation: operation.value.runner) (rehearsalMaintenanceOperations project));
+            message = "services.harbor-db.projects.${name}.rehearsal: rehearsed runners cannot use credentials; the copy must not need production secrets";
+          }
         ]
         ++ operationAssertions)
       enabledProjects);
 
       services.harbor-db.migrations = lib.mapAttrs projectToMigration (lib.filterAttrs (_: project: enabledOperations project != {}) enabledProjects);
+
+      systemd.services = lib.mapAttrs' (name: project: lib.nameValuePair "harbor-db-${name}-rehearse" (rehearsalService name project)) rehearsalProjects;
     })
 
     (mkIf (enabledMigrations != {}) {

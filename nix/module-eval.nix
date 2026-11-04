@@ -58,6 +58,55 @@
               };
             };
           };
+          users.users.rehearsed = {
+            isSystemUser = true;
+            group = "rehearsed";
+          };
+          users.groups.rehearsed = {};
+          services.harbor-db.projects.rehearsed = {
+            enable = true;
+            user = "rehearsed";
+            stateDirectory = "harbor-db-rehearsed";
+            # The rehearsal engine owns the connection: these must not reach steps.
+            environment = {
+              RUST_LOG = "info";
+              DATABASE_URL = "postgres:///live";
+              PGHOST = "/run/postgresql";
+            };
+            runner = {
+              package = runner;
+              executable = "bin/module-eval-runner";
+              args = ["migrate"];
+              checkArgs = ["check"];
+            };
+            operations.reindex = {
+              enable = true;
+              phase = "maintenance";
+              safety = "operator_confirmed";
+              runner = {
+                package = runner;
+                executable = "bin/module-eval-runner";
+                args = ["reindex"];
+                checkArgs = ["check"];
+              };
+            };
+            postgres = {
+              enable = true;
+              database = "rehearsed_db";
+              superuserExtensions = ["postgis"];
+            };
+            rehearsal = {
+              enable = true;
+              owner = "rehearsed_owner";
+              workDirectory = "/var/tmp/harbor-rehearsal";
+              probes = [
+                {
+                  name = "rows";
+                  sql = "select 1";
+                }
+              ];
+            };
+          };
           services.harbor-db.dataDirectories = [
             {
               path = "/var/lib/harbor-db-data";
@@ -83,6 +132,9 @@
   service = eval.config.systemd.services.harbor-db-demo;
   checkService = eval.config.systemd.services.harbor-db-demo-check;
   restoreService = eval.config.systemd.services.harbor-db-demo-restore;
+  rehearseService = eval.config.systemd.services.harbor-db-rehearsed-rehearse;
+  rehearsedApply = eval.config.systemd.services.harbor-db-rehearsed;
+  rehearsedCheck = eval.config.systemd.services.harbor-db-rehearsed-check;
   rawService = eval.config.systemd.services.harbor-db-raw;
 in
   (import ./eval-checks.nix {inherit pkgs;}).mkEvalCheck {
@@ -91,13 +143,13 @@ in
     # Inspect realized artifacts in the builder rather than during evaluation.
     nativeBuildInputs = [pkgs.python3];
     runtimeScript = ''
-      python3 - ${lib.escapeShellArgs [service.serviceConfig.ExecStart restoreService.serviceConfig.ExecStart secretValue (toString secretFile)]} "$out/assertions.json" <<'PY'
+      python3 - ${lib.escapeShellArgs [service.serviceConfig.ExecStart restoreService.serviceConfig.ExecStart secretValue (toString secretFile) rehearseService.serviceConfig.ExecStart]} "$out/assertions.json" <<'PY'
       import json
       from pathlib import Path
       import shlex
       import sys
 
-      apply_path, restore_path, secret_value, secret_source, evidence_path = sys.argv[1:]
+      apply_path, restore_path, secret_value, secret_source, rehearse_exec, evidence_path = sys.argv[1:]
 
       def command(path):
           commands = []
@@ -161,6 +213,39 @@ in
           and restore_command.count("--confirm") == 1
           and "ensure" not in selected,
           "the restore command must select exactly the restore-lifecycle operations",
+      )
+      rehearse = shlex.split(rehearse_exec)
+      rehearse_plan = json.loads(Path(values(rehearse, "--plan")[0]).read_text())
+      steps = {step["name"]: step for step in rehearse_plan["steps"]}
+      check(
+          "rehearsal-plan-is-the-documented-schema",
+          rehearse_plan["schema"] == "harbor-db.rehearsal-plan.v1"
+          and rehearse_plan["source"] == {"live": {"host": "/run/postgresql", "database": "rehearsed_db"}}
+          and (rehearse_plan["owner"], rehearse_plan["database"]) == ("rehearsed_owner", "rehearsed_db")
+          and rehearse_plan["superuser_extensions"] == ["postgis"]
+          and rehearse_plan["probes"] == [{"name": "rows", "sql": "select 1"}]
+          and rehearse_plan["work_directory"] == "/var/tmp/harbor-rehearsal"
+          and rehearse_plan["package"].startswith("/nix/store/")
+          and (rehearse_plan["jobs"], rehearse_plan["timeout_seconds"], rehearse_plan["keep"]) == (4, 14400, False),
+          "the plan must carry the live source, owner, extensions, probes, limits and package",
+      )
+      check(
+          "rehearsal-steps-are-the-runner-and-maintenance-operations",
+          [(name, step["kind"], step["argv"][1:]) for name, step in steps.items()]
+          == [("migrate", "migrate", ["migrate"]), ("check", "check", ["check"]),
+              ("maintenance-reindex", "maintenance", ["reindex"]),
+              ("maintenance-reindex-check", "check", ["check"])],
+          "steps must be the runner migrate/check followed by each maintenance operation and its check, nothing else",
+      )
+      check(
+          "rehearsal-step-environment-cannot-retarget-the-connection",
+          all(step["env"] == {"RUST_LOG": "info"} for step in steps.values()),
+          "project environment reaches steps except DATABASE_URL and PG* variables",
+      )
+      check(
+          "rehearsal-receipts-live-under-the-state-directory",
+          values(rehearse, "--receipt-dir") == ["/var/lib/harbor-db-rehearsed/rehearsals"],
+          "receipts must be written below <stateDirectory>/rehearsals",
       )
       evidence = Path(evidence_path)
       evidence.write_text(json.dumps(json.loads(evidence.read_text()) + passed) + "\n")
@@ -283,6 +368,52 @@ in
         name = "restore-unit-is-generated";
         assertion = restoreService.serviceConfig.ExecStart != null;
         message = "restore-lifecycle operations must generate an on-demand restore unit";
+      }
+      {
+        name = "rehearsal-unit-is-on-demand";
+        assertion =
+          rehearseService.serviceConfig.Type
+          == "oneshot"
+          && (rehearseService.wantedBy or []) == []
+          && (rehearseService.requiredBy or []) == []
+          && !(eval.config.systemd.timers ? "harbor-db-rehearsed-rehearse")
+          && rehearseService.serviceConfig.User == "rehearsed"
+          && rehearseService.serviceConfig.StateDirectory == "harbor-db-rehearsed";
+        message = "the rehearsal unit must be a oneshot with no timer or wantedBy, run as the configured user with a state directory";
+      }
+      {
+        name = "superuser-extensions-run-before-the-owner-migration-only";
+        assertion = let
+          pre = lib.toList (rehearsedApply.serviceConfig.ExecStartPre or []);
+        in
+          lib.length pre
+          == 1
+          && lib.hasPrefix "+" (lib.head pre)
+          && lib.hasInfix "runuser" (lib.head pre)
+          && lib.hasInfix "CREATE EXTENSION IF NOT EXISTS" (lib.head pre)
+          && lib.hasInfix "postgis" (lib.head pre)
+          && lib.hasInfix "rehearsed_db" (lib.head pre)
+          && !(rehearsedCheck.serviceConfig ? ExecStartPre);
+        message = "superuserExtensions must pre-create extensions as the superuser in the apply unit and never in the read-only check unit";
+      }
+      {
+        name = "rehearsal-input-rejection";
+        assertion =
+          rejected (evaluate {services.harbor-db.projects.rehearsed.stateDirectory = lib.mkForce null;}) "stateDirectory is required"
+          && rejected (evaluate {
+            services.harbor-db.projects.bare = {
+              enable = true;
+              runner.executable = "${runner}/bin/module-eval-runner";
+              postgres.superuserExtensions = ["postgis"];
+            };
+          }) "needs postgres.database"
+          && rejected (evaluate {
+            services.harbor-db.projects.rehearsed = {
+              credentials.token = secretFile;
+              runner.credentialArgs = ["token"];
+            };
+          }) "cannot use credentials";
+        message = "rehearsal must reject a missing state directory, extensions without a database and credentialed runners";
       }
       {
         name = "restore-unit-is-manual";
