@@ -21,6 +21,7 @@ pub mod postgres_rollout;
 pub mod process;
 pub mod provision;
 pub mod recovery;
+pub mod rehearsal;
 // The opt-in physical producer and readers preserve legacy recovery contracts.
 pub mod recovery_capture;
 pub mod recovery_repository;

@@ -12,7 +12,7 @@ use std::{
 
 /// A PID file is an untrusted reference, never signalling authority. A pidfd
 /// pins the inspected process even if it exits and its numeric PID is reused.
-fn cleanup(cluster: &Path, socket: &Path, deadline: Instant) -> Result<()> {
+pub(crate) fn cleanup(cluster: &Path, socket: &Path, deadline: Instant) -> Result<()> {
     let path = cluster.join("postmaster.pid");
     let mut file = match durable::open_regular(&path, false) {
         Ok(file) => file,
@@ -198,7 +198,12 @@ fn cleanup(cluster: &Path, socket: &Path, deadline: Instant) -> Result<()> {
     retire()
 }
 
-fn run(package: &Path, program: &str, args: Vec<String>, deadline: Instant) -> Result<()> {
+pub(crate) fn run(
+    package: &Path,
+    program: &str,
+    args: Vec<String>,
+    deadline: Instant,
+) -> Result<()> {
     let mut argv = vec![package.join("bin").join(program).display().to_string()];
     argv.extend(args);
     let mut spec = pg_core::command(argv, true);
@@ -209,6 +214,54 @@ fn run(package: &Path, program: &str, args: Vec<String>, deadline: Instant) -> R
     process::execute(&spec)
         .map_err(|_| invalid(format!("disposable PostgreSQL {program} failed")))?;
     Ok(())
+}
+
+/// Create `workspace/cluster` and start it on `workspace/socket` (which must
+/// already exist), reachable only through that socket on the fixed drill port.
+/// `settings` are extra `name=value` server settings. Restore and rehearsal
+/// share this so both leave the same PID carrier for `cleanup`.
+pub(crate) fn start_cluster(
+    package: &Path,
+    workspace: &Path,
+    settings: &[&str],
+    deadline: Instant,
+) -> Result<()> {
+    let data = workspace.join("cluster").display().to_string();
+    let socket = workspace.join("socket");
+    run(
+        package,
+        "initdb",
+        vec![
+            "-D".into(),
+            data.clone(),
+            "--locale=C".into(),
+            "--encoding=UTF8".into(),
+            "--auth=trust".into(),
+        ],
+        deadline,
+    )?;
+    let mut options = format!(
+        "-k {} -p 55439 -c listen_addresses=",
+        shell_quote(&socket.display().to_string())
+    );
+    for setting in settings {
+        options.push_str(&format!(" -c {}", shell_quote(setting)));
+    }
+    run(
+        package,
+        "pg_ctl",
+        vec![
+            "-D".into(),
+            data,
+            "-l".into(),
+            "/dev/null".into(),
+            "-o".into(),
+            options,
+            "-w".into(),
+            "start".into(),
+        ],
+        deadline,
+    )
 }
 
 pub fn operate(
@@ -272,7 +325,6 @@ pub fn operate_with_timeout(
     }
     let cluster = workspace.join("cluster");
     let socket = workspace.join("socket");
-    let data = cluster.display().to_string();
     if command == "cleanup" {
         return cleanup(&cluster, &socket, deadline);
     }
@@ -284,36 +336,7 @@ pub fn operate_with_timeout(
     }
     fs::DirBuilder::new().mode(0o700).create(&socket)?;
     let result = (|| {
-        run(
-            package,
-            "initdb",
-            vec![
-                "-D".into(),
-                data.clone(),
-                "--locale=C".into(),
-                "--encoding=UTF8".into(),
-                "--auth=trust".into(),
-            ],
-            deadline,
-        )?;
-        run(
-            package,
-            "pg_ctl",
-            vec![
-                "-D".into(),
-                data,
-                "-l".into(),
-                "/dev/null".into(),
-                "-o".into(),
-                format!(
-                    "-k {} -p 55439 -c listen_addresses=",
-                    shell_quote(&socket.display().to_string())
-                ),
-                "-w".into(),
-                "start".into(),
-            ],
-            deadline,
-        )?;
+        start_cluster(package, workspace, &[], deadline)?;
         let mut endpoint = vec![
             "-h".into(),
             socket.display().to_string(),
