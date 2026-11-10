@@ -122,6 +122,9 @@
     lib.postgresRollout = 3;
     lib.timezone = harbor-meta.lib.timezone;
     lib.testing.mkBtrfsCrashTest = import ./nix/testing/btrfs-crash.nix;
+    # `{pkgs}`: the static storage package for a consumer's own package set,
+    # for example a cross build the flake's native outputs cannot provide.
+    lib.nativePackage = import ./nix/native-package.nix;
     nixosModules.harbor-db = {
       lib,
       pkgs,

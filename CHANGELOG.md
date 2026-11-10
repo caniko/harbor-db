@@ -4,6 +4,8 @@
 
 ### Added
 
+- `lib.nativePackage {pkgs}` builds the static storage package for a consumer's
+  package set (cross builds), replacing imports of `nix/native-package.nix` by path.
 - `pgBackup` recovery-ready base backups (`targetSettings.baseBackup.recoveryMeta`,
   `sqlConninfo`): `base/<id>.meta.json` plus `LAST_SUCCESS=<id>` as read by
   `inspect-backup`; a durable `wal/.gap` marker when the receiver slot had to be
