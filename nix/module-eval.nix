@@ -512,6 +512,26 @@ in
               fragment = "postgres.databaseUrl names host in both its authority and its query";
             }
             {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?hostaddr=192.0.2.1";};
+              fragment = "postgres.databaseUrl query key hostaddr";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?service=production";};
+              fragment = "postgres.databaseUrl query key service";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.environment.PGSERVICE = "production";};
+              fragment = "environment PGSERVICE";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres://:5432,remote:5432/rehearsed_db";};
+              fragment = "postgres.databaseUrl names multiple hosts or ports";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?p%6Frt=5433";};
+              fragment = "postgres.databaseUrl query key p%6Frt is percent-encoded";
+            }
+            {
               evaluation = evaluate {
                 services.harbor-db.projects.rehearsed.postgres.provision = {
                   enable = true;
@@ -530,6 +550,7 @@ in
             (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=/run/postgresql";})
             (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=%2Frun%2Fpostgresql";})
             (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=/run/postgresql&application_name=x";})
+            (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres://?host=/run/postgresql&dbname=rehearsed_db";})
           ];
         in
           lib.all (case: rejected case.evaluation "extensions are created in the local cluster" && rejected case.evaluation case.fragment) mismatched

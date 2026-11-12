@@ -373,9 +373,13 @@
           to be that cluster too: `postgres.provision.socketDirectory`/`port`,
           `environment.PGHOST`/`PGPORT` and the host/port named by `postgres.databaseUrl` must
           match it. A URL that names host or port more than once (a repeated query keyword, or
-          both the authority and the query) is refused as ambiguous. Point the targets at the
-          local cluster or set `superuserExtensions = []` and create the extension yourself.
-          Rehearsals create the same extensions before restoring the production copy.
+          both the authority and the query) is refused as ambiguous, as are query keys that
+          could select another cluster (`hostaddr`, `service`, ...), percent-encoded query keys
+          and multiple hosts. Only a small set of non-targeting query keys is accepted, and
+          `PGSERVICE`, `PGSERVICEFILE`, `PGHOSTADDR` and `PGSYSCONFDIR` are refused in the
+          project environment. Point the targets at the local cluster or set
+          `superuserExtensions = []` and create the extension yourself. Rehearsals create the
+          same extensions before restoring the production copy.
         '';
       };
     };
@@ -840,42 +844,58 @@
   localPostgresSocketDirectory = lib.trim (lib.head (lib.splitString "," (toString (localPostgresSettings.unix_socket_directories or "/run/postgresql"))));
   localPostgresPort = toString (localPostgresSettings.port or 5432);
 
+  # Query keys the local-cluster guard can leave to libpq: they do not select a
+  # cluster. host/port are verified separately; any other key (hostaddr,
+  # service, target_session_attrs, passfile, ...) is refused rather than
+  # emulated, so the guard fails closed.
+  permittedUrlKeys = ["application_name" "connect_timeout" "dbname" "options" "sslmode" "user"];
+
   # The host and port a `postgres.databaseUrl` names. libpq parses the query
   # after the FIRST `?` and keeps the LAST repeated keyword, so a repeated
   # keyword, or one named in both the authority and the query, is ambiguous:
   # refuse it instead of emulating precedence.
   databaseUrlTarget = url: let
     queryString = lib.concatStringsSep "?" (lib.tail (lib.splitString "?" url));
-    parameters = parameter: lib.filter (pair: lib.hasPrefix "${parameter}=" pair) (lib.splitString "&" queryString);
-    parameterValue = parameter: let
-      pairs = parameters parameter;
-    in
-      lib.optionalString (pairs != []) (lib.removePrefix "${parameter}=" (lib.last pairs));
+    pairs = lib.filter (pair: pair != "") (lib.splitString "&" queryString);
+    keys = lib.unique (map (pair: lib.head (lib.splitString "=" pair)) pairs);
+    parameters = parameter: lib.filter (pair: lib.hasPrefix "${parameter}=" pair) pairs;
+    parameterValues = parameter: map (pair: lib.removePrefix "${parameter}=" pair) (parameters parameter);
     withoutScheme = lib.removePrefix "postgresql://" (lib.removePrefix "postgres://" url);
     hasScheme = withoutScheme != url;
-    authority = lib.head (lib.splitString "/" withoutScheme);
-    # `[user[:password]@]host[:port]`; the last `@` and `:` keep userinfo out.
-    hostPort = lib.splitString ":" (lib.last (lib.splitString "@" authority));
+    # The authority ends at the first `/` or `?` (`postgres://?host=...` has none).
+    authority = lib.head (lib.splitString "?" (lib.head (lib.splitString "/" withoutScheme)));
+    # `[user[:password]@]host[:port]`; the last `@` keeps userinfo out.
+    hostPortString = lib.last (lib.splitString "@" authority);
+    hostPort = lib.splitString ":" hostPortString;
     authorityHost = lib.optionalString hasScheme (lib.head hostPort);
     authorityPort = lib.optionalString (hasScheme && lib.length hostPort > 1) (lib.last hostPort);
+    hostValues = parameterValues "host";
+    portValues = parameterValues "port";
     # libpq accepts a percent-encoded socket directory (`host=%2Frun%2Fpostgresql`).
     decode = value: lib.replaceStrings ["%2F" "%2f"] ["/" "/"] value;
   in {
     host = decode (
-      if parameters "host" != []
-      then parameterValue "host"
+      if hostValues != []
+      then lib.last hostValues
       else authorityHost
     );
     port =
-      if parameters "port" != []
-      then parameterValue "port"
+      if portValues != []
+      then lib.last portValues
       else authorityPort;
     ambiguous =
-      lib.optional (lib.length (parameters "host") > 1) "postgres.databaseUrl repeats host in its query"
+      map (key: "postgres.databaseUrl query key ${key} is percent-encoded and cannot be verified") (lib.filter (key: lib.hasInfix "%" key) keys)
+      ++ map (key: "postgres.databaseUrl query key ${key} can select another cluster and is not verified") (lib.filter (key: !(lib.hasInfix "%" key) && !(lib.elem key permittedUrlKeys) && !(lib.elem key ["host" "port"])) keys)
+      ++ lib.optional (lib.hasInfix "," hostPortString || lib.any (value: lib.hasInfix "," value) (hostValues ++ portValues)) "postgres.databaseUrl names multiple hosts or ports, which cannot be verified"
+      ++ lib.optional (lib.length (parameters "host") > 1) "postgres.databaseUrl repeats host in its query"
       ++ lib.optional (lib.length (parameters "port") > 1) "postgres.databaseUrl repeats port in its query"
-      ++ lib.optional (authorityHost != "" && parameters "host" != []) "postgres.databaseUrl names host in both its authority and its query"
-      ++ lib.optional (authorityPort != "" && parameters "port" != []) "postgres.databaseUrl names port in both its authority and its query";
+      ++ lib.optional (authorityHost != "" && hostValues != []) "postgres.databaseUrl names host in both its authority and its query"
+      ++ lib.optional (authorityPort != "" && portValues != []) "postgres.databaseUrl names port in both its authority and its query";
   };
+
+  # Environment variables that select a cluster the local-cluster guard cannot
+  # verify against its socket directory and port.
+  unverifiableEnvironmentKeys = ["PGSERVICE" "PGSERVICEFILE" "PGHOSTADDR" "PGSYSCONFDIR"];
 
   # Every cluster target a project declares: structured provisioning, its
   # migration environment and its grant URL. `superuserExtensions` may only be
@@ -903,8 +923,11 @@
       inherit (urlTarget) host port;
     };
 
-  clusterMismatches = project:
-    (
+  clusterMismatches = project: let
+    environment = project.environment;
+  in
+    map (key: "environment ${key} can select another cluster and is not verified") (lib.filter (key: builtins.hasAttr key environment) unverifiableEnvironmentKeys)
+    ++ (
       if project.postgres.databaseUrl != null
       then (databaseUrlTarget project.postgres.databaseUrl).ambiguous
       else []
