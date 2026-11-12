@@ -43,6 +43,11 @@ pub struct Plan {
     pub package: PathBuf,
     pub source: Source,
     pub owner: String,
+    /// Bootstrap superuser `initdb` creates. Defaults to the account running
+    /// the engine; the module sets a distinct name so a project owner that is
+    /// also the unit's account can still be restored and rehearsed.
+    #[serde(default)]
+    pub superuser: Option<String>,
     pub database: String,
     #[serde(default)]
     pub locale: Option<String>,
@@ -199,6 +204,7 @@ pub fn parse_plan(bytes: &[u8]) -> Result<Plan> {
         }
     }
     let mut names = vec![&plan.owner, &plan.database];
+    names.extend(&plan.superuser);
     names.extend(&plan.superuser_extensions);
     names.extend(&plan.grantee_roles);
     if let Source::Live(live) = &plan.source {
@@ -224,6 +230,11 @@ pub fn parse_plan(bytes: &[u8]) -> Result<Plan> {
     }
     if plan.jobs.is_some_and(|jobs| !(1..=64).contains(&jobs)) {
         return Err(invalid("rehearsal jobs must be 1..=64"));
+    }
+    if plan.superuser.as_deref() == Some(plan.owner.as_str()) {
+        return Err(invalid(
+            "rehearsal owner must not be the cluster superuser account",
+        ));
     }
     let mut seen = BTreeSet::new();
     for step in &plan.steps {
@@ -702,7 +713,10 @@ fn execute(
     let jobs = plan.jobs.unwrap_or(4).to_string();
     let package = plan.package.as_path();
     let socket_dir = run_dir.join("socket");
-    let superuser = process::current_username()?;
+    let superuser = match &plan.superuser {
+        Some(superuser) => superuser.clone(),
+        None => process::current_username()?,
+    };
     if superuser == plan.owner {
         return Err(invalid(
             "rehearsal owner must not be the cluster superuser account",
@@ -711,7 +725,7 @@ fn execute(
     let cluster = Cluster {
         package,
         socket: socket_dir.display().to_string(),
-        user: superuser,
+        user: superuser.clone(),
     };
     if socket_dir
         .join(format!(".s.PGSQL.{PORT}"))
@@ -809,7 +823,13 @@ fn execute(
     receipt.standin_roles = standins.clone();
 
     fs::DirBuilder::new().mode(0o700).create(&socket_dir)?;
-    postgres_drill::start_cluster(package, run_dir, &SERVER_SETTINGS, deadline)?;
+    postgres_drill::start_cluster(
+        package,
+        run_dir,
+        Some(&superuser),
+        &SERVER_SETTINGS,
+        deadline,
+    )?;
     let (user, db) = (quote_ident(&plan.owner), quote_ident(&plan.database));
     cluster.sql(
         &cluster.user,
@@ -1175,6 +1195,30 @@ mod tests {
             ))
             .contains("expected")
         );
+    }
+
+    #[test]
+    fn plan_rejects_an_owner_that_is_the_bootstrap_superuser() {
+        let package = tempfile::tempdir().unwrap();
+        fs::create_dir(package.path().join("bin")).unwrap();
+        for program in ["initdb", "pg_ctl", "pg_restore", "pg_dump", "psql"] {
+            fs::write(package.path().join("bin").join(program), "").unwrap();
+        }
+        let text = |superuser: &str| {
+            plan(&format!(r#","superuser":"{superuser}""#)).replace(
+                r#""package":"/""#,
+                &format!(r#""package":"{}""#, package.path().display()),
+            )
+        };
+        let rejected = parse_plan(text("o").as_bytes());
+        assert!(
+            rejected
+                .unwrap_err()
+                .to_string()
+                .contains("must not be the cluster superuser"),
+            "the owner cannot be the disposable cluster's bootstrap superuser"
+        );
+        parse_plan(text("bootstrap").as_bytes()).unwrap();
     }
 
     #[test]

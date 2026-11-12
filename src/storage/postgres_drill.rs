@@ -218,28 +218,32 @@ pub(crate) fn run(
 
 /// Create `workspace/cluster` and start it on `workspace/socket` (which must
 /// already exist), reachable only through that socket on the fixed drill port.
-/// `settings` are extra `name=value` server settings. Restore and rehearsal
-/// share this so both leave the same PID carrier for `cleanup`.
+/// `superuser` names the role `initdb` creates; `None` keeps `initdb`'s default
+/// of the account running the engine. `settings` are extra `name=value` server
+/// settings. Restore and rehearsal share this so both leave the same PID
+/// carrier for `cleanup`.
 pub(crate) fn start_cluster(
     package: &Path,
     workspace: &Path,
+    superuser: Option<&str>,
     settings: &[&str],
     deadline: Instant,
 ) -> Result<()> {
     let data = workspace.join("cluster").display().to_string();
     let socket = workspace.join("socket");
-    run(
-        package,
-        "initdb",
-        vec![
-            "-D".into(),
-            data.clone(),
-            "--locale=C".into(),
-            "--encoding=UTF8".into(),
-            "--auth=trust".into(),
-        ],
-        deadline,
-    )?;
+    let mut initdb = vec![
+        "-D".into(),
+        data.clone(),
+        "--locale=C".into(),
+        "--encoding=UTF8".into(),
+        "--auth=trust".into(),
+    ];
+    initdb.extend(
+        superuser
+            .iter()
+            .flat_map(|superuser| ["--username".into(), superuser.to_string()]),
+    );
+    run(package, "initdb", initdb, deadline)?;
     let mut options = format!(
         "-k {} -p 55439 -c listen_addresses=",
         shell_quote(&socket.display().to_string())
@@ -336,7 +340,7 @@ pub fn operate_with_timeout(
     }
     fs::DirBuilder::new().mode(0o700).create(&socket)?;
     let result = (|| {
-        start_cluster(package, workspace, &[], deadline)?;
+        start_cluster(package, workspace, None, &[], deadline)?;
         let mut endpoint = vec![
             "-h".into(),
             socket.display().to_string(),

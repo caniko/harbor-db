@@ -342,6 +342,49 @@ fn dump_rehearsal_runs_steps_as_the_owner_and_leaves_nothing_behind() {
 }
 
 #[test]
+fn owner_that_is_the_unit_account_rehearses_with_a_distinct_bootstrap_superuser() {
+    let source = Source::new(false);
+    let work = source.work();
+    let dump = source.dump(true);
+    // The module's documented defaults use one name for the project user, the
+    // unit account and the restored owner. initdb's bootstrap role is the unit
+    // account, so the engine refuses until the plan names another superuser.
+    let account = harbor_db::storage::process::current_username().unwrap();
+    let mut plan = source.plan(json!({"dump": dump}), &work);
+    plan["owner"] = json!(account.clone());
+    let run = rehearse(&source, &plan);
+    assert_eq!(run.output.status.code(), Some(1));
+    let receipt = run.receipt.clone().expect("receipt");
+    assert_eq!(receipt["status"], "failed");
+    assert!(
+        receipt["failure"]
+            .as_str()
+            .unwrap()
+            .contains("must not be the cluster superuser account"),
+        "{receipt:#}"
+    );
+    assert_eq!(fs::read_dir(&work).unwrap().count(), 0);
+
+    // A distinct bootstrap superuser restores the copy for that same owner.
+    plan["superuser"] = json!("harbor_rehearsal_admin");
+    plan["probes"] = json!([
+        {"name": "current_user", "sql": "select current_user"},
+        {"name": "owner_is_superuser", "sql": "select rolsuper from pg_roles where rolname = current_user"},
+        {"name": "bootstrap_is_superuser", "sql": "select count(*) from pg_roles where rolname = 'harbor_rehearsal_admin' and rolsuper"},
+        {"name": "owners", "sql": "select string_agg(distinct tableowner, ',') from pg_tables where schemaname = 'public'"},
+    ]);
+    let run = rehearse(&source, &plan);
+    let receipt = run.receipt.clone().expect("receipt");
+    assert!(run.output.status.success(), "{receipt:#}");
+    assert_eq!(receipt["status"], "passed");
+    assert_eq!(probe(&receipt, "current_user"), account.as_str());
+    assert_eq!(probe(&receipt, "owner_is_superuser"), "f");
+    assert_eq!(probe(&receipt, "bootstrap_is_superuser"), "1");
+    assert_eq!(probe(&receipt, "owners"), account.as_str());
+    assert_eq!(receipt["cleanup"], "removed");
+}
+
+#[test]
 fn live_rehearsal_failing_step_stops_the_run_and_keep_retains_a_stopped_cluster() {
     let source = Source::new(false);
     let work = source.work();

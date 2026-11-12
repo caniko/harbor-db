@@ -38,6 +38,7 @@ required and must equal the schema id.
 | `package`              | Absolute PostgreSQL package path with `bin/{initdb,pg_ctl,pg_restore,pg_dump,psql}` and every extension the source and the steps need.                                                                                                                   |
 | `source`               | `{"live": {"host": "/run/postgresql", "database": "x", "user"?: "y"}}` or `{"dump": "/path"}`.                                                                                                                                                           |
 | `owner`                | Role created `LOGIN NOSUPERUSER`; steps and probes run as it. Use the source's own owner role name: `ALTER DEFAULT PRIVILEGES FOR ROLE <owner>` entries only restore for that role.                                                                       |
+| `superuser`            | Bootstrap superuser role `initdb` creates in the disposable cluster. Defaults to the OS account running the engine; it must differ from `owner`, which is why the module sets `harbor_rehearsal_admin`. Use a name no production role has.               |
 | `database`             | Database created in the disposable cluster, owned by `owner`.                                                                                                                                                                                            |
 | `locale`               | Collation/ctype for `CREATE DATABASE`. Defaults to the live source's `datcollate`, and to `C` for a dump source, so set it explicitly for dumps whose collation matters.                                                                                 |
 | `superuser_extensions` | Extensions created as superuser before the restore, in addition to every extension in the dump's table of contents. Use it for extensions the rehearsed migration introduces (the source does not have them yet).                                         |
@@ -57,9 +58,10 @@ is only read.
 
 ## What the restore does
 
-1. The superuser (the OS account running the engine) creates `owner`, `NOLOGIN`
-   stand-ins for every grantee and `FOR ROLE` target found in the dump's ACL and
-   default-ACL entries (plus `grantee_roles`), and the database.
+1. The cluster's bootstrap superuser (`superuser`, by default the OS account
+   running the engine) creates `owner`, `NOLOGIN` stand-ins for every grantee
+   and `FOR ROLE` target found in the dump's ACL and default-ACL entries (plus
+   `grantee_roles`), and the database.
 2. The superuser creates every extension named in the dump plus
    `superuser_extensions` (`CREATE EXTENSION IF NOT EXISTS … CASCADE`, default
    schema). The owner could not create untrusted ones such as postgis, and ACLs may
@@ -172,8 +174,9 @@ removed.
 extensions only a superuser may create. The generated apply unit runs
 `CREATE EXTENSION IF NOT EXISTS` for each as the PostgreSQL superuser, in
 `postgres.database` (or `postgres.provision.database`), before the owner's
-migration command, through a privileged `ExecStartPre`. The read-only check and
-restore units never run it.
+migration command, through a privileged `ExecStartPre`. That step names the
+superuser with `-U` and runs with an empty environment, so a project `PGUSER` or
+`PGHOST` cannot retarget it. The read-only check and restore units never run it.
 
 `services.harbor-db.projects.<name>.rehearsal` generates an on-demand
 `harbor-db-<name>-rehearse.service`: a oneshot with no timer and no `wantedBy`.
@@ -186,8 +189,8 @@ Its plan is built at evaluation from:
 
 Other operations are not rehearsed. The project's `environment` reaches the steps
 except `DATABASE_URL` and `PG*`. Rehearsed runners cannot use credentials; the
-copy must not need production secrets. Receipts go to
-`<stateDirectory>/rehearsals/`, so `stateDirectory` is required.
+copy must not need production secrets. Receipts go to the unit's own state
+directory, `/var/lib/harbor-db-<name>-rehearse/`, never to the project's.
 
 | Option                                                                | Default                                                      |
 | --------------------------------------------------------------------- | ------------------------------------------------------------ |
@@ -195,6 +198,7 @@ copy must not need production secrets. Receipts go to
 | `source.database` / `source.host` / `source.user`                     | project database / `/run/postgresql` / none                  |
 | `owner`                                                               | `postgres.provision.ownerRole`, else the project `user`      |
 | `user`                                                                | the project `user` (initdb refuses root)                     |
+| `superuser`                                                           | `harbor_rehearsal_admin`, which must not be the `owner`      |
 | `workDirectory`                                                       | required, an existing absolute directory                     |
 | `package`                                                             | `services.postgresql.finalPackage`, else `pkgs.postgresql`   |
 | `jobs` / `timeoutSeconds` / `keep`                                    | `4` / `14400` / `false`                                      |
@@ -265,14 +269,17 @@ services.harbor-db.projects.app = {
 ```
 
 Run it with `systemctl start harbor-db-app-rehearse.service` and read the newest file
-in `/var/lib/app/rehearsals/`. A passing receipt is rehearsal evidence for that
+in `/var/lib/harbor-db-app-rehearse/`. A passing receipt is rehearsal evidence for that
 copy and revision; it does not qualify a deployment by itself.
 
 ## Qualification
 
 `tests/rehearsal.rs` runs the actual CLI against real source and rehearsal
 clusters of `HARBOR_DB_TEST_POSTGRES` (including a postgis case that skips with a
-printed message when the package lacks postgis); unit tests in
+printed message when the package lacks postgis), and the documented defaults where
+the project owner is also the unit account; unit tests in
 `src/storage/rehearsal.rs` cover plan parsing, TOC filtering, ACL role extraction
 and the work-directory guard; `nix/module-eval.nix` checks the generated unit, plan
-and `ExecStartPre`. All are registered in `tests/suite.toml`.
+and `ExecStartPre`; the `module-smoke` NixOS test rehearses a live database with the
+documented defaults and with a distinct `rehearsal.user`. All are registered in
+`tests/suite.toml`.

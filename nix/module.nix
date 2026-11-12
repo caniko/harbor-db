@@ -403,6 +403,17 @@
         description = "Non-superuser owner role created in the copy. Defaults to postgres.provision.ownerRole, then the project user.";
       };
 
+      superuser = mkOption {
+        type = types.str;
+        default = "harbor_rehearsal_admin";
+        description = ''
+          Bootstrap superuser role `initdb` creates in the disposable cluster. It must
+          differ from `owner`: a database cannot be restored for an owner that is the
+          cluster's own superuser. It never exists in the source, so pick a name no
+          production role uses.
+        '';
+      };
+
       user = mkOption {
         type = types.nullOr types.str;
         default = null;
@@ -579,7 +590,8 @@
           On-demand `harbor-db-<name>-rehearse.service`: restore a copy of the live database
           into a disposable private cluster and run the runner's migrate/check steps and the
           `maintenance` operations as the non-superuser owner. Receipts land in
-          `<stateDirectory>/rehearsals/`. The unit has no timer and is never wanted by a target.
+          `/var/lib/harbor-db-<name>-rehearse/`, the unit's own state directory. The unit has
+          no timer and is never wanted by a target.
         '';
       };
     };
@@ -813,16 +825,25 @@
 
   # Untrusted extensions must exist before the non-superuser owner migrates.
   # `+` runs the line unsandboxed as root so it can drop to the superuser; it
-  # belongs to the apply unit only, so readiness checks stay read-only.
-  superuserExtensionsPreStart = project:
+  # belongs to the apply unit only, so readiness checks stay read-only. The
+  # project environment reaches the whole unit, and runuser keeps it, so psql
+  # gets a cleared environment: PGUSER or PGHOST would otherwise retarget or
+  # fail the superuser connection. `-U` names the superuser explicitly.
+  superuserExtensionsPreStart = project: let
+    superuser = config.services.postgresql.superUser or "postgres";
+  in
     lib.optional (project.postgres.superuserExtensions != []) ("+"
       + lib.escapeShellArgs ([
           "${pkgs.util-linux}/bin/runuser"
           "-u"
-          (config.services.postgresql.superUser or "postgres")
+          superuser
           "--"
+          "${pkgs.coreutils}/bin/env"
+          "-i"
           "${project.postgres.package}/bin/psql"
           "-X"
+          "-U"
+          superuser
           "-v"
           "ON_ERROR_STOP=1"
           "-d"
@@ -849,7 +870,13 @@
     then project.rehearsal.source.database
     else projectDatabase project;
 
-  rehearsalReceiptDirectory = project: "/var/lib/${project.stateDirectory}/rehearsals";
+  rehearsalSuperuser = project: project.rehearsal.superuser;
+
+  # Rehearsal owns its state directory: systemd would otherwise recursively
+  # chown the project's production state to a distinct rehearsal.user.
+  rehearsalStateDirectory = name: "harbor-db-${name}-rehearse";
+
+  rehearsalReceiptDirectory = name: "/var/lib/${rehearsalStateDirectory name}";
 
   # The rehearsal engine owns the connection, so unit environment that would
   # retarget it is dropped; credentials cannot be reproduced and are rejected.
@@ -897,6 +924,7 @@
         }
         // optionalAttrs (rehearsal.source.user != null) {user = rehearsal.source.user;};
       owner = rehearsalOwner project;
+      superuser = rehearsalSuperuser project;
       database = projectDatabase project;
       superuser_extensions = project.postgres.superuserExtensions;
       steps = rehearsalSteps name project;
@@ -920,13 +948,13 @@
       {
         Type = "oneshot";
         User = rehearsalUser project;
-        StateDirectory = project.stateDirectory;
+        StateDirectory = rehearsalStateDirectory name;
         ExecStart = lib.escapeShellArgs (map toString [
           "${toString cfg.package}/bin/harbor-db-rehearse"
           "--plan"
           (rehearsalPlan name project)
           "--receipt-dir"
-          (rehearsalReceiptDirectory project)
+          (rehearsalReceiptDirectory name)
         ]);
         # The engine's own deadline plus its bounded cluster cleanup.
         TimeoutStartSec = rehearsal.timeoutSeconds + 600;
@@ -1254,8 +1282,12 @@ in {
             message = "services.harbor-db.projects.${name}.rehearsal: set rehearsal.owner and rehearsal.user, or the project user";
           }
           {
-            assertion = project.stateDirectory != null;
-            message = "services.harbor-db.projects.${name}.rehearsal: stateDirectory is required; receipts are written to <stateDirectory>/rehearsals";
+            assertion = rehearsalSuperuser project != rehearsalOwner project;
+            message = "services.harbor-db.projects.${name}.rehearsal: rehearsal.superuser must differ from the owner role; set rehearsal.superuser to another name";
+          }
+          {
+            assertion = rehearsalStateDirectory name != project.stateDirectory;
+            message = "services.harbor-db.projects.${name}.rehearsal: the rehearsal unit must not share the project state directory";
           }
           {
             assertion = lib.all (runner: runner.credentialArgs == [] && runner.credentialEnvironment == {}) ([project.runner] ++ map (operation: operation.value.runner) (rehearsalMaintenanceOperations project));
