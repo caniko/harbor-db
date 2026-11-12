@@ -178,8 +178,13 @@ migration command, through a privileged `ExecStartPre`. That step names the
 superuser with `-U` and runs with an empty environment, so a project `PGUSER` or
 `PGHOST` cannot retarget it; it connects through the cluster
 `services.postgresql` configures (`settings.unix_socket_directories`, default
-`/run/postgresql`, and `settings.port`). The read-only check and restore units
-never run it.
+`/run/postgresql`, and `settings.port`). Because the extension is created there,
+evaluation refuses `superuserExtensions` when the project's own targets name
+another cluster: `postgres.provision.socketDirectory`/`port` (when provisioning
+is enabled), `environment.PGHOST`/`PGPORT`, or the host/port named by
+`postgres.databaseUrl`. Point those at the local cluster, or set
+`superuserExtensions = []` and create the extension yourself. The read-only check
+and restore units never run it.
 
 `services.harbor-db.projects.<name>.rehearsal` generates an on-demand
 `harbor-db-<name>-rehearse.service`: a oneshot with no timer and no `wantedBy`.

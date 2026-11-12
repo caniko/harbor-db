@@ -475,6 +475,50 @@ in
         message = "the privileged pre-start must use the configured socket directory and port, not the cleared environment or libpq defaults";
       }
       {
+        name = "superuser-extensions-require-the-local-cluster";
+        assertion = let
+          mismatched = [
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.environment.PGPORT = "5433";};
+              fragment = "environment port 5433";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.environment.PGHOST = lib.mkForce "/run/postgresql-other";};
+              fragment = "environment host /run/postgresql-other";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=/run/postgresql&port=5433";};
+              fragment = "postgres.databaseUrl port 5433";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres://db.example/rehearsed_db";};
+              fragment = "postgres.databaseUrl host db.example";
+            }
+            {
+              evaluation = evaluate {
+                services.harbor-db.projects.rehearsed.postgres.provision = {
+                  enable = true;
+                  database = "provisioned_db";
+                  ownerRole = "provisioned_owner";
+                  runtimeRole = "provisioned_runtime";
+                  runtimeOsUser = "provisioned_runtime";
+                  port = 5433;
+                };
+              };
+              fragment = "postgres.provision port 5433";
+            }
+          ];
+          matching = [
+            (evaluate {services.harbor-db.projects.rehearsed.environment.PGPORT = "5432";})
+            (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=/run/postgresql";})
+            (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=%2Frun%2Fpostgresql";})
+          ];
+        in
+          lib.all (case: rejected case.evaluation "extensions are created in the local cluster" && rejected case.evaluation case.fragment) mismatched
+          && lib.all (evaluation: !(rejected evaluation "extensions are created in the local cluster")) matching;
+        message = "superuserExtensions must be refused, naming the offending target, when the project's provisioning target, migration environment or grant URL names a different cluster; the local socket directory and port stay admissible";
+      }
+      {
         name = "rehearsal-input-rejection";
         assertion =
           rejected (evaluate {

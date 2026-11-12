@@ -369,7 +369,12 @@
           `postgres.database`, before the non-superuser owner's migration command. It connects
           to the cluster `services.postgresql` configures: `settings.unix_socket_directories`
           (default `/run/postgresql`) and `settings.port`, never the project environment.
-          Rehearsals create the same extensions before restoring the production copy.
+          Because the extension is created there, evaluation requires the project's own targets
+          to be that cluster too: `postgres.provision.socketDirectory`/`port`,
+          `environment.PGHOST`/`PGPORT` and the host/port named by `postgres.databaseUrl` must
+          match it. Point them at the local cluster or set `superuserExtensions = []` and create
+          the extension yourself. Rehearsals create the same extensions before restoring the
+          production copy.
         '';
       };
     };
@@ -825,39 +830,92 @@
     then project.postgres.provision.database
     else null;
 
+  # `superuserExtensions` are created by the local cluster's superuser, so the
+  # pre-start targets the cluster `services.postgresql` configures. nixpkgs
+  # builds PostgreSQL with /run/postgresql as its default socket directory.
+  localPostgresSuperuser = config.services.postgresql.superUser or "postgres";
+  localPostgresSettings = config.services.postgresql.settings or {};
+  # The server setting is a comma-separated list; psql takes one directory.
+  localPostgresSocketDirectory = lib.trim (lib.head (lib.splitString "," (toString (localPostgresSettings.unix_socket_directories or "/run/postgresql"))));
+  localPostgresPort = toString (localPostgresSettings.port or 5432);
+
+  # Every cluster target a project declares: structured provisioning, its
+  # migration environment and its grant URL. `superuserExtensions` may only be
+  # used when all of them are the local cluster the pre-start writes to.
+  projectClusterTargets = project: let
+    environment = project.environment;
+    provision = project.postgres.provision;
+    url = project.postgres.databaseUrl;
+    withoutScheme = lib.removePrefix "postgresql://" (lib.removePrefix "postgres://" url);
+    hasScheme = withoutScheme != url;
+    authority = lib.head (lib.splitString "/" withoutScheme);
+    # `[user[:password]@]host[:port]`; the last `@` and `:` keep userinfo out.
+    hostPort = lib.splitString ":" (lib.last (lib.splitString "@" authority));
+    query = parameter: let
+      pairs = lib.filter (pair: lib.hasPrefix "${parameter}=" pair) (lib.splitString "&" (lib.last (lib.splitString "?" url)));
+    in
+      lib.optionalString (pairs != []) (lib.removePrefix "${parameter}=" (lib.head pairs));
+    # libpq accepts a percent-encoded socket directory (`host=%2Frun%2Fpostgresql`).
+    decode = value: lib.replaceStrings ["%2F" "%2f"] ["/" "/"] value;
+    urlHost = decode (
+      if query "host" != ""
+      then query "host"
+      else lib.optionalString hasScheme (lib.head hostPort)
+    );
+    urlPort =
+      if query "port" != ""
+      then query "port"
+      else lib.optionalString (hasScheme && lib.length hostPort > 1) (lib.last hostPort);
+  in
+    (lib.optional provision.enable {
+      source = "postgres.provision";
+      host = provision.socketDirectory;
+      port = toString provision.port;
+    })
+    ++ [
+      {
+        source = "environment";
+        host = environment.PGHOST or null;
+        port = environment.PGPORT or null;
+      }
+    ]
+    ++ lib.optional (url != null) {
+      source = "postgres.databaseUrl";
+      host = urlHost;
+      port = urlPort;
+    };
+
+  clusterMismatches = project:
+    lib.concatMap (target:
+      (lib.optional (target.host != null && target.host != "" && target.host != localPostgresSocketDirectory) "${target.source} host ${target.host} (the local socket directory is ${localPostgresSocketDirectory})")
+      ++ (lib.optional (target.port != null && target.port != "" && target.port != localPostgresPort) "${target.source} port ${target.port} (the local port is ${localPostgresPort})"))
+    (projectClusterTargets project);
+
   # Untrusted extensions must exist before the non-superuser owner migrates.
   # `+` runs the line unsandboxed as root so it can drop to the superuser; it
   # belongs to the apply unit only, so readiness checks stay read-only. The
   # project environment reaches the whole unit, and runuser keeps it, so psql
   # gets a cleared environment: PGUSER or PGHOST would otherwise retarget or
   # fail the superuser connection. `-U` names the superuser explicitly, and
-  # `-h`/`-p` name the cluster `services.postgresql` configures (the local
-  # cluster that owns that superuser), because the cleared environment no
-  # longer carries a project PGPORT or PGHOST. nixpkgs builds PostgreSQL with
-  # /run/postgresql as its default socket directory.
-  superuserExtensionsPreStart = project: let
-    superuser = config.services.postgresql.superUser or "postgres";
-    settings = config.services.postgresql.settings or {};
-    # The server setting is a comma-separated list; psql takes one directory.
-    socketDirectory = lib.trim (lib.head (lib.splitString "," (toString (settings.unix_socket_directories or "/run/postgresql"))));
-    port = toString (settings.port or 5432);
-  in
+  # `-h`/`-p` name the local cluster, because the cleared environment no
+  # longer carries a project PGPORT or PGHOST.
+  superuserExtensionsPreStart = project:
     lib.optional (project.postgres.superuserExtensions != []) ("+"
       + lib.escapeShellArgs ([
           "${pkgs.util-linux}/bin/runuser"
           "-u"
-          superuser
+          localPostgresSuperuser
           "--"
           "${pkgs.coreutils}/bin/env"
           "-i"
           "${project.postgres.package}/bin/psql"
           "-X"
           "-U"
-          superuser
+          localPostgresSuperuser
           "-h"
-          socketDirectory
+          localPostgresSocketDirectory
           "-p"
-          port
+          localPostgresPort
           "-v"
           "ON_ERROR_STOP=1"
           "-d"
@@ -1280,6 +1338,10 @@ in {
           {
             assertion = project.postgres.superuserExtensions == [] || projectDatabase project != null;
             message = "services.harbor-db.projects.${name}: postgres.superuserExtensions needs postgres.database (or postgres.provision)";
+          }
+          {
+            assertion = project.postgres.superuserExtensions == [] || clusterMismatches project == [];
+            message = "services.harbor-db.projects.${name}.postgres.superuserExtensions: extensions are created in the local cluster (socket directory ${localPostgresSocketDirectory}, port ${localPostgresPort}), but this project targets ${lib.concatStringsSep ", " (clusterMismatches project)}; make the project target the local cluster or set superuserExtensions = []";
           }
         ]
         ++ lib.optionals project.rehearsal.enable [
