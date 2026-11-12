@@ -187,10 +187,11 @@ query keyword, or both the authority and the query), names them as a
 comma-separated list, uses a query key that could select another cluster
 (`hostaddr`, `service`, `target_session_attrs`, ...), or uses a percent-encoded
 query key is refused as ambiguous; only a small set of non-targeting query keys
-is accepted. `PGSERVICE`, `PGSERVICEFILE`, `PGHOSTADDR` and `PGSYSCONFDIR` are
-refused in the project environment. Point those at the local cluster, or set
-`superuserExtensions = []` and create the extension yourself. The read-only
-check and restore units never run it.
+is accepted. Only `postgres://`/`postgresql://` URIs can be verified, so a
+keyword/value connection string is refused too. `PGSERVICE`, `PGSERVICEFILE`,
+`PGHOSTADDR` and `PGSYSCONFDIR` are refused in the project environment. Point
+those at the local cluster, or set `superuserExtensions = []` and create the
+extension yourself. The read-only check and restore units never run it.
 
 `services.harbor-db.projects.<name>.rehearsal` generates an on-demand
 `harbor-db-<name>-rehearse.service`: a oneshot with no timer and no `wantedBy`.

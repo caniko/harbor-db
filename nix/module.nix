@@ -375,9 +375,10 @@
           match it. A URL that names host or port more than once (a repeated query keyword, or
           both the authority and the query) is refused as ambiguous, as are query keys that
           could select another cluster (`hostaddr`, `service`, ...), percent-encoded query keys
-          and multiple hosts. Only a small set of non-targeting query keys is accepted, and
-          `PGSERVICE`, `PGSERVICEFILE`, `PGHOSTADDR` and `PGSYSCONFDIR` are refused in the
-          project environment. Point the targets at the local cluster or set
+          and multiple hosts. Only `postgres://`/`postgresql://` URIs can be verified; a
+          keyword/value connection string is refused. Only a small set of non-targeting query
+          keys is accepted, and `PGSERVICE`, `PGSERVICEFILE`, `PGHOSTADDR` and `PGSYSCONFDIR`
+          are refused in the project environment. Point the targets at the local cluster or set
           `superuserExtensions = []` and create the extension yourself. Rehearsals create the
           same extensions before restoring the production copy.
         '';
@@ -850,7 +851,9 @@
   # emulated, so the guard fails closed.
   permittedUrlKeys = ["application_name" "connect_timeout" "dbname" "options" "sslmode" "user"];
 
-  # The host and port a `postgres.databaseUrl` names. libpq parses the query
+  # The host and port a `postgres.databaseUrl` names. Only `postgres://` and
+  # `postgresql://` URIs are verifiable: a keyword/value conninfo string yields
+  # no targets and is refused. libpq parses the query
   # after the FIRST `?` and keeps the LAST repeated keyword, so a repeated
   # keyword, or one named in both the authority and the query, is ambiguous:
   # refuse it instead of emulating precedence.
@@ -884,7 +887,8 @@
       then lib.last portValues
       else authorityPort;
     ambiguous =
-      map (key: "postgres.databaseUrl query key ${key} is percent-encoded and cannot be verified") (lib.filter (key: lib.hasInfix "%" key) keys)
+      lib.optional (!(lib.hasPrefix "postgres://" url) && !(lib.hasPrefix "postgresql://" url)) "postgres.databaseUrl is not a postgres:// or postgresql:// URI and cannot be verified"
+      ++ map (key: "postgres.databaseUrl query key ${key} is percent-encoded and cannot be verified") (lib.filter (key: lib.hasInfix "%" key) keys)
       ++ map (key: "postgres.databaseUrl query key ${key} can select another cluster and is not verified") (lib.filter (key: !(lib.hasInfix "%" key) && !(lib.elem key permittedUrlKeys) && !(lib.elem key ["host" "port"])) keys)
       ++ lib.optional (lib.hasInfix "," hostPortString || lib.any (value: lib.hasInfix "," value) (hostValues ++ portValues)) "postgres.databaseUrl names multiple hosts or ports, which cannot be verified"
       ++ lib.optional (lib.length (parameters "host") > 1) "postgres.databaseUrl repeats host in its query"

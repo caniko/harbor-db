@@ -532,6 +532,10 @@ in
               fragment = "postgres.databaseUrl query key p%6Frt is percent-encoded";
             }
             {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "host=/run/postgresql port=5433 dbname=rehearsed_db";};
+              fragment = "postgres.databaseUrl is not a postgres:// or postgresql:// URI";
+            }
+            {
               evaluation = evaluate {
                 services.harbor-db.projects.rehearsed.postgres.provision = {
                   enable = true;
@@ -551,6 +555,7 @@ in
             (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=%2Frun%2Fpostgresql";})
             (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=/run/postgresql&application_name=x";})
             (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres://?host=/run/postgresql&dbname=rehearsed_db";})
+            (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgresql:///rehearsed_db?host=/run/postgresql";})
           ];
         in
           lib.all (case: rejected case.evaluation "extensions are created in the local cluster" && rejected case.evaluation case.fragment) mismatched
