@@ -24,7 +24,9 @@ impl Source {
         let package = PathBuf::from(
             std::env::var_os("HARBOR_DB_TEST_POSTGRES").expect("qualified PostgreSQL package"),
         );
-        let root = tempfile::tempdir().unwrap();
+        // Root at /tmp, not $TMPDIR: nested dev shells and test runners can push
+        // $TMPDIR past the 100-byte Unix socket limit the engine guards against.
+        let root = tempfile::tempdir_in("/tmp").unwrap();
         let socket = root.path().join("src-socket");
         fs::create_dir(&socket).unwrap();
         let source = Self {
