@@ -182,9 +182,10 @@ superuser with `-U` and runs with an empty environment, so a project `PGUSER` or
 evaluation refuses `superuserExtensions` when the project's own targets name
 another cluster: `postgres.provision.socketDirectory`/`port` (when provisioning
 is enabled), `environment.PGHOST`/`PGPORT`, or the host/port named by
-`postgres.databaseUrl`. Point those at the local cluster, or set
-`superuserExtensions = []` and create the extension yourself. The read-only check
-and restore units never run it.
+`postgres.databaseUrl`. A URL that names host or port more than once (repeated
+query keyword, or both the authority and the query) is refused as ambiguous.
+Point those at the local cluster, or set `superuserExtensions = []` and create
+the extension yourself. The read-only check and restore units never run it.
 
 `services.harbor-db.projects.<name>.rehearsal` generates an on-demand
 `harbor-db-<name>-rehearse.service`: a oneshot with no timer and no `wantedBy`.

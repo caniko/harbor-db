@@ -372,9 +372,10 @@
           Because the extension is created there, evaluation requires the project's own targets
           to be that cluster too: `postgres.provision.socketDirectory`/`port`,
           `environment.PGHOST`/`PGPORT` and the host/port named by `postgres.databaseUrl` must
-          match it. Point them at the local cluster or set `superuserExtensions = []` and create
-          the extension yourself. Rehearsals create the same extensions before restoring the
-          production copy.
+          match it. A URL that names host or port more than once (a repeated query keyword, or
+          both the authority and the query) is refused as ambiguous. Point the targets at the
+          local cluster or set `superuserExtensions = []` and create the extension yourself.
+          Rehearsals create the same extensions before restoring the production copy.
         '';
       };
     };
@@ -839,6 +840,43 @@
   localPostgresSocketDirectory = lib.trim (lib.head (lib.splitString "," (toString (localPostgresSettings.unix_socket_directories or "/run/postgresql"))));
   localPostgresPort = toString (localPostgresSettings.port or 5432);
 
+  # The host and port a `postgres.databaseUrl` names. libpq parses the query
+  # after the FIRST `?` and keeps the LAST repeated keyword, so a repeated
+  # keyword, or one named in both the authority and the query, is ambiguous:
+  # refuse it instead of emulating precedence.
+  databaseUrlTarget = url: let
+    queryString = lib.concatStringsSep "?" (lib.tail (lib.splitString "?" url));
+    parameters = parameter: lib.filter (pair: lib.hasPrefix "${parameter}=" pair) (lib.splitString "&" queryString);
+    parameterValue = parameter: let
+      pairs = parameters parameter;
+    in
+      lib.optionalString (pairs != []) (lib.removePrefix "${parameter}=" (lib.last pairs));
+    withoutScheme = lib.removePrefix "postgresql://" (lib.removePrefix "postgres://" url);
+    hasScheme = withoutScheme != url;
+    authority = lib.head (lib.splitString "/" withoutScheme);
+    # `[user[:password]@]host[:port]`; the last `@` and `:` keep userinfo out.
+    hostPort = lib.splitString ":" (lib.last (lib.splitString "@" authority));
+    authorityHost = lib.optionalString hasScheme (lib.head hostPort);
+    authorityPort = lib.optionalString (hasScheme && lib.length hostPort > 1) (lib.last hostPort);
+    # libpq accepts a percent-encoded socket directory (`host=%2Frun%2Fpostgresql`).
+    decode = value: lib.replaceStrings ["%2F" "%2f"] ["/" "/"] value;
+  in {
+    host = decode (
+      if parameters "host" != []
+      then parameterValue "host"
+      else authorityHost
+    );
+    port =
+      if parameters "port" != []
+      then parameterValue "port"
+      else authorityPort;
+    ambiguous =
+      lib.optional (lib.length (parameters "host") > 1) "postgres.databaseUrl repeats host in its query"
+      ++ lib.optional (lib.length (parameters "port") > 1) "postgres.databaseUrl repeats port in its query"
+      ++ lib.optional (authorityHost != "" && parameters "host" != []) "postgres.databaseUrl names host in both its authority and its query"
+      ++ lib.optional (authorityPort != "" && parameters "port" != []) "postgres.databaseUrl names port in both its authority and its query";
+  };
+
   # Every cluster target a project declares: structured provisioning, its
   # migration environment and its grant URL. `superuserExtensions` may only be
   # used when all of them are the local cluster the pre-start writes to.
@@ -846,26 +884,7 @@
     environment = project.environment;
     provision = project.postgres.provision;
     url = project.postgres.databaseUrl;
-    withoutScheme = lib.removePrefix "postgresql://" (lib.removePrefix "postgres://" url);
-    hasScheme = withoutScheme != url;
-    authority = lib.head (lib.splitString "/" withoutScheme);
-    # `[user[:password]@]host[:port]`; the last `@` and `:` keep userinfo out.
-    hostPort = lib.splitString ":" (lib.last (lib.splitString "@" authority));
-    query = parameter: let
-      pairs = lib.filter (pair: lib.hasPrefix "${parameter}=" pair) (lib.splitString "&" (lib.last (lib.splitString "?" url)));
-    in
-      lib.optionalString (pairs != []) (lib.removePrefix "${parameter}=" (lib.head pairs));
-    # libpq accepts a percent-encoded socket directory (`host=%2Frun%2Fpostgresql`).
-    decode = value: lib.replaceStrings ["%2F" "%2f"] ["/" "/"] value;
-    urlHost = decode (
-      if query "host" != ""
-      then query "host"
-      else lib.optionalString hasScheme (lib.head hostPort)
-    );
-    urlPort =
-      if query "port" != ""
-      then query "port"
-      else lib.optionalString (hasScheme && lib.length hostPort > 1) (lib.last hostPort);
+    urlTarget = databaseUrlTarget url;
   in
     (lib.optional provision.enable {
       source = "postgres.provision";
@@ -881,12 +900,16 @@
     ]
     ++ lib.optional (url != null) {
       source = "postgres.databaseUrl";
-      host = urlHost;
-      port = urlPort;
+      inherit (urlTarget) host port;
     };
 
   clusterMismatches = project:
-    lib.concatMap (target:
+    (
+      if project.postgres.databaseUrl != null
+      then (databaseUrlTarget project.postgres.databaseUrl).ambiguous
+      else []
+    )
+    ++ lib.concatMap (target:
       (lib.optional (target.host != null && target.host != "" && target.host != localPostgresSocketDirectory) "${target.source} host ${target.host} (the local socket directory is ${localPostgresSocketDirectory})")
       ++ (lib.optional (target.port != null && target.port != "" && target.port != localPostgresPort) "${target.source} port ${target.port} (the local port is ${localPostgresPort})"))
     (projectClusterTargets project);

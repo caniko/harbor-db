@@ -495,6 +495,23 @@ in
               fragment = "postgres.databaseUrl host db.example";
             }
             {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?port=5432&port=5433";};
+              fragment = "postgres.databaseUrl repeats port in its query";
+            }
+            {
+              # libpq reads the query after the first `?`, so the port must be found.
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?port=5433&application_name=x?y";};
+              fragment = "postgres.databaseUrl port 5433";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres://db.example:5433/rehearsed_db?port=5432";};
+              fragment = "postgres.databaseUrl names port in both its authority and its query";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres://db.example/rehearsed_db?host=/run/postgresql";};
+              fragment = "postgres.databaseUrl names host in both its authority and its query";
+            }
+            {
               evaluation = evaluate {
                 services.harbor-db.projects.rehearsed.postgres.provision = {
                   enable = true;
@@ -512,6 +529,7 @@ in
             (evaluate {services.harbor-db.projects.rehearsed.environment.PGPORT = "5432";})
             (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=/run/postgresql";})
             (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=%2Frun%2Fpostgresql";})
+            (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=/run/postgresql&application_name=x";})
           ];
         in
           lib.all (case: rejected case.evaluation "extensions are created in the local cluster" && rejected case.evaluation case.fragment) mismatched
