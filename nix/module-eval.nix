@@ -437,12 +437,14 @@ in
           && lib.hasInfix "runuser" (lib.head pre)
           && lib.hasInfix "/bin/env -i " (lib.head pre)
           && lib.hasInfix "-U postgres" (lib.head pre)
+          && lib.hasInfix "-h /run/postgresql" (lib.head pre)
+          && lib.hasInfix "-p 5432" (lib.head pre)
           && !(lib.hasInfix "rehearsed_owner" (lib.head pre))
           && lib.hasInfix "CREATE EXTENSION IF NOT EXISTS" (lib.head pre)
           && lib.hasInfix "postgis" (lib.head pre)
           && lib.hasInfix "rehearsed_db" (lib.head pre)
           && !(rehearsedCheck.serviceConfig ? ExecStartPre);
-        message = "superuserExtensions must pre-create extensions as the explicit superuser with a cleared environment in the apply unit, never with the project's PGUSER and never in the read-only check unit";
+        message = "superuserExtensions must pre-create extensions as the explicit superuser in the configured cluster, with a cleared environment, in the apply unit and never in the read-only check unit";
       }
       {
         name = "superuser-pre-start-clears-the-project-connection";
@@ -455,6 +457,22 @@ in
           && lib.hasInfix "/bin/env -i " pre
           && lib.hasInfix "-U postgres" pre;
         message = "a project PGUSER/PGHOST must not survive into the privileged pre-start: it clears PG* and names the superuser with -U";
+      }
+      {
+        name = "superuser-pre-start-targets-the-configured-cluster";
+        assertion = let
+          evaluation = evaluate {
+            services.postgresql.settings = {
+              port = 5433;
+              unix_socket_directories = "/run/postgresql-eval, /run/postgresql-spare";
+            };
+          };
+          pre = lib.head (lib.toList (evaluation.config.systemd.services.harbor-db-rehearsed.serviceConfig.ExecStartPre or []));
+        in
+          lib.hasInfix "-h /run/postgresql-eval" pre
+          && lib.hasInfix "-p 5433" pre
+          && !(lib.hasInfix "5432" pre);
+        message = "the privileged pre-start must use the configured socket directory and port, not the cleared environment or libpq defaults";
       }
       {
         name = "rehearsal-input-rejection";

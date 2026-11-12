@@ -7489,7 +7489,7 @@ case = "nix.x86_64-linux.module-eval"
 capability = "nixos"
 operation = "nixos.rehearsal"
 dimension = "positive"
-evidence = "nix/module-eval.nix evaluates a project with postgres.superuserExtensions, a maintenance operation and rehearsal.enable. The rehearse unit is a oneshot without timer or wantedBy; its plan has the documented schema, runner migrate/check steps plus the maintenance operation and its check, the live source, owner, a distinct bootstrap superuser, extensions and receipts under the unit's own state directory; the apply unit alone carries the superuser CREATE EXTENSION ExecStartPre, with an explicit -U and a cleared environment."
+evidence = "nix/module-eval.nix evaluates a project with postgres.superuserExtensions, a maintenance operation and rehearsal.enable. The rehearse unit is a oneshot without timer or wantedBy; its plan has the documented schema, runner migrate/check steps plus the maintenance operation and its check, the live source, owner, a distinct bootstrap superuser, extensions and receipts under the unit's own state directory; the apply unit alone carries the superuser CREATE EXTENSION ExecStartPre, with an explicit -U and a cleared environment, targeting the configured socket directory and port (a nondefault settings.port/unix_socket_directories evaluation is asserted)."
 
 [[coverage]]
 case = "nix.x86_64-linux.module-eval"

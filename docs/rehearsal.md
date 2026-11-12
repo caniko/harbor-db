@@ -176,7 +176,10 @@ extensions only a superuser may create. The generated apply unit runs
 `postgres.database` (or `postgres.provision.database`), before the owner's
 migration command, through a privileged `ExecStartPre`. That step names the
 superuser with `-U` and runs with an empty environment, so a project `PGUSER` or
-`PGHOST` cannot retarget it. The read-only check and restore units never run it.
+`PGHOST` cannot retarget it; it connects through the cluster
+`services.postgresql` configures (`settings.unix_socket_directories`, default
+`/run/postgresql`, and `settings.port`). The read-only check and restore units
+never run it.
 
 `services.harbor-db.projects.<name>.rehearsal` generates an on-demand
 `harbor-db-<name>-rehearse.service`: a oneshot with no timer and no `wantedBy`.

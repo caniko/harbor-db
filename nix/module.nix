@@ -366,8 +366,10 @@
         description = ''
           Extensions only a superuser may create (for example postgis). The apply unit runs
           `CREATE EXTENSION IF NOT EXISTS` for each as the PostgreSQL superuser, in database
-          `postgres.database`, before the non-superuser owner's migration command. Rehearsals
-          create the same extensions before restoring the production copy.
+          `postgres.database`, before the non-superuser owner's migration command. It connects
+          to the cluster `services.postgresql` configures: `settings.unix_socket_directories`
+          (default `/run/postgresql`) and `settings.port`, never the project environment.
+          Rehearsals create the same extensions before restoring the production copy.
         '';
       };
     };
@@ -828,9 +830,17 @@
   # belongs to the apply unit only, so readiness checks stay read-only. The
   # project environment reaches the whole unit, and runuser keeps it, so psql
   # gets a cleared environment: PGUSER or PGHOST would otherwise retarget or
-  # fail the superuser connection. `-U` names the superuser explicitly.
+  # fail the superuser connection. `-U` names the superuser explicitly, and
+  # `-h`/`-p` name the cluster `services.postgresql` configures (the local
+  # cluster that owns that superuser), because the cleared environment no
+  # longer carries a project PGPORT or PGHOST. nixpkgs builds PostgreSQL with
+  # /run/postgresql as its default socket directory.
   superuserExtensionsPreStart = project: let
     superuser = config.services.postgresql.superUser or "postgres";
+    settings = config.services.postgresql.settings or {};
+    # The server setting is a comma-separated list; psql takes one directory.
+    socketDirectory = lib.trim (lib.head (lib.splitString "," (toString (settings.unix_socket_directories or "/run/postgresql"))));
+    port = toString (settings.port or 5432);
   in
     lib.optional (project.postgres.superuserExtensions != []) ("+"
       + lib.escapeShellArgs ([
@@ -844,6 +854,10 @@
           "-X"
           "-U"
           superuser
+          "-h"
+          socketDirectory
+          "-p"
+          port
           "-v"
           "ON_ERROR_STOP=1"
           "-d"
