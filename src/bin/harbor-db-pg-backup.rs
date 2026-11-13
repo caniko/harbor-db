@@ -116,7 +116,15 @@ impl HealthArgs {
 }
 
 fn run() -> Result<ExitCode> {
-    match Cli::parse().command {
+    // A usage error must fail an ExecCondition (255), not skip it (clap exits 2).
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let _ = error.print();
+            return Ok(ExitCode::from(if error.use_stderr() { 255 } else { 0 }));
+        }
+    };
+    match cli.command {
         Action::MarkGap {
             root,
             segment_bytes,

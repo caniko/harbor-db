@@ -882,7 +882,12 @@ pub fn health(h: &Health) -> Vec<String> {
 /// (gap, missing or stale WAL, broken chain, unreadable LAST_SUCCESS) or an old base.
 pub fn redundant(h: &Health, within: u64) -> Option<String> {
     let failures = health(h);
-    redundancy(&failures, age(&h.root.join("LAST_SUCCESS")).ok(), within)
+    redundancy(&failures, elapsed(&h.root.join("LAST_SUCCESS")), within)
+}
+/// Unlike `age`, a future mtime (clock stepped back) is unknown, never fresh.
+fn elapsed(path: &Path) -> Option<u64> {
+    let modified = fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    Some(SystemTime::now().duration_since(modified).ok()?.as_secs())
 }
 fn redundancy(failures: &[String], base_age: Option<u64>, within: u64) -> Option<String> {
     let age = base_age.filter(|a| failures.is_empty() && *a < within)?;
@@ -1004,6 +1009,13 @@ mod tests {
         assert!(redundancy(&[], Some(3600), 3600).is_none(), "due");
         assert!(redundancy(&[], None, 3600).is_none(), "no LAST_SUCCESS");
         assert!(redundancy(&["WAL gap".into()], Some(60), 3600).is_none());
+        let marker = std::env::temp_dir().join(format!("pgb-future-{}", std::process::id()));
+        let file = fs::File::create(&marker).unwrap();
+        assert!(elapsed(&marker).is_some());
+        file.set_modified(SystemTime::now() + Duration::from_secs(86400))
+            .unwrap();
+        assert_eq!(elapsed(&marker), None, "a future LAST_SUCCESS is not fresh");
+        fs::remove_file(&marker).unwrap();
     }
     #[test]
     fn present_slot_parses_restart_lsn() {
