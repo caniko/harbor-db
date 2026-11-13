@@ -878,6 +878,18 @@ pub fn health(h: &Health) -> Vec<String> {
     }
     failures
 }
+/// Why a new base would add nothing, or None when it is needed: any health failure
+/// (gap, missing or stale WAL, broken chain, unreadable LAST_SUCCESS) or an old base.
+pub fn redundant(h: &Health, within: u64) -> Option<String> {
+    let failures = health(h);
+    redundancy(&failures, age(&h.root.join("LAST_SUCCESS")).ok(), within)
+}
+fn redundancy(failures: &[String], base_age: Option<u64>, within: u64) -> Option<String> {
+    let age = base_age.filter(|a| failures.is_empty() && *a < within)?;
+    Some(format!(
+        "the WAL chain is healthy and LAST_SUCCESS is {age}s old (refresh after {within}s)"
+    ))
+}
 /// `(timeline, first segment, stop LSN, tree)` of the oldest retained published base.
 fn oldest_base_range(root: &Path, size: u64) -> Result<(u32, u64, u64, PathBuf)> {
     let mut trees: Vec<_> = fs::read_dir(root.join("base"))?
@@ -985,6 +997,13 @@ mod tests {
             Admission::Admitted(_)
         ));
         assert!(admit("MemAvailable: 1 kB\n", 0, 0).is_err());
+    }
+    #[test]
+    fn only_a_healthy_chain_with_a_recent_base_is_redundant() {
+        assert!(redundancy(&[], Some(60), 3600).is_some());
+        assert!(redundancy(&[], Some(3600), 3600).is_none(), "due");
+        assert!(redundancy(&[], None, 3600).is_none(), "no LAST_SUCCESS");
+        assert!(redundancy(&["WAL gap".into()], Some(60), 3600).is_none());
     }
     #[test]
     fn present_slot_parses_restart_lsn() {

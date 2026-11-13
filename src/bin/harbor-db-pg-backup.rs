@@ -1,10 +1,10 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use harbor_db::storage::{Result, pg_backup};
 use std::{path::PathBuf, process::ExitCode, time::Duration};
 
 #[derive(Parser)]
 #[command(
-    about = "Recovery-ready PostgreSQL backup helpers: gap marker, recovery metadata, health, admission"
+    about = "Recovery-ready PostgreSQL backup helpers: gap marker, recovery metadata, health, redundancy, admission"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -55,28 +55,14 @@ enum Action {
         wal_wait_seconds: u64,
     },
     /// Fail when the backup chain cannot support recovery.
-    BackupHealth {
+    BackupHealth(HealthArgs),
+    /// systemd ExecCondition: exit 1 (skip) when the chain is healthy and LAST_SUCCESS is
+    /// younger than --within-seconds. HARBOR_DB_FORCE_BASE_BACKUP=1 always admits.
+    Redundant {
+        #[command(flatten)]
+        health: HealthArgs,
         #[arg(long)]
-        root: PathBuf,
-        #[arg(long)]
-        segment_bytes: u64,
-        #[arg(long)]
-        slot: String,
-        #[arg(long)]
-        psql: PathBuf,
-        #[arg(long)]
-        conninfo: String,
-        #[arg(long)]
-        systemctl: Option<PathBuf>,
-        #[arg(long)]
-        receiver_unit: Option<String>,
-        #[arg(long, default_value_t = 7200)]
-        max_wal_age_seconds: u64,
-        #[arg(long)]
-        max_base_age_seconds: Option<u64>,
-        /// The target publishes recovery metadata: LAST_SUCCESS must name a finalized base.
-        #[arg(long)]
-        recovery_meta: bool,
+        within_seconds: u64,
     },
     /// systemd ExecCondition: exit 1 (skip) when memory is short, 255 (fail) when unreadable.
     Admit {
@@ -87,6 +73,46 @@ enum Action {
         #[arg(long, default_value = "/proc/meminfo")]
         meminfo: PathBuf,
     },
+}
+
+#[derive(Args)]
+struct HealthArgs {
+    #[arg(long)]
+    root: PathBuf,
+    #[arg(long)]
+    segment_bytes: u64,
+    #[arg(long)]
+    slot: String,
+    #[arg(long)]
+    psql: PathBuf,
+    #[arg(long)]
+    conninfo: String,
+    #[arg(long)]
+    systemctl: Option<PathBuf>,
+    #[arg(long)]
+    receiver_unit: Option<String>,
+    #[arg(long, default_value_t = 7200)]
+    max_wal_age_seconds: u64,
+    #[arg(long)]
+    max_base_age_seconds: Option<u64>,
+    /// The target publishes recovery metadata: LAST_SUCCESS must name a finalized base.
+    #[arg(long)]
+    recovery_meta: bool,
+}
+impl HealthArgs {
+    fn health(&self) -> pg_backup::Health<'_> {
+        pg_backup::Health {
+            root: &self.root,
+            segment_bytes: self.segment_bytes,
+            slot: &self.slot,
+            psql: &self.psql,
+            conninfo: &self.conninfo,
+            systemctl: self.systemctl.as_deref().zip(self.receiver_unit.as_deref()),
+            max_wal_age: self.max_wal_age_seconds,
+            max_base_age: self.max_base_age_seconds,
+            recovery_meta: self.recovery_meta,
+        }
+    }
 }
 
 fn run() -> Result<ExitCode> {
@@ -130,33 +156,25 @@ fn run() -> Result<ExitCode> {
                 wal_wait: Duration::from_secs(wal_wait_seconds),
             })?;
         }
-        Action::BackupHealth {
-            root,
-            segment_bytes,
-            slot,
-            psql,
-            conninfo,
-            systemctl,
-            receiver_unit,
-            max_wal_age_seconds,
-            max_base_age_seconds,
-            recovery_meta,
-        } => {
-            let failures = pg_backup::health(&pg_backup::Health {
-                root: &root,
-                segment_bytes,
-                slot: &slot,
-                psql: &psql,
-                conninfo: &conninfo,
-                systemctl: systemctl.as_deref().zip(receiver_unit.as_deref()),
-                max_wal_age: max_wal_age_seconds,
-                max_base_age: max_base_age_seconds,
-                recovery_meta,
-            });
+        Action::BackupHealth(args) => {
+            let failures = pg_backup::health(&args.health());
             for failure in &failures {
                 eprintln!("harbor-db-pg-backup: unhealthy: {failure}");
             }
             if !failures.is_empty() {
+                return Ok(ExitCode::from(1));
+            }
+        }
+        Action::Redundant {
+            health,
+            within_seconds,
+        } => {
+            if std::env::var_os("HARBOR_DB_FORCE_BASE_BACKUP").is_some_and(|v| !v.is_empty()) {
+                eprintln!(
+                    "harbor-db-pg-backup: HARBOR_DB_FORCE_BASE_BACKUP set; base backup forced"
+                );
+            } else if let Some(reason) = pg_backup::redundant(&health.health(), within_seconds) {
+                eprintln!("harbor-db-pg-backup: base backup skipped as redundant: {reason}");
                 return Ok(ExitCode::from(1));
             }
         }

@@ -112,6 +112,7 @@
             health.enable = true;
             baseBackup = {
               recoveryMeta = true;
+              redundantWithinSeconds = 518400;
               admission = {
                 minRamBytes = 1073741824;
                 minSwapBytes = 536870912;
@@ -658,6 +659,8 @@ in
           && !(lib.hasInfix "harbor-db-pg-backup" localBackup)
           && !(lib.hasInfix "harbor-db-pg-backup" base)
           && lib.any (c: lib.hasInfix "admit --min-ram-bytes 1073741824 --min-swap-bytes 536870912" c) (lib.toList units.pg-basebackup.serviceConfig.ExecCondition)
+          # Redundancy judges the chain with the health unit's exact argv.
+          && lib.any (c: lib.hasInfix (builtins.unsafeDiscardStringContext "harbor-db-pg-backup redundant ${lib.last (lib.splitString "harbor-db-pg-backup backup-health " units.pg-backup-health.serviceConfig.ExecStart)} --within-seconds 518400") c) (lib.toList units.pg-basebackup.serviceConfig.ExecCondition)
           && lib.any (c: lib.hasInfix "mark-gap" c) (lib.toList units.pg-receivewal.serviceConfig.ExecStartPre)
           && units ? pg-backup-health
           && recoveryReady.systemd.timers ? pg-backup-health

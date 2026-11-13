@@ -147,6 +147,20 @@
           role=source/both; required for role=target.
         '';
       };
+      redundantWithinSeconds = mkOption {
+        type = types.nullOr types.ints.positive;
+        default = null;
+        example = 6 * 24 * 60 * 60;
+        description = ''
+          Skip a base backup (with a log line, not a failure) while the backup
+          chain passes the health check and `LAST_SUCCESS` is younger than this:
+          continuous WAL already recovers to any point, so the new base adds
+          nothing. Any health failure admits the backup. Set
+          `HARBOR_DB_FORCE_BASE_BACKUP=1` in the unit's environment to force one
+          (callers that need a fresh base, such as recovery preparation, must).
+          Requires `health.enable`; null disables the check.
+        '';
+      };
       admission = {
         minRamBytes = mkOption {
           type = types.nullOr types.ints.unsigned;
@@ -223,6 +237,19 @@
       lib.optional (baseCfg.admission.minRamBytes != null) "--min-ram-bytes ${toString baseCfg.admission.minRamBytes}"
       ++ lib.optional (baseCfg.admission.minSwapBytes != null) "--min-swap-bytes ${toString baseCfg.admission.minSwapBytes}"
     );
+    # The health unit and the redundancy condition judge the same chain.
+    healthArgs =
+      [
+        "--root ${backupRoot}"
+        "--segment-bytes ${toString ts.walSegmentBytes}"
+        "--slot ${ts.receiveWal.slotName}"
+        "--psql ${psqlWrapped}"
+        "--conninfo \"${replicationConninfo}\""
+        "--systemctl ${config.systemd.package}/bin/systemctl --receiver-unit pg-receivewal${suffix}.service"
+        "--max-wal-age-seconds ${toString healthCfg.maxWalAgeSeconds}"
+      ]
+      ++ lib.optional (healthCfg.maxBaseAgeSeconds != null) "--max-base-age-seconds ${toString healthCfg.maxBaseAgeSeconds}"
+      ++ lib.optional baseCfg.recoveryMeta "--recovery-meta";
     passwordFile =
       if ts.replicatorPasswordFile != null
       then ts.replicatorPasswordFile
@@ -351,7 +378,10 @@
         Type = "oneshot";
         User = "postgres";
         ExecStartPre = lib.optional localRecovery "${sourceLocalTablespaceCheck}";
-        ExecCondition = lib.optional (admissionArgs != "") "${pgBackupTool} admit ${admissionArgs}";
+        ExecCondition =
+          lib.optional (admissionArgs != "") "${pgBackupTool} admit ${admissionArgs}"
+          ++ lib.optional (baseCfg.redundantWithinSeconds != null)
+          (lib.concatStringsSep " " (["${pgBackupTool} redundant"] ++ healthArgs ++ ["--within-seconds ${toString baseCfg.redundantWithinSeconds}"]));
         ProtectSystem = "strict";
         ReadWritePaths = [backupRoot];
         UMask = "0077";
@@ -430,17 +460,7 @@
         ProtectSystem = "strict";
         ReadOnlyPaths = [backupRoot];
         UMask = "0077";
-        ExecStart = lib.concatStringsSep " " ([
-            "${pgBackupTool} backup-health --root ${backupRoot}"
-            "--segment-bytes ${toString ts.walSegmentBytes}"
-            "--slot ${ts.receiveWal.slotName}"
-            "--psql ${psqlWrapped}"
-            "--conninfo \"${replicationConninfo}\""
-            "--systemctl ${config.systemd.package}/bin/systemctl --receiver-unit pg-receivewal${suffix}.service"
-            "--max-wal-age-seconds ${toString healthCfg.maxWalAgeSeconds}"
-          ]
-          ++ lib.optional (healthCfg.maxBaseAgeSeconds != null) "--max-base-age-seconds ${toString healthCfg.maxBaseAgeSeconds}"
-          ++ lib.optional baseCfg.recoveryMeta "--recovery-meta");
+        ExecStart = lib.concatStringsSep " " (["${pgBackupTool} backup-health"] ++ healthArgs);
       };
     };
 
@@ -630,6 +650,10 @@ in {
         {
           assertion = !base.recoveryMeta || (base.enable && sqlOk);
           message = "services.harbor-db.pgBackup baseBackup.recoveryMeta requires baseBackup.enable and a source SQL connection (sqlConninfo, or a loopback legacy target on role=source/both).${tag}";
+        }
+        {
+          assertion = base.redundantWithinSeconds == null || ts.health.enable;
+          message = "services.harbor-db.pgBackup baseBackup.redundantWithinSeconds requires health.enable (it reuses the health check).${tag}";
         }
         {
           assertion = !ts.health.enable || (ts.receiveWal.enable && base.enable);
