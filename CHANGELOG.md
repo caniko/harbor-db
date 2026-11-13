@@ -13,6 +13,12 @@
   base; `targetSettings.health` (`harbor-db-pg-backup backup-health` timer);
   `baseBackup.admission.{minRamBytes,minSwapBytes}`. Retention now ignores
   `<id>.meta.json` sidecars and removes them with their tree.
+- `pgBackup` `baseBackup.redundantWithinSeconds`: an `ExecCondition`
+  (`harbor-db-pg-backup redundant`) skips a base backup while the chain passes
+  the health check and `LAST_SUCCESS` is younger than the bound, since continuous
+  WAL already covers it. Any health failure admits the backup;
+  `HARBOR_DB_FORCE_BASE_BACKUP=1` forces one. Off by default; requires
+  `health.enable`.
 - `pgBackup.targets.<name>`: additional named backup targets (units suffixed
   `-<name>`, root `backupDir/<name>`) with the same per-target options, plus
   `receiveWal.statusInterval` and best-effort bounded
