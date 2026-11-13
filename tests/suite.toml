@@ -5280,6 +5280,12 @@ operation = "nixos.lifecycle-plan"
 dimension = "positive"
 evidence = "The same exported module VM script checks generated lifecycle units and application ordering/state on aarch64."
 [[coverage]]
+case = "vm.x86_64-linux.module-smoke"
+capability = "nixos"
+operation = "nixos.rehearsal"
+dimension = "positive"
+evidence = "nix/test-module.nix starts a generated harbor-db-<name>-rehearse unit against a live database with the documented defaults (project user is the unit account and the restored owner) and requires a passed receipt in the unit's own state directory; a second project with a distinct rehearsal.user keeps its passed receipt under that user while the project state directory keeps its original owner. A project whose environment sets PGUSER still runs the privileged superuser extension pre-start and creates the extension."
+[[coverage]]
 case = "vm.x86_64-linux.postgres-crash-rollback"
 capability = "nixos"
 operation = "nixos.postgres-lifecycle"
@@ -7354,8 +7360,16 @@ selectors = [
   "acl_sql_yields_every_grantee_and_default_privilege_owner",
   "work_directory_overlap_is_refused_in_both_directions",
   "plan_rejects_unknown_fields_and_wrong_or_missing_schema",
+  "plan_rejects_an_owner_that_is_the_bootstrap_superuser",
   "steps_cannot_retarget_the_connection",
 ]
+
+[[coverage]]
+case = "native.rehearsal-unit.storage::rehearsal::tests::plan_rejects_an_owner_that_is_the_bootstrap_superuser"
+capability = "postgres-rehearsal"
+operation = "harbor-db-rehearse.run"
+dimension = "rejection"
+evidence = "A plan whose explicit bootstrap superuser equals the restored owner is rejected at parse time: initdb's own superuser account cannot own the restored database, so the cluster needs a distinct role."
 
 [[coverage]]
 case = "native.rehearsal-unit.storage::rehearsal::tests::plan_rejects_unknown_fields_and_wrong_or_missing_schema"
@@ -7411,7 +7425,15 @@ selectors = [
   "probes_are_read_only_and_a_failing_probe_fails_the_rehearsal",
   "untrusted_superuser_extension_is_created_before_the_owner_migrates",
   "unsafe_work_directory_and_bad_plans_are_refused_before_any_mutation",
+  "owner_that_is_the_unit_account_rehearses_with_a_distinct_bootstrap_superuser",
 ]
+
+[[coverage]]
+case = "native.rehearsal.owner_that_is_the_unit_account_rehearses_with_a_distinct_bootstrap_superuser"
+capability = "postgres-rehearsal"
+operation = "harbor-db-rehearse.run"
+dimension = "positive"
+evidence = "With the module's documented defaults, where the unit's OS account is also the restored owner, a plan without a bootstrap superuser is refused by the owner-equals-superuser guard and publishes a failed receipt; a plan naming a distinct bootstrap superuser then restores a real dump, keeps every table owned by that account role, leaves the role non-superuser and the bootstrap role superuser, and removes the run directory."
 
 [[coverage]]
 case = "native.rehearsal.dump_rehearsal_runs_steps_as_the_owner_and_leaves_nothing_behind"
@@ -7467,11 +7489,11 @@ case = "nix.x86_64-linux.module-eval"
 capability = "nixos"
 operation = "nixos.rehearsal"
 dimension = "positive"
-evidence = "nix/module-eval.nix evaluates a project with postgres.superuserExtensions, a maintenance operation and rehearsal.enable. The rehearse unit is a oneshot without timer or wantedBy; its plan has the documented schema, runner migrate/check steps plus the maintenance operation and its check, the live source, owner, extensions and receipt directory under stateDirectory; the apply unit alone carries the superuser CREATE EXTENSION ExecStartPre."
+evidence = "nix/module-eval.nix evaluates a project with postgres.superuserExtensions, a maintenance operation and rehearsal.enable. The rehearse unit is a oneshot without timer or wantedBy; its plan has the documented schema, runner migrate/check steps plus the maintenance operation and its check, the live source, owner, a distinct bootstrap superuser, extensions and receipts under the unit's own state directory; the apply unit alone carries the superuser CREATE EXTENSION ExecStartPre, with an explicit -U and a cleared environment, targeting the configured socket directory and port (a nondefault settings.port/unix_socket_directories evaluation is asserted)."
 
 [[coverage]]
 case = "nix.x86_64-linux.module-eval"
 capability = "nixos"
 operation = "nixos.rehearsal"
 dimension = "rejection"
-evidence = "Evaluation rejects rehearsal without stateDirectory, superuserExtensions without a database, and a rehearsed runner that uses credentials; DATABASE_URL and PG* project environment never reach rehearsal steps."
+evidence = "Evaluation rejects superuserExtensions without a database, a rehearsed runner that uses credentials, a bootstrap superuser equal to the owner and a rehearsal state directory equal to the project's, and refuses superuserExtensions when the project's provisioning target, environment PGHOST/PGPORT or databaseUrl host/port names a cluster other than the local one the pre-start targets. The URL guard fails closed: repeated host/port query keywords, authority/query conflicts, comma-separated hosts, query keys outside a small non-targeting allowlist (hostaddr, service, ...), percent-encoded query keys, keyword/value connection strings that are not postgres:// URIs, and PGSERVICE/PGSERVICEFILE/PGHOSTADDR/PGSYSCONFDIR in the environment are refused; a local postgres:// or postgresql:// URI with dbname is accepted. DATABASE_URL and PG* project environment never reach rehearsal steps."

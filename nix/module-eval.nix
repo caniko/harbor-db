@@ -67,11 +67,13 @@
             enable = true;
             user = "rehearsed";
             stateDirectory = "harbor-db-rehearsed";
-            # The rehearsal engine owns the connection: these must not reach steps.
+            # The rehearsal engine owns the connection: these must not reach steps,
+            # and PGUSER must not reach the privileged superuser pre-start either.
             environment = {
               RUST_LOG = "info";
               DATABASE_URL = "postgres:///live";
               PGHOST = "/run/postgresql";
+              PGUSER = "rehearsed_owner";
             };
             runner = {
               package = runner;
@@ -222,12 +224,14 @@ in
           rehearse_plan["schema"] == "harbor-db.rehearsal-plan.v1"
           and rehearse_plan["source"] == {"live": {"host": "/run/postgresql", "database": "rehearsed_db"}}
           and (rehearse_plan["owner"], rehearse_plan["database"]) == ("rehearsed_owner", "rehearsed_db")
+          and rehearse_plan["superuser"] == "harbor_rehearsal_admin"
+          and rehearse_plan["superuser"] != rehearse_plan["owner"]
           and rehearse_plan["superuser_extensions"] == ["postgis"]
           and rehearse_plan["probes"] == [{"name": "rows", "sql": "select 1"}]
           and rehearse_plan["work_directory"] == "/var/tmp/harbor-rehearsal"
           and rehearse_plan["package"].startswith("/nix/store/")
           and (rehearse_plan["jobs"], rehearse_plan["timeout_seconds"], rehearse_plan["keep"]) == (4, 14400, False),
-          "the plan must carry the live source, owner, extensions, probes, limits and package",
+          "the plan must carry the live source, owner, a distinct bootstrap superuser, extensions, probes, limits and package",
       )
       check(
           "rehearsal-steps-are-the-runner-and-maintenance-operations",
@@ -243,9 +247,9 @@ in
           "project environment reaches steps except DATABASE_URL and PG* variables",
       )
       check(
-          "rehearsal-receipts-live-under-the-state-directory",
-          values(rehearse, "--receipt-dir") == ["/var/lib/harbor-db-rehearsed/rehearsals"],
-          "receipts must be written below <stateDirectory>/rehearsals",
+          "rehearsal-receipts-live-under-its-own-state-directory",
+          values(rehearse, "--receipt-dir") == ["/var/lib/harbor-db-rehearsed-rehearse"],
+          "receipts must be written to the rehearsal unit's own state directory, not the project's",
       )
       evidence = Path(evidence_path)
       evidence.write_text(json.dumps(json.loads(evidence.read_text()) + passed) + "\n")
@@ -378,8 +382,49 @@ in
           && (rehearseService.requiredBy or []) == []
           && !(eval.config.systemd.timers ? "harbor-db-rehearsed-rehearse")
           && rehearseService.serviceConfig.User == "rehearsed"
-          && rehearseService.serviceConfig.StateDirectory == "harbor-db-rehearsed";
-        message = "the rehearsal unit must be a oneshot with no timer or wantedBy, run as the configured user with a state directory";
+          && rehearseService.serviceConfig.StateDirectory
+          == "harbor-db-rehearsed-rehearse"
+          && rehearseService.serviceConfig.StateDirectory
+          != eval.config.services.harbor-db.projects.rehearsed.stateDirectory;
+        message = "the rehearsal unit must be a oneshot with no timer or wantedBy, run as the configured user, with a state directory of its own";
+      }
+      {
+        name = "rehearsal-state-directory-is-never-the-project-state-directory";
+        assertion = rejected (evaluate {
+          services.harbor-db.projects.shared = {
+            enable = true;
+            user = "rehearsed";
+            stateDirectory = "harbor-db-shared-rehearse";
+            runner.executable = "${runner}/bin/module-eval-runner";
+            postgres.enable = true;
+            postgres.database = "shared_db";
+            rehearsal = {
+              enable = true;
+              owner = "shared_owner";
+              workDirectory = "/var/tmp/harbor-rehearsal";
+            };
+          };
+        }) "must not share the project state directory";
+        message = "the rehearsal unit must never reuse the project's state directory, whatever it is named";
+      }
+      {
+        name = "rehearsal-superuser-differs-from-the-owner";
+        assertion = rejected (evaluate {
+          services.harbor-db.projects.shared = {
+            enable = true;
+            user = "rehearsed";
+            runner.executable = "${runner}/bin/module-eval-runner";
+            postgres.enable = true;
+            postgres.database = "shared_db";
+            rehearsal = {
+              enable = true;
+              owner = "shared_owner";
+              workDirectory = "/var/tmp/harbor-rehearsal";
+              superuser = "shared_owner";
+            };
+          };
+        }) "must differ from the owner";
+        message = "the disposable cluster needs a bootstrap superuser distinct from the restored owner";
       }
       {
         name = "superuser-extensions-run-before-the-owner-migration-only";
@@ -390,17 +435,137 @@ in
           == 1
           && lib.hasPrefix "+" (lib.head pre)
           && lib.hasInfix "runuser" (lib.head pre)
+          && lib.hasInfix "/bin/env -i " (lib.head pre)
+          && lib.hasInfix "-U postgres" (lib.head pre)
+          && lib.hasInfix "-h /run/postgresql" (lib.head pre)
+          && lib.hasInfix "-p 5432" (lib.head pre)
+          && !(lib.hasInfix "rehearsed_owner" (lib.head pre))
           && lib.hasInfix "CREATE EXTENSION IF NOT EXISTS" (lib.head pre)
           && lib.hasInfix "postgis" (lib.head pre)
           && lib.hasInfix "rehearsed_db" (lib.head pre)
           && !(rehearsedCheck.serviceConfig ? ExecStartPre);
-        message = "superuserExtensions must pre-create extensions as the superuser in the apply unit and never in the read-only check unit";
+        message = "superuserExtensions must pre-create extensions as the explicit superuser in the configured cluster, with a cleared environment, in the apply unit and never in the read-only check unit";
+      }
+      {
+        name = "superuser-pre-start-clears-the-project-connection";
+        assertion = let
+          pre = lib.head (lib.toList (rehearsedApply.serviceConfig.ExecStartPre or []));
+        in
+          rehearsedApply.environment.PGUSER
+          == "rehearsed_owner"
+          && rehearsedApply.environment.PGHOST == "/run/postgresql"
+          && lib.hasInfix "/bin/env -i " pre
+          && lib.hasInfix "-U postgres" pre;
+        message = "a project PGUSER/PGHOST must not survive into the privileged pre-start: it clears PG* and names the superuser with -U";
+      }
+      {
+        name = "superuser-pre-start-targets-the-configured-cluster";
+        assertion = let
+          evaluation = evaluate {
+            services.postgresql.settings = {
+              port = 5433;
+              unix_socket_directories = "/run/postgresql-eval, /run/postgresql-spare";
+            };
+          };
+          pre = lib.head (lib.toList (evaluation.config.systemd.services.harbor-db-rehearsed.serviceConfig.ExecStartPre or []));
+        in
+          lib.hasInfix "-h /run/postgresql-eval" pre
+          && lib.hasInfix "-p 5433" pre
+          && !(lib.hasInfix "5432" pre);
+        message = "the privileged pre-start must use the configured socket directory and port, not the cleared environment or libpq defaults";
+      }
+      {
+        name = "superuser-extensions-require-the-local-cluster";
+        assertion = let
+          mismatched = [
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.environment.PGPORT = "5433";};
+              fragment = "environment port 5433";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.environment.PGHOST = lib.mkForce "/run/postgresql-other";};
+              fragment = "environment host /run/postgresql-other";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=/run/postgresql&port=5433";};
+              fragment = "postgres.databaseUrl port 5433";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres://db.example/rehearsed_db";};
+              fragment = "postgres.databaseUrl host db.example";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?port=5432&port=5433";};
+              fragment = "postgres.databaseUrl repeats port in its query";
+            }
+            {
+              # libpq reads the query after the first `?`, so the port must be found.
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?port=5433&application_name=x?y";};
+              fragment = "postgres.databaseUrl port 5433";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres://db.example:5433/rehearsed_db?port=5432";};
+              fragment = "postgres.databaseUrl names port in both its authority and its query";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres://db.example/rehearsed_db?host=/run/postgresql";};
+              fragment = "postgres.databaseUrl names host in both its authority and its query";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?hostaddr=192.0.2.1";};
+              fragment = "postgres.databaseUrl query key hostaddr";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?service=production";};
+              fragment = "postgres.databaseUrl query key service";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.environment.PGSERVICE = "production";};
+              fragment = "environment PGSERVICE";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres://:5432,remote:5432/rehearsed_db";};
+              fragment = "postgres.databaseUrl names multiple hosts or ports";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?p%6Frt=5433";};
+              fragment = "postgres.databaseUrl query key p%6Frt is percent-encoded";
+            }
+            {
+              evaluation = evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "host=/run/postgresql port=5433 dbname=rehearsed_db";};
+              fragment = "postgres.databaseUrl is not a postgres:// or postgresql:// URI";
+            }
+            {
+              evaluation = evaluate {
+                services.harbor-db.projects.rehearsed.postgres.provision = {
+                  enable = true;
+                  database = "provisioned_db";
+                  ownerRole = "provisioned_owner";
+                  runtimeRole = "provisioned_runtime";
+                  runtimeOsUser = "provisioned_runtime";
+                  port = 5433;
+                };
+              };
+              fragment = "postgres.provision port 5433";
+            }
+          ];
+          matching = [
+            (evaluate {services.harbor-db.projects.rehearsed.environment.PGPORT = "5432";})
+            (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=/run/postgresql";})
+            (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=%2Frun%2Fpostgresql";})
+            (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres:///rehearsed_db?host=/run/postgresql&application_name=x";})
+            (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgres://?host=/run/postgresql&dbname=rehearsed_db";})
+            (evaluate {services.harbor-db.projects.rehearsed.postgres.databaseUrl = "postgresql:///rehearsed_db?host=/run/postgresql";})
+          ];
+        in
+          lib.all (case: rejected case.evaluation "extensions are created in the local cluster" && rejected case.evaluation case.fragment) mismatched
+          && lib.all (evaluation: !(rejected evaluation "extensions are created in the local cluster")) matching;
+        message = "superuserExtensions must be refused, naming the offending target, when the project's provisioning target, migration environment or grant URL names a different cluster; the local socket directory and port stay admissible";
       }
       {
         name = "rehearsal-input-rejection";
         assertion =
-          rejected (evaluate {services.harbor-db.projects.rehearsed.stateDirectory = lib.mkForce null;}) "stateDirectory is required"
-          && rejected (evaluate {
+          rejected (evaluate {
             services.harbor-db.projects.bare = {
               enable = true;
               runner.executable = "${runner}/bin/module-eval-runner";
@@ -413,7 +578,7 @@ in
               runner.credentialArgs = ["token"];
             };
           }) "cannot use credentials";
-        message = "rehearsal must reject a missing state directory, extensions without a database and credentialed runners";
+        message = "rehearsal must reject extensions without a database and credentialed runners";
       }
       {
         name = "restore-unit-is-manual";

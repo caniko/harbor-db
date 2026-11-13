@@ -366,8 +366,21 @@
         description = ''
           Extensions only a superuser may create (for example postgis). The apply unit runs
           `CREATE EXTENSION IF NOT EXISTS` for each as the PostgreSQL superuser, in database
-          `postgres.database`, before the non-superuser owner's migration command. Rehearsals
-          create the same extensions before restoring the production copy.
+          `postgres.database`, before the non-superuser owner's migration command. It connects
+          to the cluster `services.postgresql` configures: `settings.unix_socket_directories`
+          (default `/run/postgresql`) and `settings.port`, never the project environment.
+          Because the extension is created there, evaluation requires the project's own targets
+          to be that cluster too: `postgres.provision.socketDirectory`/`port`,
+          `environment.PGHOST`/`PGPORT` and the host/port named by `postgres.databaseUrl` must
+          match it. A URL that names host or port more than once (a repeated query keyword, or
+          both the authority and the query) is refused as ambiguous, as are query keys that
+          could select another cluster (`hostaddr`, `service`, ...), percent-encoded query keys
+          and multiple hosts. Only `postgres://`/`postgresql://` URIs can be verified; a
+          keyword/value connection string is refused. Only a small set of non-targeting query
+          keys is accepted, and `PGSERVICE`, `PGSERVICEFILE`, `PGHOSTADDR` and `PGSYSCONFDIR`
+          are refused in the project environment. Point the targets at the local cluster or set
+          `superuserExtensions = []` and create the extension yourself. Rehearsals create the
+          same extensions before restoring the production copy.
         '';
       };
     };
@@ -401,6 +414,17 @@
         type = types.nullOr types.str;
         default = null;
         description = "Non-superuser owner role created in the copy. Defaults to postgres.provision.ownerRole, then the project user.";
+      };
+
+      superuser = mkOption {
+        type = types.str;
+        default = "harbor_rehearsal_admin";
+        description = ''
+          Bootstrap superuser role `initdb` creates in the disposable cluster. It must
+          differ from `owner`: a database cannot be restored for an owner that is the
+          cluster's own superuser. It never exists in the source, so pick a name no
+          production role uses.
+        '';
       };
 
       user = mkOption {
@@ -579,7 +603,8 @@
           On-demand `harbor-db-<name>-rehearse.service`: restore a copy of the live database
           into a disposable private cluster and run the runner's migrate/check steps and the
           `maintenance` operations as the non-superuser owner. Receipts land in
-          `<stateDirectory>/rehearsals/`. The unit has no timer and is never wanted by a target.
+          `/var/lib/harbor-db-<name>-rehearse/`, the unit's own state directory. The unit has
+          no timer and is never wanted by a target.
         '';
       };
     };
@@ -811,18 +836,136 @@
     then project.postgres.provision.database
     else null;
 
+  # `superuserExtensions` are created by the local cluster's superuser, so the
+  # pre-start targets the cluster `services.postgresql` configures. nixpkgs
+  # builds PostgreSQL with /run/postgresql as its default socket directory.
+  localPostgresSuperuser = config.services.postgresql.superUser or "postgres";
+  localPostgresSettings = config.services.postgresql.settings or {};
+  # The server setting is a comma-separated list; psql takes one directory.
+  localPostgresSocketDirectory = lib.trim (lib.head (lib.splitString "," (toString (localPostgresSettings.unix_socket_directories or "/run/postgresql"))));
+  localPostgresPort = toString (localPostgresSettings.port or 5432);
+
+  # Query keys the local-cluster guard can leave to libpq: they do not select a
+  # cluster. host/port are verified separately; any other key (hostaddr,
+  # service, target_session_attrs, passfile, ...) is refused rather than
+  # emulated, so the guard fails closed.
+  permittedUrlKeys = ["application_name" "connect_timeout" "dbname" "options" "sslmode" "user"];
+
+  # The host and port a `postgres.databaseUrl` names. Only `postgres://` and
+  # `postgresql://` URIs are verifiable: a keyword/value conninfo string yields
+  # no targets and is refused. libpq parses the query
+  # after the FIRST `?` and keeps the LAST repeated keyword, so a repeated
+  # keyword, or one named in both the authority and the query, is ambiguous:
+  # refuse it instead of emulating precedence.
+  databaseUrlTarget = url: let
+    queryString = lib.concatStringsSep "?" (lib.tail (lib.splitString "?" url));
+    pairs = lib.filter (pair: pair != "") (lib.splitString "&" queryString);
+    keys = lib.unique (map (pair: lib.head (lib.splitString "=" pair)) pairs);
+    parameters = parameter: lib.filter (pair: lib.hasPrefix "${parameter}=" pair) pairs;
+    parameterValues = parameter: map (pair: lib.removePrefix "${parameter}=" pair) (parameters parameter);
+    withoutScheme = lib.removePrefix "postgresql://" (lib.removePrefix "postgres://" url);
+    hasScheme = withoutScheme != url;
+    # The authority ends at the first `/` or `?` (`postgres://?host=...` has none).
+    authority = lib.head (lib.splitString "?" (lib.head (lib.splitString "/" withoutScheme)));
+    # `[user[:password]@]host[:port]`; the last `@` keeps userinfo out.
+    hostPortString = lib.last (lib.splitString "@" authority);
+    hostPort = lib.splitString ":" hostPortString;
+    authorityHost = lib.optionalString hasScheme (lib.head hostPort);
+    authorityPort = lib.optionalString (hasScheme && lib.length hostPort > 1) (lib.last hostPort);
+    hostValues = parameterValues "host";
+    portValues = parameterValues "port";
+    # libpq accepts a percent-encoded socket directory (`host=%2Frun%2Fpostgresql`).
+    decode = value: lib.replaceStrings ["%2F" "%2f"] ["/" "/"] value;
+  in {
+    host = decode (
+      if hostValues != []
+      then lib.last hostValues
+      else authorityHost
+    );
+    port =
+      if portValues != []
+      then lib.last portValues
+      else authorityPort;
+    ambiguous =
+      lib.optional (!(lib.hasPrefix "postgres://" url) && !(lib.hasPrefix "postgresql://" url)) "postgres.databaseUrl is not a postgres:// or postgresql:// URI and cannot be verified"
+      ++ map (key: "postgres.databaseUrl query key ${key} is percent-encoded and cannot be verified") (lib.filter (key: lib.hasInfix "%" key) keys)
+      ++ map (key: "postgres.databaseUrl query key ${key} can select another cluster and is not verified") (lib.filter (key: !(lib.hasInfix "%" key) && !(lib.elem key permittedUrlKeys) && !(lib.elem key ["host" "port"])) keys)
+      ++ lib.optional (lib.hasInfix "," hostPortString || lib.any (value: lib.hasInfix "," value) (hostValues ++ portValues)) "postgres.databaseUrl names multiple hosts or ports, which cannot be verified"
+      ++ lib.optional (lib.length (parameters "host") > 1) "postgres.databaseUrl repeats host in its query"
+      ++ lib.optional (lib.length (parameters "port") > 1) "postgres.databaseUrl repeats port in its query"
+      ++ lib.optional (authorityHost != "" && hostValues != []) "postgres.databaseUrl names host in both its authority and its query"
+      ++ lib.optional (authorityPort != "" && portValues != []) "postgres.databaseUrl names port in both its authority and its query";
+  };
+
+  # Environment variables that select a cluster the local-cluster guard cannot
+  # verify against its socket directory and port.
+  unverifiableEnvironmentKeys = ["PGSERVICE" "PGSERVICEFILE" "PGHOSTADDR" "PGSYSCONFDIR"];
+
+  # Every cluster target a project declares: structured provisioning, its
+  # migration environment and its grant URL. `superuserExtensions` may only be
+  # used when all of them are the local cluster the pre-start writes to.
+  projectClusterTargets = project: let
+    environment = project.environment;
+    provision = project.postgres.provision;
+    url = project.postgres.databaseUrl;
+    urlTarget = databaseUrlTarget url;
+  in
+    (lib.optional provision.enable {
+      source = "postgres.provision";
+      host = provision.socketDirectory;
+      port = toString provision.port;
+    })
+    ++ [
+      {
+        source = "environment";
+        host = environment.PGHOST or null;
+        port = environment.PGPORT or null;
+      }
+    ]
+    ++ lib.optional (url != null) {
+      source = "postgres.databaseUrl";
+      inherit (urlTarget) host port;
+    };
+
+  clusterMismatches = project: let
+    environment = project.environment;
+  in
+    map (key: "environment ${key} can select another cluster and is not verified") (lib.filter (key: builtins.hasAttr key environment) unverifiableEnvironmentKeys)
+    ++ (
+      if project.postgres.databaseUrl != null
+      then (databaseUrlTarget project.postgres.databaseUrl).ambiguous
+      else []
+    )
+    ++ lib.concatMap (target:
+      (lib.optional (target.host != null && target.host != "" && target.host != localPostgresSocketDirectory) "${target.source} host ${target.host} (the local socket directory is ${localPostgresSocketDirectory})")
+      ++ (lib.optional (target.port != null && target.port != "" && target.port != localPostgresPort) "${target.source} port ${target.port} (the local port is ${localPostgresPort})"))
+    (projectClusterTargets project);
+
   # Untrusted extensions must exist before the non-superuser owner migrates.
   # `+` runs the line unsandboxed as root so it can drop to the superuser; it
-  # belongs to the apply unit only, so readiness checks stay read-only.
+  # belongs to the apply unit only, so readiness checks stay read-only. The
+  # project environment reaches the whole unit, and runuser keeps it, so psql
+  # gets a cleared environment: PGUSER or PGHOST would otherwise retarget or
+  # fail the superuser connection. `-U` names the superuser explicitly, and
+  # `-h`/`-p` name the local cluster, because the cleared environment no
+  # longer carries a project PGPORT or PGHOST.
   superuserExtensionsPreStart = project:
     lib.optional (project.postgres.superuserExtensions != []) ("+"
       + lib.escapeShellArgs ([
           "${pkgs.util-linux}/bin/runuser"
           "-u"
-          (config.services.postgresql.superUser or "postgres")
+          localPostgresSuperuser
           "--"
+          "${pkgs.coreutils}/bin/env"
+          "-i"
           "${project.postgres.package}/bin/psql"
           "-X"
+          "-U"
+          localPostgresSuperuser
+          "-h"
+          localPostgresSocketDirectory
+          "-p"
+          localPostgresPort
           "-v"
           "ON_ERROR_STOP=1"
           "-d"
@@ -849,7 +992,13 @@
     then project.rehearsal.source.database
     else projectDatabase project;
 
-  rehearsalReceiptDirectory = project: "/var/lib/${project.stateDirectory}/rehearsals";
+  rehearsalSuperuser = project: project.rehearsal.superuser;
+
+  # Rehearsal owns its state directory: systemd would otherwise recursively
+  # chown the project's production state to a distinct rehearsal.user.
+  rehearsalStateDirectory = name: "harbor-db-${name}-rehearse";
+
+  rehearsalReceiptDirectory = name: "/var/lib/${rehearsalStateDirectory name}";
 
   # The rehearsal engine owns the connection, so unit environment that would
   # retarget it is dropped; credentials cannot be reproduced and are rejected.
@@ -897,6 +1046,7 @@
         }
         // optionalAttrs (rehearsal.source.user != null) {user = rehearsal.source.user;};
       owner = rehearsalOwner project;
+      superuser = rehearsalSuperuser project;
       database = projectDatabase project;
       superuser_extensions = project.postgres.superuserExtensions;
       steps = rehearsalSteps name project;
@@ -920,13 +1070,13 @@
       {
         Type = "oneshot";
         User = rehearsalUser project;
-        StateDirectory = project.stateDirectory;
+        StateDirectory = rehearsalStateDirectory name;
         ExecStart = lib.escapeShellArgs (map toString [
           "${toString cfg.package}/bin/harbor-db-rehearse"
           "--plan"
           (rehearsalPlan name project)
           "--receipt-dir"
-          (rehearsalReceiptDirectory project)
+          (rehearsalReceiptDirectory name)
         ]);
         # The engine's own deadline plus its bounded cluster cleanup.
         TimeoutStartSec = rehearsal.timeoutSeconds + 600;
@@ -1239,6 +1389,10 @@ in {
             assertion = project.postgres.superuserExtensions == [] || projectDatabase project != null;
             message = "services.harbor-db.projects.${name}: postgres.superuserExtensions needs postgres.database (or postgres.provision)";
           }
+          {
+            assertion = project.postgres.superuserExtensions == [] || clusterMismatches project == [];
+            message = "services.harbor-db.projects.${name}.postgres.superuserExtensions: extensions are created in the local cluster (socket directory ${localPostgresSocketDirectory}, port ${localPostgresPort}), but this project targets ${lib.concatStringsSep ", " (clusterMismatches project)}; make the project target the local cluster or set superuserExtensions = []";
+          }
         ]
         ++ lib.optionals project.rehearsal.enable [
           {
@@ -1254,8 +1408,12 @@ in {
             message = "services.harbor-db.projects.${name}.rehearsal: set rehearsal.owner and rehearsal.user, or the project user";
           }
           {
-            assertion = project.stateDirectory != null;
-            message = "services.harbor-db.projects.${name}.rehearsal: stateDirectory is required; receipts are written to <stateDirectory>/rehearsals";
+            assertion = rehearsalSuperuser project != rehearsalOwner project;
+            message = "services.harbor-db.projects.${name}.rehearsal: rehearsal.superuser must differ from the owner role; set rehearsal.superuser to another name";
+          }
+          {
+            assertion = rehearsalStateDirectory name != project.stateDirectory;
+            message = "services.harbor-db.projects.${name}.rehearsal: the rehearsal unit must not share the project state directory";
           }
           {
             assertion = lib.all (runner: runner.credentialArgs == [] && runner.credentialEnvironment == {}) ([project.runner] ++ map (operation: operation.value.runner) (rehearsalMaintenanceOperations project));

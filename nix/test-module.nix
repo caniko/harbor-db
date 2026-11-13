@@ -65,24 +65,60 @@ pkgs.testers.runNixOSTest {
           ;;
       esac
     '';
+    rehearsalMigrator = pkgs.writeShellScriptBin "rehearsal-migrator" ''
+      set -eu
+      case "$1" in
+        migrate)
+          psql -v ON_ERROR_STOP=1 -c 'CREATE TABLE IF NOT EXISTS rehearsed_item (id integer)'
+          ;;
+        check)
+          psql -v ON_ERROR_STOP=1 -tAc 'select 1 from rehearsed_item limit 0' > /dev/null
+          ;;
+        *)
+          echo "unknown command: $1" >&2
+          exit 64
+          ;;
+      esac
+    '';
   in {
     imports = [module];
 
     environment.etc."harbor-db-lifecycle-secret".text = "lifecycle-secret\n";
 
-    systemd.tmpfiles.rules = ["d /var/lib/harbor-db-demo 0775 postgres postgres -"];
+    systemd.tmpfiles.rules = [
+      "d /var/lib/harbor-db-demo 0775 postgres postgres -"
+      "d /var/lib/harbor-db-rehearsal-work 0700 rehearsal_app rehearsal_app -"
+      "d /var/lib/harbor-db-rehearsal-reader-work 0700 rehearsal_reader rehearsal_reader -"
+      "d /var/lib/harbor-db-rehearsal-reader-project 0700 rehearsal_app rehearsal_app -"
+    ];
 
     services.postgresql = {
       enable = true;
-      ensureDatabases = ["db_harbor_project"];
+      ensureDatabases = ["db_harbor_project" "db_rehearsal"];
       ensureUsers = [
         {name = "project_app";}
+        {name = "rehearsal_app";}
+        {name = "rehearsal_reader";}
       ];
     };
 
     systemd.services.postgresql-setup.script = lib.mkAfter ''
       psql -d db_harbor_project -tAc "CREATE TABLE IF NOT EXISTS project_item (id bigserial primary key);"
+      psql -d db_rehearsal -tAc "CREATE TABLE IF NOT EXISTS rehearsal_item (id integer);"
+      psql -d db_rehearsal -tAc "INSERT INTO rehearsal_item VALUES (1), (2);"
+      psql -d db_rehearsal -tAc "GRANT pg_read_all_data TO rehearsal_app, rehearsal_reader;"
     '';
+
+    users.users.rehearsal_app = {
+      isSystemUser = true;
+      group = "rehearsal_app";
+    };
+    users.groups.rehearsal_app = {};
+    users.users.rehearsal_reader = {
+      isSystemUser = true;
+      group = "rehearsal_reader";
+    };
+    users.groups.rehearsal_reader = {};
 
     users.users.project_app = {
       isSystemUser = true;
@@ -177,7 +213,9 @@ pkgs.testers.runNixOSTest {
       runtimeUnits = ["project-app.service"];
       postgres = {
         enable = true;
+        database = "db_harbor_project";
         databaseUrl = "postgres:///db_harbor_project?host=/run/postgresql";
+        superuserExtensions = ["pg_trgm"];
         setupUnits = ["postgresql-setup.service"];
         grants = {
           enable = true;
@@ -185,6 +223,80 @@ pkgs.testers.runNixOSTest {
         };
       };
       serviceConfig.ReadWritePaths = ["/var/lib/harbor-db-demo"];
+    };
+
+    # The privileged pre-start inherits the unit environment, where a project
+    # PGUSER names a non-superuser role. It must still connect as the
+    # PostgreSQL superuser.
+    services.harbor-db.projects.superuser-gate = {
+      enable = true;
+      description = "Privileged pre-start with the project PGUSER";
+      user = "postgres";
+      environment.PGUSER = "project_app";
+      runner.command = "true";
+      postgres = {
+        enable = true;
+        database = "db_harbor_project";
+        superuserExtensions = ["fuzzystrmatch"];
+      };
+    };
+
+    services.harbor-db.projects.rehearsal = {
+      enable = true;
+      description = "Documented-defaults rehearsal";
+      # The documented default: the project user is the unit account, and the
+      # restored owner falls back to the same name.
+      user = "rehearsal_app";
+      stateDirectory = "harbor-db-rehearsal-project";
+      runner = {
+        package = rehearsalMigrator;
+        executable = "bin/rehearsal-migrator";
+        args = ["migrate"];
+        checkArgs = ["check"];
+      };
+      postgres = {
+        enable = true;
+        database = "db_rehearsal";
+      };
+      rehearsal = {
+        enable = true;
+        workDirectory = "/var/lib/harbor-db-rehearsal-work";
+        probes = [
+          {
+            name = "items";
+            sql = "select count(*) from rehearsal_item";
+          }
+        ];
+      };
+    };
+
+    services.harbor-db.projects.rehearsal-reader = {
+      enable = true;
+      description = "Rehearsal as a distinct user";
+      user = "rehearsal_app";
+      stateDirectory = "harbor-db-rehearsal-reader-project";
+      runner = {
+        package = rehearsalMigrator;
+        executable = "bin/rehearsal-migrator";
+        args = ["migrate"];
+        checkArgs = ["check"];
+      };
+      postgres = {
+        enable = true;
+        database = "db_rehearsal";
+      };
+      rehearsal = {
+        enable = true;
+        user = "rehearsal_reader";
+        owner = "rehearsal_app";
+        workDirectory = "/var/lib/harbor-db-rehearsal-reader-work";
+        probes = [
+          {
+            name = "items";
+            sql = "select count(*) from rehearsal_item";
+          }
+        ];
+      };
     };
 
     services.harbor-db.projects.structured = {
@@ -284,6 +396,21 @@ pkgs.testers.runNixOSTest {
     machine.succeed("systemctl start harbor-db-project-check.service")
     machine.succeed("test $(grep -c migrated /var/lib/harbor-db-demo/events) -ge 2")
     machine.succeed("sudo -u project_app psql -d db_harbor_project -tAc 'INSERT INTO project_item DEFAULT VALUES RETURNING id;' | grep -Fx 1")
+    machine.succeed("sudo -u postgres psql -d db_harbor_project -tAc \"select count(*) from pg_extension where extname = 'pg_trgm'\" | grep -Fx 1")
+    machine.succeed("systemctl start harbor-db-superuser-gate.service")
+    machine.succeed("sudo -u postgres psql -d db_harbor_project -tAc \"select count(*) from pg_extension where extname = 'fuzzystrmatch'\" | grep -Fx 1")
+    # Documented rehearsal defaults: the project user is both the unit account
+    # and the restored owner. Only a distinct bootstrap superuser in the
+    # disposable cluster makes that restorable.
+    machine.succeed("systemctl start harbor-db-rehearsal-rehearse.service")
+    machine.succeed("grep -F '\"status\": \"passed\"' /var/lib/harbor-db-rehearsal-rehearse/*.json")
+    machine.succeed("test \"$(stat -c %U /var/lib/harbor-db-rehearsal-rehearse)\" = rehearsal_app")
+    # A distinct rehearsal.user must not take over the project state directory.
+    machine.succeed("test \"$(stat -c %U /var/lib/harbor-db-rehearsal-reader-project)\" = rehearsal_app")
+    machine.succeed("systemctl start harbor-db-rehearsal-reader-rehearse.service")
+    machine.succeed("grep -F '\"status\": \"passed\"' /var/lib/harbor-db-rehearsal-reader-rehearse/*.json")
+    machine.succeed("test \"$(stat -c %U /var/lib/harbor-db-rehearsal-reader-project)\" = rehearsal_app")
+    machine.succeed("test \"$(stat -c %U /var/lib/harbor-db-rehearsal-reader-rehearse)\" = rehearsal_reader")
     machine.wait_until_succeeds("systemctl show harbor-db-lifecycle.service -p Result --value | grep -Fx success")
     machine.wait_until_succeeds("systemctl show lifecycle-app.service -p Result --value | grep -Fx success")
     machine.succeed("systemctl start harbor-db-lifecycle.service")
