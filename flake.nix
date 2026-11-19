@@ -24,15 +24,7 @@
     nixpkgs,
     treefmt-nix,
     ...
-  } @ outputArgs: let
-    treefmt = pkgs:
-      treefmt-nix.lib.evalModule pkgs {
-        imports = [harbor-meta.treefmtModules.nix harbor-meta.treefmtModules.toml harbor-rs.treefmtModules.rust];
-        projectRootFile = "flake.nix";
-      };
-    # harbor's superproject root passes its shared formatter; a formal
-    # argument would make standalone Nix resolve it as a registry flake.
-    harborFormatting = outputArgs.harborFormatting or null;
+  }: let
     systems = [
       "x86_64-linux"
       "aarch64-linux"
@@ -109,6 +101,9 @@
           inherit system pkgs toolchain;
           inherit (toolchain) craneLib;
         });
+    treefmt =
+      forAllSystems ({pkgs, ...}:
+        treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix {inherit harbor-meta harbor-rs;}));
   in {
     lib.postgresRecoveryReadiness = 1;
     lib.postgresRecoveryPreparation = 1;
@@ -240,6 +235,7 @@
     checks = forAllSystems ({
       pkgs,
       craneLib,
+      system,
       ...
     }: let
       commonArgs =
@@ -328,12 +324,9 @@
         };
         postgres-lifecycle-oracle-test = pkgs.callPackage ./nix/test-postgres-oracle.nix {};
         harbor-db = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db;
-        # Inside harbor, formatting is owned by the monorepo's shared policy;
-        # standalone, the same harbor treefmt modules check the whole tree.
-        cargo-fmt =
-          if harborFormatting == null
-          then (treefmt pkgs).config.build.check self
-          else harborFormatting pkgs.stdenv.hostPlatform.system;
+        formatting = treefmt.${system}.config.build.check self;
+        # Simit's existing CI plan still addresses this check as cargo-fmt.
+        cargo-fmt = self.checks.${system}.formatting;
         cargo-test = craneLib.cargoTest (commonArgs
           // {
             inherit cargoArtifacts;
@@ -400,7 +393,7 @@
         };
       });
 
-    formatter = forAllSystems ({pkgs, ...}: (treefmt pkgs).config.build.wrapper);
+    formatter = builtins.mapAttrs (_: eval: eval.config.build.wrapper) treefmt;
 
     # Simit prebuild publication on trunk (secret ATTIC_TOKEN) of the
     # packages Canix consumes.
@@ -420,9 +413,13 @@
         };
       };
 
-    devShells = forAllSystems ({pkgs, ...}: let
+    devShells = forAllSystems ({
+      pkgs,
+      system,
+      ...
+    }: let
       packages = [
-        (treefmt pkgs).config.build.wrapper
+        self.formatter.${system}
         pkgs.cargo
         pkgs.cargo-nextest
         pkgs.clippy
