@@ -437,7 +437,7 @@
           "harbor-rs"
         ],
         "treefmt-nix": [
-          "harbor-rs",
+          "harbor-meta",
           "treefmt-nix"
         ]
       }

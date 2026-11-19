@@ -14,7 +14,7 @@
     };
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
-    treefmt-nix.follows = "harbor-rs/treefmt-nix";
+    treefmt-nix.follows = "harbor-meta/treefmt-nix";
   };
 
   outputs = {
