@@ -12,6 +12,7 @@
     "templates/**"
     "tests/fixtures/**"
     "checks/fixtures/**"
+    "tests/oracles/**"
     "tests/pr14-baseline.toml"
     ".github/workflows/*.yaml"
   ];
