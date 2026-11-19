@@ -4505,7 +4505,14 @@ namespace = "checks"
 id_prefix = "nix."
 source = "flake.nix"
 systems = ["x86_64-linux", "aarch64-linux"]
-names = ["harbor-db", "cargo-fmt", "cargo-test", "cargo-doc", "cargo-clippy"]
+names = [
+  "harbor-db",
+  "formatting",
+  "cargo-fmt",
+  "cargo-test",
+  "cargo-doc",
+  "cargo-clippy",
+]
 profile = "full"
 deadline_seconds = 7200
 resources = { cpu = 2, memory_mib = 8192, disk_mib = 32768, exclusive = [
