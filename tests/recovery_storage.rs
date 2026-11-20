@@ -1231,29 +1231,38 @@ fn missing_evidence_and_missing_lease_anchors_are_never_created_by_admission() {
 
 #[test]
 fn preflight_defers_byte_verification_but_requires_fresh_bound_receipts() {
+    use std::os::unix::fs::MetadataExt;
     let _workers = WORKERS.lock().unwrap();
     let f = Fixture::new();
     f.accepted();
+    // Bound the window by the stamps admission reads (manifest mtime, receipt
+    // completion), not f.now: on a slow runner they straddle it by a second.
+    let made = fs::metadata(f.p("backup/base/base-1/backup_manifest"))
+        .unwrap()
+        .mtime();
+    let done = f.receipt()["completed_at"].as_i64().unwrap();
+    let inside = made.max(done);
+    let outside = [made.min(done) - 1, inside + 3601];
     let before = fs::read(f.p("verify.log")).unwrap();
     fs::write(f.p("corrupt"), "").unwrap();
     assert_eq!(
-        evidence_preflight(&f.config, Some(f.now)).unwrap()["status"],
+        evidence_preflight(&f.config, Some(inside)).unwrap()["status"],
         "preflight-ready"
     );
     assert_eq!(fs::read(f.p("verify.log")).unwrap(), before);
-    assert!(recovery::evidence_check(&f.config, Some(f.now)).is_err());
-    for now in [f.now - 1, f.now + 3601] {
+    assert!(recovery::evidence_check(&f.config, Some(inside)).is_err());
+    for now in outside {
         assert!(evidence_preflight(&f.config, Some(now)).is_err());
     }
     let mut bad = f.config.clone();
     bad["recovery"]["record_checks"][0]["sql"] = json!("SELECT different_records");
-    assert!(evidence_preflight(&bad, Some(f.now)).is_err());
+    assert!(evidence_preflight(&bad, Some(inside)).is_err());
     // Routine preflight needs only a fresh bound backup, not matching evidence.
     assert_eq!(
-        recovery::preflight(&bad, Some(f.now)).unwrap()["status"],
+        recovery::preflight(&bad, Some(inside)).unwrap()["status"],
         "preflight-ready"
     );
-    for now in [f.now - 1, f.now + 3601] {
+    for now in outside {
         assert!(recovery::preflight(&f.config, Some(now)).is_err());
     }
 }
