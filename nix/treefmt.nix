@@ -5,6 +5,9 @@
   imports = [
     harbor-meta.treefmtModules.nix
     harbor-meta.treefmtModules.toml
+    harbor-meta.treefmtModules.markdown
+    harbor-meta.treefmtModules.shell
+    harbor-meta.treefmtModules.svg
     harbor-rs.treefmtModules.rust
   ];
   projectRootFile = "flake.nix";
