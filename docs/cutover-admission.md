@@ -201,18 +201,18 @@ the independent executor. One resumable journal at the fixed root
 # harbor-db-postgres --config /etc/harbor-db/postgresql-rollout.json rollout next
 ```
 
-| Step | Phase after | What it does |
-| --- | --- | --- |
-| `fence` | `fenced` | inhibit startup, pause publishers, stop clients and the primary, open the fence, start the primary, **wait for setup units to settle**, inspect the live fence |
-| `prepare` | `prepared` | run `prepare-recovery` with receivers stopped; stops at the independent-certification hand-off and records the export and its SHA-256 |
-| `certify` | (executor) | as the declared unprivileged executor, run its restore/certify argv on the transported export (`--export`, `--export-sha256` and `--workspace` are appended; the argv must write its receipt to `<workspace>/off-host-recovery.json`) |
-| `import --receipt --sha256` | `imported` | stage the digest-verified receipt and re-run preparation to admission |
-| `adopt` | `adopted` | re-verify live records against the accepted snapshot, then `adopt-live` and `check` |
-| `activated` | `activated` | require the running generation to carry this manifest, then record that it is active under the fence |
-| `accept` | `activated` | after verifying the deployment (the running generation carries this manifest): write the acceptance thaw checks, root 0600 at `<journal root>/acceptance.json`: `{"version": 1, "status": "accepted", "host", "system_identifier", "manifest_sha256", "token" (the fence token), "snapshot_sha256" (of the record snapshot's bytes)}` |
-| `thaw --acceptance` | `thawed` | require the running generation to carry this manifest; verify a root-owned 0400/0600 acceptance (in a directory only root can write) with exactly those fields; re-admit recovery (`inspect-recovery`, the cutover checker); close the fence, restart the primary, the clients it stopped and declared clients whose start the fence skipped, lift the pause |
-| `abort` | `aborted` | before activation, or after rolling back a failed deployment (an installed candidate, adopted or activated, must be thawed instead): close (or confirm closed) the fence, restart the primary and recorded clients, lift the pause; evidence is kept |
-| `archive` | (none) | archive a thawed or aborted journal and drop its GC root, without fencing |
+| Step                        | Phase after | What it does                                                                                                                                                                                                                                                                                                                                                 |
+| --------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `fence`                     | `fenced`    | inhibit startup, pause publishers, stop clients and the primary, open the fence, start the primary, **wait for setup units to settle**, inspect the live fence                                                                                                                                                                                               |
+| `prepare`                   | `prepared`  | run `prepare-recovery` with receivers stopped; stops at the independent-certification hand-off and records the export and its SHA-256                                                                                                                                                                                                                        |
+| `certify`                   | (executor)  | as the declared unprivileged executor, run its restore/certify argv on the transported export (`--export`, `--export-sha256` and `--workspace` are appended; the argv must write its receipt to `<workspace>/off-host-recovery.json`)                                                                                                                        |
+| `import --receipt --sha256` | `imported`  | stage the digest-verified receipt and re-run preparation to admission                                                                                                                                                                                                                                                                                        |
+| `adopt`                     | `adopted`   | re-verify live records against the accepted snapshot, then `adopt-live` and `check`                                                                                                                                                                                                                                                                          |
+| `activated`                 | `activated` | require the running generation to carry this manifest, then record that it is active under the fence                                                                                                                                                                                                                                                         |
+| `accept`                    | `activated` | after verifying the deployment (the running generation carries this manifest): write the acceptance thaw checks, root 0600 at `<journal root>/acceptance.json`: `{"version": 1, "status": "accepted", "host", "system_identifier", "manifest_sha256", "token" (the fence token), "snapshot_sha256" (of the record snapshot's bytes)}`                        |
+| `thaw --acceptance`         | `thawed`    | require the running generation to carry this manifest; verify a root-owned 0400/0600 acceptance (in a directory only root can write) with exactly those fields; re-admit recovery (`inspect-recovery`, the cutover checker); close the fence, restart the primary, the clients it stopped and declared clients whose start the fence skipped, lift the pause |
+| `abort`                     | `aborted`   | before activation, or after rolling back a failed deployment (an installed candidate, adopted or activated, must be thawed instead): close (or confirm closed) the fence, restart the primary and recorded clients, lift the pause; evidence is kept                                                                                                         |
+| `archive`                   | (none)      | archive a thawed or aborted journal and drop its GC root, without fencing                                                                                                                                                                                                                                                                                    |
 
 `rollout next` performs the next local step or prints the exact external action
 (executor certification, activation, thaw). From `prepared` it names the
@@ -291,7 +291,7 @@ Exclusion and recovery:
   receiver and publisher is attempted before the first failure is reported.
 - **Lost journal.** Without a journal, `abort` names Harbor's live fence token
   (verify it with `inspect-fence --token`). `rollout abort --adopt-fence-token
-  <token>` then unwinds that fence through the normal close, restarting every
+<token>` then unwinds that fence through the normal close, restarting every
   declared receiver and paused publisher. With no live fence but a held startup
   inhibition (which keeps the primary from starting), `abort` names its token,
   and `rollout abort --adopt-startup-token <token>` completes the fence boundary
@@ -403,6 +403,7 @@ Exclusion and recovery:
   snapshot must be bound to this rollout's fence and `preparation.json` must
   be its backup binding. Stale evidence is never moved implicitly: move it
   aside first.
+
 - **Receipt size.** Transported and staged receipts are bounded by the
   recovery importer's own 16 MiB limit; Harbor's small control records and the
   acceptance by 1 MiB.
@@ -509,12 +510,12 @@ runs the hook as the transient root unit `harbor-db-rollout-transport.service`
 environment plus `HOME=/root`, `LANG=C` and the caller's `SSH_AUTH_SOCK`; the
 hook sets anything else, its `PATH` included. It appends:
 
-| Argument | Value |
-| --- | --- |
-| `--config` | the opening rollout manifest (a GC-rooted store path; the executor needs its closure) |
-| `--export` | the recorded export directory |
-| `--export-sha256` | the recorded SHA-256 of its `recovery-export.json` |
-| `--receipt-dir` | a fresh root-private directory for this attempt |
+| Argument          | Value                                                                                 |
+| ----------------- | ------------------------------------------------------------------------------------- |
+| `--config`        | the opening rollout manifest (a GC-rooted store path; the executor needs its closure) |
+| `--export`        | the recorded export directory                                                         |
+| `--export-sha256` | the recorded SHA-256 of its `recovery-export.json`                                    |
+| `--receipt-dir`   | a fresh root-private directory for this attempt                                       |
 
 The hook copies the manifest closure and the export to the executor, runs
 `rollout certify` there as the declared executor, writes the receipt to

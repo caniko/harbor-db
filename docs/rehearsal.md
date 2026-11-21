@@ -32,23 +32,23 @@ counterpart exists or is required.
 A JSON object. Unknown fields are rejected at every level, and `schema` is
 required and must equal the schema id.
 
-| Field                  | Meaning                                                                                                                                                                                                                                                  |
-| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schema`               | `"harbor-db.rehearsal-plan.v1"`.                                                                                                                                                                                                                         |
-| `package`              | Absolute PostgreSQL package path with `bin/{initdb,pg_ctl,pg_restore,pg_dump,psql}` and every extension the source and the steps need.                                                                                                                   |
-| `source`               | `{"live": {"host": "/run/postgresql", "database": "x", "user"?: "y"}}` or `{"dump": "/path"}`.                                                                                                                                                           |
-| `owner`                | Role created `LOGIN NOSUPERUSER`; steps and probes run as it. Use the source's own owner role name: `ALTER DEFAULT PRIVILEGES FOR ROLE <owner>` entries only restore for that role.                                                                       |
-| `superuser`            | Bootstrap superuser role `initdb` creates in the disposable cluster. Defaults to the OS account running the engine; it must differ from `owner`, which is why the module sets `harbor_rehearsal_admin`. Use a name no production role has.               |
-| `database`             | Database created in the disposable cluster, owned by `owner`.                                                                                                                                                                                            |
-| `locale`               | Collation/ctype for `CREATE DATABASE`. Defaults to the live source's `datcollate`, and to `C` for a dump source, so set it explicitly for dumps whose collation matters.                                                                                 |
-| `superuser_extensions` | Extensions created as superuser before the restore, in addition to every extension in the dump's table of contents. Use it for extensions the rehearsed migration introduces (the source does not have them yet).                                         |
-| `grantee_roles`        | Extra roles to stand in as `NOLOGIN` roles, in addition to those found in the dump's ACL entries.                                                                                                                                                        |
+| Field                  | Meaning                                                                                                                                                                                                                                                        |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema`               | `"harbor-db.rehearsal-plan.v1"`.                                                                                                                                                                                                                               |
+| `package`              | Absolute PostgreSQL package path with `bin/{initdb,pg_ctl,pg_restore,pg_dump,psql}` and every extension the source and the steps need.                                                                                                                         |
+| `source`               | `{"live": {"host": "/run/postgresql", "database": "x", "user"?: "y"}}` or `{"dump": "/path"}`.                                                                                                                                                                 |
+| `owner`                | Role created `LOGIN NOSUPERUSER`; steps and probes run as it. Use the source's own owner role name: `ALTER DEFAULT PRIVILEGES FOR ROLE <owner>` entries only restore for that role.                                                                            |
+| `superuser`            | Bootstrap superuser role `initdb` creates in the disposable cluster. Defaults to the OS account running the engine; it must differ from `owner`, which is why the module sets `harbor_rehearsal_admin`. Use a name no production role has.                     |
+| `database`             | Database created in the disposable cluster, owned by `owner`.                                                                                                                                                                                                  |
+| `locale`               | Collation/ctype for `CREATE DATABASE`. Defaults to the live source's `datcollate`, and to `C` for a dump source, so set it explicitly for dumps whose collation matters.                                                                                       |
+| `superuser_extensions` | Extensions created as superuser before the restore, in addition to every extension in the dump's table of contents. Use it for extensions the rehearsed migration introduces (the source does not have them yet).                                              |
+| `grantee_roles`        | Extra roles to stand in as `NOLOGIN` roles, in addition to those found in the dump's ACL entries.                                                                                                                                                              |
 | `steps`                | Ordered `[{"name", "kind": "migrate\|check\|maintenance", "argv": [...], "env": {...}, "expect_exit": 0}]`. `name` is unique; `kind` is recorded, not interpreted. `env` may not set `DATABASE_URL` or any `PG*` variable, so a step cannot retarget the copy. |
-| `probes`               | `[{"name", "sql"}]`, run after all steps pass.                                                                                                                                                                                                           |
-| `work_directory`       | Existing directory owned by the caller without group/other write. Each run uses a private `r-<epoch>-<pid>` subdirectory.                                                                                                                                |
-| `timeout_seconds`      | 1..86400, default 14400. Bounds the whole run; cleanup has its own 120 seconds.                                                                                                                                                                          |
-| `jobs`                 | 1..64, default 4, for `pg_dump -j` and `pg_restore -j`.                                                                                                                                                                                                  |
-| `keep`                 | Keep the (stopped) run directory for inspection. Default `false`.                                                                                                                                                                                        |
+| `probes`               | `[{"name", "sql"}]`, run after all steps pass.                                                                                                                                                                                                                 |
+| `work_directory`       | Existing directory owned by the caller without group/other write. Each run uses a private `r-<epoch>-<pid>` subdirectory.                                                                                                                                      |
+| `timeout_seconds`      | 1..86400, default 14400. Bounds the whole run; cleanup has its own 120 seconds.                                                                                                                                                                                |
+| `jobs`                 | 1..64, default 4, for `pg_dump -j` and `pg_restore -j`.                                                                                                                                                                                                        |
+| `keep`                 | Keep the (stopped) run directory for inspection. Default `false`.                                                                                                                                                                                              |
 
 A live source is dumped with `pg_dump -Fd -j N -Z zstd:3` into the run
 directory (about 31 GB in 482 s with four jobs for a 77 GB database). The unit
@@ -207,17 +207,17 @@ except `DATABASE_URL` and `PG*`. Rehearsed runners cannot use credentials; the
 copy must not need production secrets. Receipts go to the unit's own state
 directory, `/var/lib/harbor-db-<name>-rehearse/`, never to the project's.
 
-| Option                                                                | Default                                                      |
-| --------------------------------------------------------------------- | ------------------------------------------------------------ |
-| `enable`                                                              | `false`                                                      |
-| `source.database` / `source.host` / `source.user`                     | project database / `/run/postgresql` / none                  |
-| `owner`                                                               | `postgres.provision.ownerRole`, else the project `user`      |
-| `user`                                                                | the project `user` (initdb refuses root)                     |
-| `superuser`                                                           | `harbor_rehearsal_admin`, which must not be the `owner`      |
-| `workDirectory`                                                       | required, an existing absolute directory                     |
-| `package`                                                             | `services.postgresql.finalPackage`, else `pkgs.postgresql`   |
-| `jobs` / `timeoutSeconds` / `keep`                                    | `4` / `14400` / `false`                                      |
-| `probes`                                                              | `[]`; each is `{ name, sql }`                                |
+| Option                                            | Default                                                    |
+| ------------------------------------------------- | ---------------------------------------------------------- |
+| `enable`                                          | `false`                                                    |
+| `source.database` / `source.host` / `source.user` | project database / `/run/postgresql` / none                |
+| `owner`                                           | `postgres.provision.ownerRole`, else the project `user`    |
+| `user`                                            | the project `user` (initdb refuses root)                   |
+| `superuser`                                       | `harbor_rehearsal_admin`, which must not be the `owner`    |
+| `workDirectory`                                   | required, an existing absolute directory                   |
+| `package`                                         | `services.postgresql.finalPackage`, else `pkgs.postgresql` |
+| `jobs` / `timeoutSeconds` / `keep`                | `4` / `14400` / `false`                                    |
+| `probes`                                          | `[]`; each is `{ name, sql }`                              |
 
 The unit user must be able to `pg_dump` the live database over `source.host` and
 write `workDirectory` (which is its only extra writable path under
