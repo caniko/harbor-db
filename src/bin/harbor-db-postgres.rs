@@ -57,7 +57,11 @@ enum Operation {
         port: Option<u16>,
     },
     /// Routine admission: backup health without record-certified evidence.
-    InspectBackup,
+    InspectBackup {
+        /// Check backup admission without running pg_verifybackup.
+        #[arg(long)]
+        preflight: bool,
+    },
     /// Rebuild libc-collation indexes of databases whose recorded collation
     /// version drifted, then refresh the version. Emits JSON lines.
     CollationRefresh {
@@ -453,7 +457,13 @@ fn operate(args: Args) -> Result<Option<Value>> {
                 phase.text(),
             )?
         }
-        Operation::InspectBackup => storage::recovery::check(&config, None)?,
+        Operation::InspectBackup { preflight } => {
+            if preflight {
+                storage::recovery::preflight(&config, None)?
+            } else {
+                storage::recovery::check(&config, None)?
+            }
+        }
         Operation::InspectRecovery { socket_dir, port } => match (socket_dir, port) {
             (None, None) => storage::recovery::evidence_check(&config, None)?,
             (Some(socket), Some(port)) => {
