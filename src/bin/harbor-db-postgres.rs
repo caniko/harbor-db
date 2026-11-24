@@ -1,5 +1,5 @@
-use clap::{Parser, Subcommand, ValueEnum};
-use harbor_db::storage::{self, Result, codec, durable, invalid, pg_core, postgres};
+use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum, value_parser};
+use harbor_db::storage::{self, Result, codec, durable, invalid, observe, pg_core, postgres};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[command(about = "Explicit adoption, fail-closed startup and staged PostgreSQL upgrades")]
 struct Args {
     #[arg(long)]
-    config: PathBuf,
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Operation,
 }
@@ -26,6 +26,8 @@ impl Phase {
 }
 #[derive(Subcommand)]
 enum Operation {
+    /// Report PostgreSQL activity findings without reading a lifecycle policy.
+    Observe(ObserveArgs),
     Check,
     Serve,
     Adopt {
@@ -170,6 +172,83 @@ enum Operation {
     #[command(hide = true)]
     RolloutGuard,
 }
+
+#[derive(ClapArgs)]
+struct ObserveArgs {
+    #[arg(long, default_value = "psql")]
+    psql: PathBuf,
+    #[arg(long, default_value = "/run/postgresql")]
+    socket_dir: PathBuf,
+    #[arg(long, default_value_t = 5432, value_parser = value_parser!(u16).range(1..))]
+    port: u16,
+    #[arg(long, default_value = "postgres")]
+    database: String,
+    #[arg(long, default_value = "harbor_db_observer")]
+    user: String,
+    #[arg(long, default_value_t = 5, value_parser = value_parser!(u64).range(1..=i32::MAX as u64))]
+    connect_timeout_seconds: u64,
+    #[arg(long, default_value_t = 5000, value_parser = value_parser!(u64).range(1..=i32::MAX as u64))]
+    statement_timeout_ms: u64,
+    #[arg(long, default_value_t = 15, value_parser = value_parser!(u64).range(1..))]
+    process_timeout_seconds: u64,
+    /// Previous observer JSON report or its state object.
+    #[arg(long)]
+    previous: Option<PathBuf>,
+    #[arg(long, default_value_t = observe::ObserveThresholds::default().default_long_transaction_seconds)]
+    default_long_transaction_seconds: u64,
+    /// Override the transaction budget for this application_name; repeatable.
+    #[arg(long = "label-budget", value_name = "LABEL=SECONDS", value_parser = label_budget)]
+    label_budgets: Vec<(String, u64)>,
+    #[arg(long, default_value_t = observe::ObserveThresholds::default().commit_phase_seconds)]
+    commit_phase_seconds: u64,
+    #[arg(long, default_value_t = observe::ObserveThresholds::default().idle_in_transaction_seconds)]
+    idle_in_transaction_seconds: u64,
+    #[arg(long, default_value_t = observe::ObserveThresholds::default().lock_wait_seconds)]
+    lock_wait_seconds: u64,
+    #[arg(long, default_value_t = observe::ObserveThresholds::default().horizon_pinned_seconds)]
+    horizon_pinned_seconds: u64,
+}
+
+fn label_budget(value: &str) -> std::result::Result<(String, u64), &'static str> {
+    value
+        .rsplit_once('=')
+        .filter(|(label, _)| !label.trim().is_empty())
+        .and_then(|(label, limit)| Some((label.to_owned(), limit.parse::<u64>().ok()?)))
+        .filter(|(_, limit)| *limit > 0)
+        .ok_or("expected a nonempty LABEL and positive SECONDS")
+}
+
+impl ObserveArgs {
+    fn run(self) -> Result<Value> {
+        let previous = self
+            .previous
+            .as_deref()
+            .map(observe::read_previous)
+            .transpose()?;
+        let snapshot = observe::capture(&observe::Connection {
+            psql: self.psql,
+            socket_dir: self.socket_dir,
+            port: self.port,
+            database: self.database,
+            user: self.user,
+            connect_timeout_seconds: self.connect_timeout_seconds,
+            statement_timeout_ms: self.statement_timeout_ms,
+            process_timeout_seconds: self.process_timeout_seconds,
+        })?;
+        Ok(serde_json::to_value(observe::evaluate(
+            previous.as_ref(),
+            &snapshot,
+            &observe::ObserveThresholds {
+                default_long_transaction_seconds: self.default_long_transaction_seconds,
+                label_budgets: self.label_budgets.into_iter().collect(),
+                commit_phase_seconds: self.commit_phase_seconds,
+                idle_in_transaction_seconds: self.idle_in_transaction_seconds,
+                lock_wait_seconds: self.lock_wait_seconds,
+                horizon_pinned_seconds: self.horizon_pinned_seconds,
+            },
+        )?)?)
+    }
+}
 #[derive(Subcommand)]
 enum RolloutStep {
     /// Show the journal phase and the next action (needs read access to the
@@ -239,6 +318,12 @@ enum RolloutStep {
     },
 }
 fn operate(args: Args) -> Result<Option<Value>> {
+    if let Operation::Observe(options) = args.command {
+        return Ok(Some(options.run()?));
+    }
+    let config_path = args
+        .config
+        .ok_or_else(|| invalid("--config is required for this subcommand"))?;
     if let Operation::RolloutGuard = args.command {
         return Ok(Some(storage::postgres_rollout::activation_guard()?));
     }
@@ -274,11 +359,11 @@ fn operate(args: Args) -> Result<Option<Value>> {
             },
         };
         return Ok(Some(storage::postgres_rollout::operate(
-            &args.config,
+            &config_path,
             action,
         )?));
     }
-    let config = durable::read_config_json(&args.config)?;
+    let config = durable::read_config_json(&config_path)?;
     let result = match args.command {
         Operation::StageOffHostReceipt {
             source,
@@ -348,7 +433,7 @@ fn operate(args: Args) -> Result<Option<Value>> {
             port,
         } => storage::writer_fence::inspect_live(&config, &token, &socket_dir, port)?,
         Operation::InhibitStartup { system_identifier } => {
-            let path = durable::immutable_config_path(&args.config)?;
+            let path = durable::immutable_config_path(&config_path)?;
             storage::startup_inhibition::inhibit(
                 &durable::read_config_json(&path)?,
                 &system_identifier,
@@ -359,7 +444,7 @@ fn operate(args: Args) -> Result<Option<Value>> {
             fence_token,
             phase,
         } => {
-            let path = durable::immutable_config_path(&args.config)?;
+            let path = durable::immutable_config_path(&config_path)?;
             storage::startup_inhibition::release(
                 &durable::read_config_json(&path)?,
                 &path,
@@ -415,15 +500,26 @@ fn operate(args: Args) -> Result<Option<Value>> {
             socket_dir,
             port,
         } => storage::recovery::certify(&config, &data_dir, &socket_dir, port, None, None)?,
-        Operation::Rollout { .. } | Operation::RolloutGuard => {
+        Operation::Observe(_) | Operation::Rollout { .. } | Operation::RolloutGuard => {
             unreachable!("handled before policy loading")
         }
     };
     Ok(Some(result))
 }
 fn main() {
-    match operate(Args::parse()) {
-        Ok(Some(value)) => match codec::encode(&value, false) {
+    let args = Args::parse();
+    let observer = matches!(args.command, Operation::Observe(_));
+    match operate(args) {
+        Ok(Some(value)) => match codec::encode(&value, false).and_then(|bytes| {
+            // The terminating newline is part of the next poll's --previous file.
+            if observer && bytes.len() >= observe::MAX_PREVIOUS_BYTES {
+                Err(invalid(
+                    "PostgreSQL observer report exceeded its size limit",
+                ))
+            } else {
+                Ok(bytes)
+            }
+        }) {
             Ok(bytes) => println!("{}", String::from_utf8_lossy(&bytes)),
             Err(error) => {
                 eprintln!("harbor-db-postgres: {error}");

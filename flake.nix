@@ -141,6 +141,7 @@
     nixosModules.postgres-lifecycle = {
       imports = [storagePackageArgument ./nix/postgres-lifecycle.nix];
     };
+    nixosModules.postgres-observer = ./nix/postgres-observer.nix;
     nixosModules.cutover = {
       imports = [storagePackageArgument ./nix/cutover.nix];
     };
@@ -191,7 +192,7 @@
         commonArgs
         // {
           pname = "harbor-db-test";
-          cargoExtraArgs = "--locked --features testing --bin harbor-db-test --bin harbor-db-native-supervisor-fixture --bin harbor-db-writer-fence-fixture --bin harbor-db-backend-transition-fixture --bin harbor-db-provision-fixture --bin harbor-db-postgres-transition-fixture --bin harbor-db-postgres-backup-fixture --bin harbor-db-source-local-recovery-fixture";
+          cargoExtraArgs = "--locked --features testing --bin harbor-db-test --bin harbor-db-native-supervisor-fixture --bin harbor-db-writer-fence-fixture --bin harbor-db-backend-transition-fixture --bin harbor-db-provision-fixture --bin harbor-db-postgres-transition-fixture --bin harbor-db-postgres-backup-fixture --bin harbor-db-source-local-recovery-fixture --bin harbor-db-postgres-observer-fixture";
           meta = commonArgs.meta // {mainProgram = "harbor-db-test";};
         };
       testingArtifacts = craneLib.buildDepsOnly testingArgs;
@@ -313,6 +314,10 @@
           module = self.nixosModules.default;
           lifecycleModule = self.nixosModules.postgres-lifecycle;
         };
+        postgres-observer-eval = pkgs.callPackage ./nix/postgres-observer-eval.nix {
+          module = self.nixosModules.postgres-observer;
+          lifecycleModule = self.nixosModules.postgres-lifecycle;
+        };
         postgres-crash-rollback = pkgs.callPackage ./nix/test-postgres-lifecycle.nix {inherit nativePackage;};
         postgres-interrupted-upgrade = pkgs.callPackage ./nix/test-postgres-upgrade.nix {inherit nativePackage;};
         postgres-recovery-acceptance = pkgs.callPackage ./nix/test-postgres-recovery.nix {inherit nativePackage;};
@@ -356,6 +361,10 @@
           testPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db-test;
         };
         native-source-local-recovery = pkgs.callPackage ./nix/test-source-local-recovery.nix {
+          inherit nativePackage;
+          testPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db-test;
+        };
+        native-postgres-observer = pkgs.callPackage ./nix/test-postgres-observer.nix {
           inherit nativePackage;
           testPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.harbor-db-test;
         };

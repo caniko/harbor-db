@@ -296,6 +296,32 @@ All completed backup directories, including expiration candidates, are classifie
 before deletion. Redirected/non-directory entries, malformed start/end LSNs,
 unknown timeline values and missing manifests preserve both backups and WAL.
 
+Run the backup service to apply its normal admission and redundancy checks.
+`targetSettings.baseBackup.execPrefix` (or `targets.<name>.baseBackup.execPrefix`)
+prepends literal arguments to the single backup command, not to those checks.
+Call the exported `baseBackupBody` (or `targets.<name>.baseBackup.body`) directly
+as `postgres` when the caller already holds the outer execution lock. Direct
+invocation skips systemd admission and the prefix, but still checks for external
+tablespaces in source-local mode, takes the internal backup locks, verifies the
+backup, and publishes it.
+
+## PostgreSQL activity observer
+
+Enable `services.harbor-db.postgresql.observer.enable` to provision a dedicated
+system account and a peer-only PostgreSQL login granted `pg_monitor`. It is
+available with `nixosModules.postgres-lifecycle` or on its own through
+`nixosModules.postgres-observer`. Use a dedicated role, account, and ident map;
+the module does not remove pre-existing grants from a reused role.
+
+Run `harbor-db-postgres observe --psql /path/to/postgresql/bin/psql` as
+`harbor-db-observer`. No lifecycle manifest or backup-storage access is needed.
+The command emits a bounded read-only activity snapshot and findings, never raw
+SQL text. It exits zero when the snapshot succeeds, even with open findings;
+nonzero means unknown, not resolved. Pass the previous JSON report or its
+`state` object with `--previous` to track persistent waits and horizons and to
+distinguish PostgreSQL restarts (`ended`) from recovery (`resolved`). The
+caller owns scheduling, state retention, and alert delivery.
+
 ## Collation-version drift
 
 After a glibc upgrade a libc-provider database records the old

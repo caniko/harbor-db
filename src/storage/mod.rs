@@ -13,6 +13,7 @@ pub mod cutover;
 pub mod durable;
 mod json_tokens;
 pub mod login_shell;
+pub mod observe;
 pub mod pg_backup;
 pub mod pg_core;
 pub mod postgres;

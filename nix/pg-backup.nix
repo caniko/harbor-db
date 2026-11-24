@@ -4,6 +4,7 @@
   options,
   pkgs,
   harborDbStoragePackage,
+  utils,
   ...
 }: let
   inherit (lib) mkEnableOption mkIf mkMerge mkOption types;
@@ -105,6 +106,27 @@
 
     baseBackup = {
       enable = mkEnableOption "periodic base backup via pg_basebackup" // {default = true;};
+      execPrefix = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = ''
+          Literal argv words prepended to the base backup body in the service's
+          ExecStart. Use an absolute executable path or a simple executable
+          name as the first word; quoting, expansion, whitespace and systemd
+          command modifiers are not supported in the executable word.
+          An empty list runs the body directly. The prefix does not wrap
+          admission or redundancy checks. Do not put secrets in these words.
+        '';
+      };
+      body = mkOption {
+        type = types.nullOr types.package;
+        readOnly = true;
+        description = ''
+          Standalone backup executable to run as postgres, or null when this
+          target has no base backup service. Direct invocation does not run the
+          service's ExecCondition or execPrefix.
+        '';
+      };
       schedule = mkOption {
         type = types.str;
         default = "daily";
@@ -259,7 +281,7 @@
     wrapBin = bin:
       pkgs.writers.writeBash "pg-backup-${name}-${baseNameOf bin}" ''
         set -euo pipefail
-        password_file="${passwordFile}"
+        password_file=${lib.escapeShellArg passwordFile}
         if [ ! -r "$password_file" ] || [ ! -s "$password_file" ]; then
           echo "pg-backup: password file $password_file not readable or empty" >&2
           exit 1
@@ -267,7 +289,8 @@
         export PGPASSWORD="$(cat "$password_file")"
         exec ${ts.package}/${bin} "$@"
       '';
-    pgReceivewalCmd = "${wrapBin "bin/pg_receivewal"} -h ${sourceId} -p ${toString source.port} -U replicator";
+    pgReceivewal = wrapBin "bin/pg_receivewal";
+    pgReceivewalCmd = "${pgReceivewal} -h ${sourceId} -p ${toString source.port} -U replicator";
     replicationConninfo = "host=${sourceId} port=${toString source.port} user=replicator replication=true connect_timeout=10";
     # The gap probe honours the same bound as best-effort slot creation.
     gapConninfo =
@@ -280,7 +303,6 @@
       else ts.receiveWal.statusInterval
     )} --no-loop --slot=${ts.receiveWal.slotName} --create-slot --if-not-exists";
     psqlWrapped = wrapBin "bin/psql";
-    pgBasebackupCmd = "${wrapBin "bin/pg_basebackup"} -h ${sourceId} -p ${toString source.port} -U replicator";
     walDir = "${backupRoot}/wal";
     pruneBackupsScript = ''
       retain_days=${toString ts.retain.baseBackupDays}
@@ -291,7 +313,71 @@
           --wal-days "$wal_retain" --segment-bytes ${toString ts.walSegmentBytes}
       }
     '';
+    # Verify the partial backup before publishing it atomically.
+    body = pkgs.writeShellScript "pg-basebackup-body${suffix}" ''
+      set -euo pipefail
+      export PATH=${lib.makeBinPath [pkgs.coreutils pkgs.findutils pkgs.gnugrep pkgs.gnused config.systemd.package pkgs.util-linux ts.package]}
+      umask 0077
+      ${lib.optionalString localRecovery "${sourceLocalTablespaceCheck}\n"}
+
+      backup_root=${lib.escapeShellArg backupRoot}
+      ${lib.optionalString localRecovery ''
+        # Pin the recovery mutation inode before the legacy publication anchor.
+        # Opening an existing inode never creates or replaces either anchor.
+        test -f "$backup_root/locks/mutate"
+        test ! -L "$backup_root/locks/mutate"
+        exec 8<>"$backup_root/locks/mutate"
+        ${pkgs.util-linux}/bin/flock -n 8
+      ''}
+      exec 9>>"$backup_root/BACKUP_LOCK"
+      ${pkgs.util-linux}/bin/flock -n 9
+      # Never replace the last good backup during another run on the same day.
+      ${lib.optionalString gapTracking ''started_ms="$(date +%s%3N)"''}
+      date_dir="$backup_root/base/$(date -u +%Y-%m-%dT%H%M%S)-$$"
+      partial_dir="$date_dir.partial"
+      # Preserve any interrupted transfer, even if its generated name collides.
+      test ! -e "$partial_dir"
+      test ! -e "$date_dir"
+      mkdir -p "$partial_dir"
+
+      source_args=(-h ${lib.escapeShellArg sourceId} -p ${toString source.port} -U replicator)
+      slot=${lib.escapeShellArg baseCfg.slotName}
+
+      # Ensure the temporary slot exists for the backup duration.
+      ${pgReceivewal} "''${source_args[@]}" --status-interval=5 --no-loop --slot="$slot" --drop-slot 2>/dev/null || true
+      ${pgReceivewal} "''${source_args[@]}" --status-interval=5 --no-loop --slot="$slot" --create-slot 2>/dev/null || true
+
+      cleanup_slot() {
+        ${pgReceivewal} "''${source_args[@]}" --slot="$slot" --drop-slot 2>/dev/null || true
+      }
+      trap cleanup_slot EXIT
+
+      ${wrapBin "bin/pg_basebackup"} "''${source_args[@]}" -D "$partial_dir" --wal-method=stream \
+        ${lib.optionalString (baseCfg.maxRate != null) (lib.escapeShellArg "--max-rate=${baseCfg.maxRate}")} --verbose --slot="$slot"
+
+      ${ts.package}/bin/pg_verifybackup "$partial_dir"
+      ${durable} publish-tree "$partial_dir" "$date_dir"
+      ${
+        if baseCfg.recoveryMeta
+        then ''
+          # Metadata first, then LAST_SUCCESS=<id>; a verified later base also clears a WAL gap.
+          ${pgBackupTool} finalize --root "$backup_root" --id "$(basename "$date_dir")" \
+            --started-ms "$started_ms" --segment-bytes ${toString ts.walSegmentBytes} \
+            --package ${ts.package} --source-host ${lib.escapeShellArg sourceId} \
+            --sql-psql ${ts.package}/bin/psql --sql-conninfo ${lib.escapeShellArg sqlConninfo}
+        ''
+        else ''
+          # Sidecars left from an earlier recoveryMeta would keep health in metadata mode.
+          rm -f "$backup_root"/base/*.meta.json
+          printf '%s\n' "$(date --iso-8601=seconds)" | ${durable} write "$backup_root/LAST_SUCCESS"
+          ${lib.optionalString gapTracking "${pgBackupTool} clear-gap --root \"$backup_root\" --started-ms \"$started_ms\""}
+        ''
+      }
+      # The separate prune service uses the same lock; retention runs next time.
+    '';
   in {
+    inherit body;
+
     systemd.tmpfiles.rules =
       [
         "d ${backupRoot} 0750 postgres postgres -"
@@ -365,9 +451,6 @@
       '';
     };
 
-    # Pull a base backup into a partial directory, verify its manifest, then
-    # publish it atomically. A failed transfer therefore cannot masquerade as
-    # a complete dated backup.
     systemd.services."pg-basebackup${suffix}" = mkIf ts.baseBackup.enable {
       description = "Pull base backup from ${sourceId}";
       unitConfig.RequiresMountsFor = backupRoot;
@@ -377,7 +460,7 @@
       serviceConfig = {
         Type = "oneshot";
         User = "postgres";
-        ExecStartPre = lib.optional localRecovery "${sourceLocalTablespaceCheck}";
+        ExecStart = utils.escapeSystemdExecArgs (baseCfg.execPrefix ++ ["${body}"]);
         ExecCondition =
           lib.optional (admissionArgs != "") "${pgBackupTool} admit ${admissionArgs}"
           ++ lib.optional (baseCfg.redundantWithinSeconds != null)
@@ -386,69 +469,6 @@
         ReadWritePaths = [backupRoot];
         UMask = "0077";
       };
-      script = ''
-        set -euo pipefail
-
-        backup_root="${backupRoot}"
-        ${lib.optionalString localRecovery ''
-          # Pin the recovery mutation inode before the legacy publication anchor.
-          # Opening an existing inode never creates or replaces either anchor.
-          test -f "$backup_root/locks/mutate"
-          test ! -L "$backup_root/locks/mutate"
-          exec 8<>"$backup_root/locks/mutate"
-          ${pkgs.util-linux}/bin/flock -n 8
-        ''}
-        exec 9>>"$backup_root/BACKUP_LOCK"
-        ${pkgs.util-linux}/bin/flock -n 9
-        # Never replace the last good backup during another run on the same day.
-        ${lib.optionalString gapTracking ''started_ms="$(date +%s%3N)"''}
-        date_dir="$backup_root/base/$(date -u +%Y-%m-%dT%H%M%S)-$$"
-        partial_dir="$date_dir.partial"
-        wal_dir="${walDir}"
-        # Preserve any interrupted transfer, even if its generated name collides.
-        test ! -e "$partial_dir"
-        test ! -e "$date_dir"
-        mkdir -p "$partial_dir"
-
-        max_rate=${
-          if ts.baseBackup.maxRate != null
-          then "'--max-rate=${ts.baseBackup.maxRate}'"
-          else "''"
-        }
-        slot=${ts.baseBackup.slotName}
-
-        # Ensure the temporary slot exists for the backup duration.
-        ${pgReceivewalCmd} --status-interval=5 --no-loop --slot="$slot" --drop-slot 2>/dev/null || true
-        ${pgReceivewalCmd} --status-interval=5 --no-loop --slot="$slot" --create-slot 2>/dev/null || true
-
-        cleanup_slot() {
-          ${pgReceivewalCmd} --slot="$slot" --drop-slot 2>/dev/null || true
-        }
-        trap cleanup_slot EXIT
-
-        ${pgBasebackupCmd} -D "$partial_dir" --wal-method=stream \
-          $max_rate --verbose --slot="$slot"
-
-        ${ts.package}/bin/pg_verifybackup "$partial_dir"
-        ${durable} publish-tree "$partial_dir" "$date_dir"
-        ${
-          if baseCfg.recoveryMeta
-          then ''
-            # Metadata first, then LAST_SUCCESS=<id>; a verified later base also clears a WAL gap.
-            ${pgBackupTool} finalize --root "$backup_root" --id "$(basename "$date_dir")" \
-              --started-ms "$started_ms" --segment-bytes ${toString ts.walSegmentBytes} \
-              --package ${ts.package} --source-host ${lib.escapeShellArg sourceId} \
-              --sql-psql ${ts.package}/bin/psql --sql-conninfo ${lib.escapeShellArg sqlConninfo}
-          ''
-          else ''
-            # Sidecars left from an earlier recoveryMeta would keep health in metadata mode.
-            rm -f "$backup_root"/base/*.meta.json
-            printf '%s\n' "$(date --iso-8601=seconds)" | ${durable} write "$backup_root/LAST_SUCCESS"
-            ${lib.optionalString gapTracking "${pgBackupTool} clear-gap --root \"$backup_root\" --started-ms \"$started_ms\""}
-          ''
-        }
-        # The separate prune service uses the same lock; retention runs next time.
-      '';
     };
 
     systemd.services."pg-backup-health${suffix}" = mkIf healthCfg.enable {
@@ -484,10 +504,46 @@
       };
     };
   };
+  targetSources =
+    # Backwards-compatible singleton target. Existing deployments retain
+    # the historical pg-* unit names and backup directory layout.
+    lib.optionalAttrs (cfg.source.hostName != null) {
+      legacy = {
+        inherit (cfg) source;
+        ts = cfg.targetSettings;
+        backupRoot = backupRootFor cfg.source;
+      };
+    }
+    // lib.mapAttrs (name: t: {
+      inherit (t) source;
+      ts = t;
+      backupRoot = "${cfg.targetSettings.backupDir}/${name}";
+    })
+    cfg.targets;
+  builtTargets = lib.mapAttrs mkTarget targetSources;
+  prefixAssertion = tag: prefix: let
+    executable = lib.head prefix;
+    validExecutable =
+      !(builtins.elem (baseNameOf executable) ["." ".."])
+      && (
+        builtins.match "/[A-Za-z0-9._/@:+-]*[A-Za-z0-9._@:+-]" executable
+        != null
+        || builtins.match "[a-zA-Z0-9_.][a-zA-Z0-9_.+-]*" executable != null
+      );
+  in {
+    assertion = (prefix == [] || validExecutable) && lib.all (word: !lib.hasInfix "\n" word && !lib.hasInfix "\r" word) prefix;
+    message = "services.harbor-db.pgBackup baseBackup.execPrefix requires an absolute path or simple executable name, and no line breaks in any word.${tag}";
+  };
 in {
   imports = [./storage-package-argument.nix];
   options.services.harbor-db.pgBackup = {
     enable = mkEnableOption "PostgreSQL backup replication (source or target)";
+
+    baseBackupBody = mkOption {
+      type = types.nullOr types.package;
+      readOnly = true;
+      description = "Standalone legacy base backup executable, or null when there is no legacy base backup service.";
+    };
 
     role = mkOption {
       type = types.enum ["source" "target" "both"];
@@ -582,7 +638,11 @@ in {
         The single-source `source`/`targetSettings` options keep describing the
         unsuffixed legacy target. Requires role target or both.
       '';
-      type = types.attrsOf (types.submodule {
+      type = types.attrsOf (types.submodule ({
+        name,
+        config,
+        ...
+      }: {
         options =
           targetOptions
           // {
@@ -599,27 +659,15 @@ in {
               };
             };
           };
-      });
+        config.baseBackup.body =
+          if cfg.enable && targetRole && config.baseBackup.enable
+          then builtTargets.${name}.body
+          else null;
+      }));
     };
   };
 
-  config = mkIf cfg.enable (let
-    targetSources =
-      # Backwards-compatible singleton target. Existing deployments retain
-      # the historical pg-* unit names and backup directory layout.
-      lib.optionalAttrs (cfg.source.hostName != null) {
-        legacy = {
-          inherit (cfg) source;
-          ts = cfg.targetSettings;
-          backupRoot = backupRootFor cfg.source;
-        };
-      }
-      // lib.mapAttrs (name: t: {
-        inherit (t) source;
-        ts = t;
-        backupRoot = "${cfg.targetSettings.backupDir}/${name}";
-      })
-      cfg.targets;
+  config = let
     targetAssertions = lib.concatLists (lib.mapAttrsToList (name: target: let
         inherit (target) ts;
         tag = lib.optionalString (name != "legacy") " [target ${name}]";
@@ -690,6 +738,18 @@ in {
   in
     mkMerge [
       {
+        services.harbor-db.pgBackup = {
+          baseBackupBody =
+            if cfg.enable && targetRole && cfg.source.hostName != null && cfg.targetSettings.baseBackup.enable
+            then builtTargets.legacy.body
+            else null;
+          targetSettings.baseBackup.body = cfg.baseBackupBody;
+        };
+        assertions =
+          [(prefixAssertion "" cfg.targetSettings.baseBackup.execPrefix)]
+          ++ lib.mapAttrsToList (name: t: prefixAssertion " [target ${name}]" t.baseBackup.execPrefix) cfg.targets;
+      }
+      (mkIf cfg.enable {
         assertions =
           lib.optionals targetRole targetAssertions
           ++ [
@@ -809,12 +869,12 @@ in {
           ];
         # The generated receiver uses this physical-only SCRAM role while the
         # writer fence rejects every SQL client. Preserve configured peer roles.
-        services.harbor-db = lib.optionalAttrs (options.services.harbor-db ? postgresql) {
+        services.harbor-db = lib.optionalAttrs (lib.hasAttrByPath ["services" "harbor-db" "postgresql" "writerFence"] options) {
           postgresql.writerFence.replicationRoles = lib.mkIf (sourceRole && cfg.targetSettings.sourceLocalRecovery.enable) (lib.mkAfter ["replicator"]);
         };
-      }
+      })
 
-      (mkIf sourceRole {
+      (mkIf (cfg.enable && sourceRole) {
         services.postgresql = {
           settings = mkMerge [
             (lib.optionalAttrs (listenAddresses != []) {
@@ -857,11 +917,11 @@ in {
         );
       })
 
-      (mkIf (sourceRole && cfg.sourceSettings.firewallInterface != null && cfg.sourceSettings.allowedReplicationHosts != []) {
+      (mkIf (cfg.enable && sourceRole && cfg.sourceSettings.firewallInterface != null && cfg.sourceSettings.allowedReplicationHosts != []) {
         networking.firewall.interfaces."${cfg.sourceSettings.firewallInterface}".allowedTCPPorts = [cfg.source.port];
       })
 
-      (mkIf targetRole
+      (mkIf (cfg.enable && targetRole)
         (mkMerge [
           {
             # Preserve the legacy same-secret fallback for deployments that
@@ -871,7 +931,7 @@ in {
           # Target names come from config, so they may only appear below the
           # option paths, never in the module's own merge structure.
           (let
-            built = lib.attrValues (lib.mapAttrs mkTarget targetSources);
+            built = lib.attrValues builtTargets;
           in {
             systemd = {
               tmpfiles.rules = lib.concatMap (t: t.systemd.tmpfiles.rules) built;
@@ -880,5 +940,5 @@ in {
             };
           })
         ]))
-    ]);
+    ];
 }

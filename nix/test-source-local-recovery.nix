@@ -77,7 +77,11 @@ in
           chmod 0400 /run/disposable-secret
         '';
       };
-      systemd.tmpfiles.rules = ["d /srv/pgbackup 0700 postgres postgres -"];
+      systemd.tmpfiles.rules = [
+        "d /srv/pgbackup 0700 postgres postgres -"
+        "d /srv/test-tablespace 0700 postgres postgres -"
+      ];
+      systemd.services.postgresql.serviceConfig.ReadWritePaths = ["/srv/test-tablespace"];
       systemd.services.pg-receivewal.wantedBy = lib.mkForce [];
       systemd.timers.pg-basebackup.enable = lib.mkForce false;
     };
@@ -92,7 +96,14 @@ in
     testScript = {nodes, ...}:
       bridge.script {
         fixture = "${testPackage}/bin/harbor-db-source-local-recovery-fixture";
-        arguments = ["--config" (builtins.toJSON (fixtureConfig // {replication_roles = nodes.primary.services.harbor-db.postgresql.writerFence.replicationRoles;}))];
+        arguments = [
+          "--config"
+          (builtins.toJSON (fixtureConfig
+            // {
+              replication_roles = nodes.primary.services.harbor-db.postgresql.writerFence.replicationRoles;
+              base_backup_body = toString nodes.primary.services.harbor-db.pgBackup.baseBackupBody;
+            }))
+        ];
         nodes = ["primary" "certifier"];
         artifact = "source-local-recovery-acceptance.json";
       };
