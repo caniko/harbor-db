@@ -1230,6 +1230,68 @@ fn missing_evidence_and_missing_lease_anchors_are_never_created_by_admission() {
 }
 
 #[test]
+fn inspect_backup_cli_preflight_checks_selection_without_running_verifier() {
+    let _workers = WORKERS.lock().unwrap();
+    let mut f = Fixture::new();
+    let config = f.p("config.json");
+    durable::write_json(&config, &f.config).unwrap();
+    let inspect = |flags: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_harbor-db-postgres"))
+            .arg("--config")
+            .arg(&config)
+            .arg("inspect-backup")
+            .args(flags)
+            .output()
+            .unwrap()
+    };
+
+    let marker = f.p("backup/LAST_SUCCESS");
+    fs::write(&marker, "").unwrap();
+    for flags in [&["--preflight"][..], &[]] {
+        let output = inspect(flags);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("invalid completed backup identifier"),
+            "{stderr}"
+        );
+    }
+    assert!(!f.p("verify.log").exists());
+    fs::write(marker, "base-1\n").unwrap();
+
+    for (flags, status) in [
+        (&["--preflight"][..], "preflight-ready"),
+        (&[][..], "ready"),
+    ] {
+        let output = inspect(flags);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["status"], status);
+        if status == "preflight-ready" {
+            assert!(!f.p("verify.log").exists());
+        }
+    }
+    assert_eq!(fs::read_to_string(f.p("verify.log")).unwrap(), "verify\n");
+
+    f.config["recovery"]["verify_timeout_seconds"] = json!(0);
+    durable::write_json(&config, &f.config).unwrap();
+    for flags in [&["--preflight"][..], &[]] {
+        let output = inspect(flags);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("invalid backup verification timeout"),
+            "{stderr}"
+        );
+    }
+    assert_eq!(fs::read_to_string(f.p("verify.log")).unwrap(), "verify\n");
+}
+
+#[test]
 fn preflight_defers_byte_verification_but_requires_fresh_bound_receipts() {
     use std::os::unix::fs::MetadataExt;
     let _workers = WORKERS.lock().unwrap();

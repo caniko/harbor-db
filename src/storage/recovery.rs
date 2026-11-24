@@ -385,8 +385,8 @@ fn verify_backup(
     directory: &Path,
     leases: &[RawFd],
     checksums: bool,
+    timeout: Duration,
 ) -> Result<()> {
-    let timeout = verify_timeout(config)?;
     let mut argv = vec![
         path(config, "package")?
             .join("bin/pg_verifybackup")
@@ -795,7 +795,7 @@ pub fn snapshot_leased(
         port,
         &leases,
     )?;
-    verify_backup(config, &directory, &leases, true)?;
+    verify_backup(config, &directory, &leases, true, verify_timeout(config)?)?;
     let mut result = result(&binding)?;
     result["completed_at"] = json!(now);
     result["record_contract_sha256"] = json!(contract(settings)?);
@@ -968,7 +968,13 @@ pub fn certify(
     machine_acceptance(&source, &json!(executor_machine), off_host)?;
     // Off host this is the end-to-end check of the transported bytes against
     // the primary's manifest; a local drill reads the snapshot's own backup.
-    verify_backup(config, &directory, &leases, off_host)?;
+    verify_backup(
+        config,
+        &directory,
+        &leases,
+        off_host,
+        verify_timeout(config)?,
+    )?;
     let observed =
         verify_restored_endpoint(config, settings, &binding, &restored, socket, port, &leases)?;
     let actual = records(config, settings, socket, port, &leases)?;
@@ -1182,7 +1188,7 @@ fn check_evidence(
     }
     // Receipts are cheap: a missing one fails before the backup is re-read.
     if verify_contents {
-        verify_backup(config, directory, leases, false)?;
+        verify_backup(config, directory, leases, false, verify_timeout(config)?)?;
     }
     Ok(result)
 }
@@ -1258,9 +1264,10 @@ fn admission_with_outer(
         )?;
         (result, Some(lease))
     } else {
+        let timeout = verify_timeout(config)?;
         // No certified restore proves these bytes, so check data-file checksums.
         if verify_contents {
-            verify_backup(config, &directory, &leases, true)?;
+            verify_backup(config, &directory, &leases, true, timeout)?;
         }
         let mut result = result(&binding)?;
         result["status"] = json!(if verify_contents {
@@ -1513,7 +1520,7 @@ fn verify_prepared_snapshot(
             "record snapshot writer fence differs from the retained window",
         ));
     }
-    verify_backup(config, &directory, &held, false)
+    verify_backup(config, &directory, &held, false, verify_timeout(config)?)
 }
 
 fn accept_prepared_restore(

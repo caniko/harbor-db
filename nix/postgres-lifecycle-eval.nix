@@ -571,6 +571,49 @@ in
         message = "Recovery admission must be read-only, precede adoption and never start a boot-time drill.";
       }
       {
+        name = "routine-recovery-preflight-only-on-dry-activate";
+        assertion = let
+          config = withoutAdoption.config;
+          hook = config.system.preSwitchChecks."00-harbor-db-postgresql-recovery";
+          exec = config.systemd.services.harbor-db-postgresql-recovery-check.serviceConfig.ExecStart;
+          command = "${pkgs.util-linux}/bin/runuser -u postgres -- ${exec}";
+        in
+          lib.hasSuffix " inspect-backup" exec
+          && !lib.hasInfix "inspect-recovery" hook
+          && hook
+          == ''
+            case "''${2-}" in
+              dry-activate)
+                ${command} --preflight
+                ;;
+              *)
+                ${command}
+                ;;
+            esac
+          '';
+        message = "Routine dry activation must run backup preflight only; every other action and the standalone service must verify backup contents.";
+      }
+      {
+        name = "rollout-without-adoption-verifies-backup";
+        assertion = let
+          config =
+            (withRollout.extendModules {
+              modules = [
+                {
+                  services.harbor-db.postgresql = {
+                    switchAdoption = lib.mkForce null;
+                    rollout.maintenance = "/srv/harbor-db/maintenance config.json";
+                  };
+                }
+              ];
+            }).config;
+          hook = config.system.preSwitchChecks."00-harbor-db-postgresql-recovery";
+        in
+          lib.hasInfix "--config '/srv/harbor-db/maintenance config.json' inspect-backup" hook
+          && !lib.hasInfix "--preflight" hook;
+        message = "Rollout without switch adoption must verify backup contents on every activation action and quote its maintenance manifest path.";
+      }
+      {
         name = "no-implicit-switch-adoption";
         assertion = !(withoutAdoption.config.system.preSwitchChecks ? harbor-db-postgresql-adoption);
         message = "A guarded cluster must not gain an implicit switch-time adoption request.";
