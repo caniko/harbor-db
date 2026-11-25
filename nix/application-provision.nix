@@ -47,7 +47,7 @@
       };
     });
   command = name: policy: "${package}/bin/harbor-db-provision --config ${manifest name policy}";
-  fenceEnabled = options.services.harbor-db ? postgresql && config.services.harbor-db.postgresql.enable;
+  fenceEnabled = lib.hasAttrByPath ["services" "harbor-db" "postgresql" "enable"] options && config.services.harbor-db.postgresql.enable;
   gate = lib.optionalAttrs fenceEnabled {
     ConditionPathExists = ["!${config.services.harbor-db.postgresql.stateDir}/writer-fence.json"];
   };

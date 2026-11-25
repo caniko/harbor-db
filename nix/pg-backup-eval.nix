@@ -1,10 +1,15 @@
 {pkgs}: let
   inherit (pkgs) lib;
   inherit (import ./eval-checks.nix {inherit pkgs;}) mkEvalCheck;
+  backupModule = {
+    imports = [./pg-backup.nix];
+    # This check inspects the executable files; the VM checks run the real tools.
+    _module.args.harborDbStoragePackage = pkgs.emptyDirectory;
+  };
   eval = import (pkgs.path + "/nixos/lib/eval-config.nix") {
     system = "x86_64-linux";
     modules = [
-      ./pg-backup.nix
+      backupModule
       {
         system.stateVersion = "24.11";
         services.harbor-db.pgBackup = {
@@ -19,7 +24,7 @@
   sourceEval = import (pkgs.path + "/nixos/lib/eval-config.nix") {
     system = "x86_64-linux";
     modules = [
-      ./pg-backup.nix
+      backupModule
       {
         system.stateVersion = "24.11";
         services.postgresql.enable = true;
@@ -37,12 +42,13 @@
     ];
   };
   receive = eval.config.systemd.services.pg-receivewal.serviceConfig;
-  base = eval.config.systemd.services.pg-basebackup.script;
+  body = eval.config.services.harbor-db.pgBackup.baseBackupBody;
+  base = body.text;
   sourcePostgresql = sourceEval.config.services.postgresql;
   localEval = import "${pkgs.path}/nixos/lib/eval-config.nix" {
     system = "x86_64-linux";
     modules = [
-      ./pg-backup.nix
+      backupModule
       {
         system.stateVersion = "24.11";
         services.postgresql.enable = true;
@@ -58,7 +64,7 @@
       }
     ];
   };
-  localBackup = localEval.config.systemd.services.pg-basebackup.script;
+  localBackup = localEval.config.services.harbor-db.pgBackup.baseBackupBody.text;
   ipv6Local =
     (localEval.extendModules {
       modules = [{services.harbor-db.pgBackup.source.hostName = lib.mkForce "::1";}];
@@ -104,40 +110,40 @@
         }
       ];
     }).config;
-  recoveryReady =
-    (localEval.extendModules {
-      modules = [
-        {
-          services.harbor-db.pgBackup.targetSettings = {
-            health.enable = true;
-            baseBackup = {
-              recoveryMeta = true;
-              redundantWithinSeconds = 518400;
-              admission = {
-                minRamBytes = 1073741824;
-                minSwapBytes = 536870912;
-              };
+  recoveryReadyEval = localEval.extendModules {
+    modules = [
+      {
+        services.harbor-db.pgBackup.targetSettings = {
+          health.enable = true;
+          baseBackup = {
+            recoveryMeta = true;
+            redundantWithinSeconds = 518400;
+            admission = {
+              minRamBytes = 1073741824;
+              minSwapBytes = 536870912;
             };
           };
-        }
-      ];
-    }).config;
+        };
+      }
+    ];
+  };
+  recoveryReady = recoveryReadyEval.config;
   named = modules:
     (import (pkgs.path + "/nixos/lib/eval-config.nix") {
       system = "x86_64-linux";
       modules =
         [
-          ./pg-backup.nix
+          backupModule
           {
             system.stateVersion = "24.11";
             services.harbor-db.pgBackup = {
               enable = true;
               role = "target";
               targetSettings = {
-                backupDir = "/data/scratch/pgbackup";
+                backupDir = "/srv/pg-backup";
                 replicatorPasswordFile = "/run/secrets/pg-replicator-password";
               };
-              targets.thething = {
+              targets.example-host = {
                 source.hostName = "10.0.0.2";
                 retain = {
                   baseBackupDays = 7;
@@ -154,7 +160,14 @@
         ]
         ++ modules;
     }).config;
-  thething = named [];
+  namedConfig = named [];
+  execPrefix = ["${pkgs.coreutils}/bin/env" "two words" ''a"b\c'd'' "%h" ";" "$FOO" "&&" ""];
+  expectedPrefix = ''"${pkgs.coreutils}/bin/env" "two words" "a\"b\\c'd" "%%h" ";" "$$FOO" "&&" ""'';
+  prefixed =
+    (localEval.extendModules {
+      modules = [{services.harbor-db.pgBackup.targetSettings.baseBackup.execPrefix = execPrefix;}];
+    }).config;
+  prefixedNamed = named [{services.harbor-db.pgBackup.targets.example-host.baseBackup.execPrefix = execPrefix;}];
   walSizeAccepted = size: let
     selected = eval.extendModules {
       modules = [{services.harbor-db.pgBackup.targetSettings.walSegmentBytes = lib.mkForce size;}];
@@ -165,7 +178,8 @@
     (localEval.extendModules {
       modules = [{services.postgresql.dataDir = lib.mkForce "/build/guard-source/cluster";}];
     }).config;
-  tablespaceGuard = lib.head tablespaceEval.systemd.services.pg-basebackup.serviceConfig.ExecStartPre;
+  tablespaceGuard = lib.head tablespaceEval.systemd.services.pg-receivewal.serviceConfig.ExecStartPre;
+  guardBody = tablespaceEval.services.harbor-db.pgBackup.baseBackupBody;
 in
   mkEvalCheck {
     name = "harbor-db-pg-backup-eval";
@@ -173,6 +187,9 @@ in
     nativeBuildInputs = [pkgs.postgresql_18 pkgs.coreutils pkgs.findutils];
     runtimeScript = ''
       set -euo pipefail
+      for body in ${body} ${guardBody} ${prefixedNamed.services.harbor-db.pgBackup.targets.example-host.baseBackup.body}; do
+        test -f "$body" && test ! -L "$body" && test -x "$body" || exit 1
+      done
       unset PGHOST PGPORT PGUSER PGDATABASE PGSERVICE PGOPTIONS PGPASSFILE
       root=/build/guard-source
       mkdir -p "$root/socket" "$root/tablespace"
@@ -217,6 +234,96 @@ in
       printf '%s\n' 'real-unmapped-basebackup-rejected; generated-guard-rejected; primary-records-preserved' > "$out/tablespace-admission"
     '';
     assertions = [
+      {
+        name = "base-backup-default-exec-start-is-the-exported-body";
+        message = "The legacy service directly executes its standalone package without a pre-start or shell script.";
+        assertion = let
+          cfg = eval.config.services.harbor-db.pgBackup;
+          unit = eval.config.systemd.services.pg-basebackup;
+        in
+          cfg.targetSettings.baseBackup.execPrefix
+          == []
+          && cfg.targetSettings.baseBackup.body == body
+          && body.name == "pg-basebackup-body"
+          && unit.serviceConfig.ExecStart == ''"${body}"''
+          && (unit.serviceConfig.ExecStartPre or []) == []
+          && unit.script == ""
+          && unit.serviceConfig.ExecCondition == [];
+      }
+      {
+        name = "base-backup-prefix-preserves-literal-argv";
+        message = "A legacy or named prefix must preserve literal argv without wrapping the admission or redundancy checks.";
+        assertion = let
+          cfg = prefixed.services.harbor-db.pgBackup;
+          namedBody = prefixedNamed.services.harbor-db.pgBackup.targets.example-host.baseBackup.body;
+          prefixedReady =
+            (recoveryReadyEval.extendModules {
+              modules = [{services.harbor-db.pgBackup.targetSettings.baseBackup = {inherit execPrefix;};}];
+            }).config.systemd.services.pg-basebackup.serviceConfig;
+        in
+          cfg.baseBackupBody
+          == localEval.config.services.harbor-db.pgBackup.baseBackupBody
+          && prefixed.systemd.services.pg-basebackup.serviceConfig.ExecStart == ''${expectedPrefix} "${cfg.baseBackupBody}"''
+          && namedBody.name == "pg-basebackup-body-example-host"
+          && prefixedNamed.systemd.services.pg-basebackup-example-host.serviceConfig.ExecStart == ''${expectedPrefix} "${namedBody}"''
+          && prefixedReady.ExecCondition == recoveryReady.systemd.services.pg-basebackup.serviceConfig.ExecCondition;
+      }
+      {
+        name = "base-backup-disabled-or-absent-exports-null";
+        message = "Inactive and absent legacy and named target bodies must evaluate to null.";
+        assertion = let
+          legacyOnlyWal = (eval.extendModules {modules = [{services.harbor-db.pgBackup.targetSettings.baseBackup.enable = false;}];}).config.services.harbor-db.pgBackup;
+          namedDisabled = named [{services.harbor-db.pgBackup.targets.example-host.baseBackup.enable = false;}];
+          moduleDisabled = named [{services.harbor-db.pgBackup.enable = lib.mkForce false;}];
+          disabledNoRole =
+            (import (pkgs.path + "/nixos/lib/eval-config.nix") {
+              system = "x86_64-linux";
+              modules = [backupModule];
+            }).config.services.harbor-db.pgBackup;
+        in
+          lib.all (cfg: cfg.baseBackupBody == null && cfg.targetSettings.baseBackup.body == null) [
+            legacyOnlyWal
+            sourceEval.config.services.harbor-db.pgBackup
+            namedConfig.services.harbor-db.pgBackup
+            moduleDisabled.services.harbor-db.pgBackup
+            disabledNoRole
+          ]
+          && namedDisabled.services.harbor-db.pgBackup.targets.example-host.baseBackup.body == null
+          && !(namedDisabled.systemd.services ? pg-basebackup-example-host)
+          && moduleDisabled.services.harbor-db.pgBackup.targets.example-host.baseBackup.body == null;
+      }
+      {
+        name = "base-backup-prefix-rejects-invalid-executable-and-line-breaks";
+        message = "The prefix must name a literal executable and preserve every word on one systemd directive.";
+        assertion = let
+          valid = config: lib.all (a: a.assertion || !lib.hasInfix "baseBackup.execPrefix" a.message) config.assertions;
+          accepts = prefix:
+            valid (eval.extendModules {modules = [{services.harbor-db.pgBackup.targetSettings.baseBackup.execPrefix = prefix;}];}).config
+            || valid (named [{services.harbor-db.pgBackup.targets.example-host.baseBackup.execPrefix = prefix;}]);
+        in
+          valid prefixed
+          && valid prefixedNamed
+          && lib.all (prefix: !accepts prefix) [
+            ["" "arg"]
+            [" "]
+            ["relative/executable"]
+            ["/"]
+            ["/bin/"]
+            ["/bin/."]
+            ["/bin/.."]
+            ["!/bin/example"]
+            ["bad\nexe"]
+            [''/bin/a"b'']
+            ["/bin/a'b"]
+            [''/bin/a\b'']
+            ["/bin/$exe"]
+            ["/bin/%h"]
+            ["/bin/two words"]
+            ["/bin/a\tb"]
+            ["/bin/example" "bad\narg"]
+            ["/bin/example" "bad\rarg"]
+          ];
+      }
       {
         name = "source-roles-require-effective-replication-capacity";
         message = "Every local source needs nonzero effective WAL sender and slot capacity; source-local minima and target-only independence are retained.";
@@ -422,10 +529,10 @@ in
         name = "source-local-tablespaces-reject-before-replication";
         message = "Source setup, receiver and basebackup invoke the same tablespace admission before any replication connection; independent targets have no local-primary guard.";
         assertion =
-          lib.head tablespaceEval.systemd.services.pg-receivewal.serviceConfig.ExecStartPre
-          == tablespaceGuard
-          && lib.hasInfix (builtins.unsafeDiscardStringContext tablespaceGuard) tablespaceEval.systemd.services.postgresql-setup.script
-          && eval.config.systemd.services.pg-basebackup.serviceConfig.ExecStartPre == [];
+          lib.hasInfix (builtins.unsafeDiscardStringContext tablespaceGuard) tablespaceEval.systemd.services.postgresql-setup.script
+          && lib.hasInfix (builtins.unsafeDiscardStringContext "${tablespaceGuard}\n") guardBody.text
+          && (tablespaceEval.systemd.services.pg-basebackup.serviceConfig.ExecStartPre or []) == []
+          && !lib.hasInfix "pg-backup-source-local-tablespaces" base;
       }
       {
         name = "source-local-recovery-requires-replication-capacity";
@@ -652,7 +759,7 @@ in
       {
         name = "recovery-ready-backup-opt-in";
         assertion = let
-          script = recoveryReady.systemd.services.pg-basebackup.script;
+          script = recoveryReady.services.harbor-db.pgBackup.baseBackupBody.text;
           units = recoveryReady.systemd.services;
         in
           lib.hasInfix "harbor-db-pg-backup finalize" script
@@ -699,23 +806,23 @@ in
       {
         name = "named-targets-use-suffixed-units-and-private-roots";
         assertion = let
-          services = thething.systemd.services;
-          receive = services.pg-receivewal-thething.serviceConfig;
+          services = namedConfig.systemd.services;
+          receive = services.pg-receivewal-example-host.serviceConfig;
           both = named [{services.harbor-db.pgBackup.source.hostName = "10.0.0.9";}];
         in
-          lib.hasInfix "/data/scratch/pgbackup/thething" services.pg-basebackup-thething.script
-          && services ? pg-backup-prune-thething
-          && thething.systemd.timers ? pg-basebackup-thething
+          lib.hasInfix "/srv/pg-backup/example-host" namedConfig.services.harbor-db.pgBackup.targets.example-host.baseBackup.body.text
+          && services ? pg-backup-prune-example-host
+          && namedConfig.systemd.timers ? pg-basebackup-example-host
           && !(services ? pg-receivewal)
           && !(services ? pg-basebackup)
           && lib.any (c: lib.hasPrefix "-" c && lib.hasInfix "/timeout 10s " c && lib.hasInfix "--create-slot --if-not-exists" c) (lib.toList receive.ExecStartPre)
           && lib.hasInfix "--status-interval=1" receive.ExecStart
           && lib.hasInfix "--status-interval=1 " (lib.head (lib.toList receive.ExecStartPre))
-          && lib.elem "d /data/scratch/pgbackup/thething 0750 postgres postgres -" thething.systemd.tmpfiles.rules
+          && lib.elem "d /srv/pg-backup/example-host 0750 postgres postgres -" namedConfig.systemd.tmpfiles.rules
           && both.systemd.services ? pg-receivewal
-          && both.systemd.services ? pg-receivewal-thething
-          && lib.hasInfix "retain_days=7" services.pg-backup-prune-thething.script
-          && lib.hasInfix "wal_retain=8" services.pg-backup-prune-thething.script;
+          && both.systemd.services ? pg-receivewal-example-host
+          && lib.hasInfix "retain_days=7" services.pg-backup-prune-example-host.script
+          && lib.hasInfix "wal_retain=8" services.pg-backup-prune-example-host.script;
         message = "Named targets must get -<name> units, a backupDir/<name> root, bounded best-effort slot creation and a configurable status interval, alongside the legacy target.";
       }
       {
@@ -723,7 +830,7 @@ in
         assertion = let
           selected = named [
             {
-              services.harbor-db.pgBackup.targets.thething = {
+              services.harbor-db.pgBackup.targets.example-host = {
                 health.enable = true;
                 baseBackup = {
                   recoveryMeta = true;
@@ -733,15 +840,15 @@ in
               };
             }
           ];
-          unsupported = named [{services.harbor-db.pgBackup.targets.thething.baseBackup.recoveryMeta = true;}];
+          unsupported = named [{services.harbor-db.pgBackup.targets.example-host.baseBackup.recoveryMeta = true;}];
           failing = c: lib.any (a: !a.assertion && lib.hasInfix "services.harbor-db.pgBackup" a.message) c.assertions;
         in
-          lib.hasInfix "harbor-db-pg-backup finalize" selected.systemd.services.pg-basebackup-thething.script
-          && lib.hasInfix "/data/scratch/pgbackup/thething" (builtins.elemAt (lib.toList selected.systemd.services.pg-backup-health-thething.serviceConfig.ExecStart) 0)
-          && lib.any (c: lib.hasInfix "mark-gap" c) (lib.toList selected.systemd.services.pg-receivewal-thething.serviceConfig.ExecStartPre)
+          lib.hasInfix "harbor-db-pg-backup finalize" selected.services.harbor-db.pgBackup.targets.example-host.baseBackup.body.text
+          && lib.hasInfix "/srv/pg-backup/example-host" (builtins.elemAt (lib.toList selected.systemd.services.pg-backup-health-example-host.serviceConfig.ExecStart) 0)
+          && lib.any (c: lib.hasInfix "mark-gap" c) (lib.toList selected.systemd.services.pg-receivewal-example-host.serviceConfig.ExecStartPre)
           && !failing selected
           && failing unsupported
-          && !(failing thething)
+          && !(failing namedConfig)
           && failing (named [{services.harbor-db.pgBackup.targets.legacy.source.hostName = "10.0.0.3";}]);
         message = "recoveryMeta, gap tracking, health and admission must work per named target, require an explicit SQL connection remotely, and reserve the legacy name.";
       }
@@ -784,7 +891,7 @@ in
                   };
                 }
               ];
-            }).config.systemd.services.pg-basebackup.script;
+            }).config.services.harbor-db.pgBackup.baseBackupBody.text;
         in
           # The conninfo is shell-escaped in the script, so match its parts.
           lib.hasInfix "/run/postgresql" script && lib.hasInfix "port=55432 user=postgres" script;
@@ -809,15 +916,15 @@ in
           failing = text: modules:
             lib.any (a: !a.assertion && lib.hasInfix text a.message) (named modules).assertions;
           meta = {
-            services.harbor-db.pgBackup.targets.thething.baseBackup = {
+            services.harbor-db.pgBackup.targets.example-host.baseBackup = {
               recoveryMeta = true;
               sqlConninfo = "host=10.0.0.2 user=marker";
             };
           };
         in
           !failing "requires receiveWal.enable" [meta]
-          && failing "requires receiveWal.enable" [meta {services.harbor-db.pgBackup.targets.thething.receiveWal.enable = false;}]
-          && failing "PostgreSQL 15 or newer" [meta {services.harbor-db.pgBackup.targets.thething.package = pkgs.postgresql_14;}]
+          && failing "requires receiveWal.enable" [meta {services.harbor-db.pgBackup.targets.example-host.receiveWal.enable = false;}]
+          && failing "PostgreSQL 15 or newer" [meta {services.harbor-db.pgBackup.targets.example-host.package = pkgs.postgresql_14;}]
           && !failing "PostgreSQL 15 or newer" [meta];
         message = "recoveryMeta needs a receiver and a PostgreSQL 15+ package.";
       }
@@ -826,7 +933,7 @@ in
         assertion = let
           failing = c: lib.any (a: !a.assertion && lib.hasInfix "backup roots collide" a.message) c.assertions;
         in
-          failing (named [{services.harbor-db.pgBackup.source.hostName = "thething";}])
+          failing (named [{services.harbor-db.pgBackup.source.hostName = "example-host";}])
           && !failing (named [{services.harbor-db.pgBackup.source.hostName = "10.0.0.9";}]);
         message = "A legacy host-named root must not equal a named target's root.";
       }
@@ -835,7 +942,7 @@ in
         assertion = let
           failing = conninfo:
             lib.any (a: !a.assertion && lib.hasInfix "must not embed a password" a.message)
-            (named [{services.harbor-db.pgBackup.targets.thething.baseBackup.sqlConninfo = conninfo;}]).assertions;
+            (named [{services.harbor-db.pgBackup.targets.example-host.baseBackup.sqlConninfo = conninfo;}]).assertions;
         in
           failing "host=h user=u password=secret" && failing "postgresql://u@h/db?%70assword=x" && failing "postgresql://u:secret@h/postgres" && !failing "postgresql://u@h/postgres" && !failing "host=h user=u passfile=/run/secrets/pgpass";
         message = "Passwords must not be rendered into the unit script.";
@@ -880,10 +987,10 @@ in
                   };
                 }
               ];
-            }).config.systemd.services.pg-basebackup.script;
+            }).config.services.harbor-db.pgBackup.baseBackupBody.text;
         in
           failing (named [{services.harbor-db.pgBackup.targetSettings.backupDir = lib.mkForce "/srv/my backups";}])
-          && !failing thething
+          && !failing namedConfig
           && lib.hasInfix "/run/custom" sock
           && !lib.hasInfix "/tmp" sock;
         message = "backupDir must be systemd-safe and the marker connection must use the configured socket directory.";

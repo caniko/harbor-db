@@ -37,6 +37,7 @@ struct Config {
     shell: String,
     tool_roots: Vec<String>,
     replication_roles: Vec<String>,
+    base_backup_body: String,
 }
 fn require(ok: bool, message: impl Into<String>) -> Result<()> {
     if ok {
@@ -189,6 +190,7 @@ fn run(args: Args) -> Result<()> {
         &c.postgres_package,
         &c.coreutils_package,
         &c.shell,
+        &c.base_backup_body,
     ]) {
         require(
             p.starts_with("/nix/store/")
@@ -272,6 +274,41 @@ fn run(args: Args) -> Result<()> {
     )?;
     g.shell("primary", format!("test \"$(stat -c '%U:%a' {CONFIG})\" = root:644; install -d -m 0700 -o postgres -g postgres /var/lib/demo-primary-authority {ROOT}/evidence; systemctl start pg-receivewal.service"), true, "private-authority-and-generated-receiver")?;
     g.wait("primary", "systemctl is-active pg-receivewal.service; test \"$(runuser -u postgres -- psql -Xw -Atqc \"SELECT count(*) FROM pg_stat_replication WHERE usename='replicator' AND client_addr='127.0.0.1'\")\" = 1", "actual-loopback-receiver-streaming")?;
+    g.shell(
+        "primary",
+        "install -d -m 0700 -o postgres -g postgres /srv/test-tablespace",
+        true,
+        "disposable-tablespace-directory",
+    )?;
+    g.sql(
+        "CREATE TABLESPACE test_external LOCATION '/srv/test-tablespace'",
+        "external-tablespace-created",
+    )?;
+    let direct_backup = format!(
+        "runuser -u postgres -- env PATH= {}",
+        q(&c.base_backup_body)
+    );
+    let rejected = g.shell(
+        "primary",
+        format!("flock {ROOT}/locks/mutate {direct_backup} 2>&1"),
+        false,
+        "standalone-basebackup-rejects-external-tablespace",
+    )?;
+    g.check(
+        rejected
+            == "pg-backup: source-local recovery requires a primary without external tablespaces",
+        "standalone-basebackup-reports-tablespace-guard",
+    )?;
+    g.shell(
+        "primary",
+        format!("test ! -e {ROOT}/BACKUP_LOCK; test -z \"$(ls -A {ROOT}/base)\""),
+        true,
+        "standalone-basebackup-rejection-precedes-mutation",
+    )?;
+    g.sql(
+        "DROP TABLESPACE test_external",
+        "external-tablespace-removed",
+    )?;
     g.shell("primary", "systemctl start pg-basebackup.service; test \"$(systemctl show pg-basebackup.service -p Result --value)\" = success; test \"$(systemctl show pg-basebackup.service -p ActiveState --value)\" = inactive", true, "generated-basebackup-completed")?;
     let backup = g.shell(
         "primary",
@@ -298,6 +335,12 @@ fn run(args: Args) -> Result<()> {
         ),
         true,
         "actual-backup-manifest-verifies",
+    )?;
+    g.shell(
+        "primary",
+        direct_backup,
+        true,
+        "standalone-basebackup-completed-with-empty-path",
     )?;
     let marker_script = format!(
         "stat -c '%d:%i' {ROOT}/LAST_SUCCESS; sha256sum {ROOT}/LAST_SUCCESS; cat {ROOT}/LAST_SUCCESS"

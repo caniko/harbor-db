@@ -682,6 +682,31 @@ evidence = "The filesystem root is already rejected by the global corpus/authori
 
 [[inventories]]
 origin = "rust"
+id_prefix = "native.postgres_observe."
+selector_prefix = ""
+source = "tests/postgres_observe.rs"
+argv_prefix = ["cargo", "test", "--locked", "--test", "postgres_observe"]
+argv_suffix = ["--", "--exact"]
+profile = "fast"
+maturity = "crystallized"
+selectors = [
+  "long_transaction_threshold_and_label_override",
+  "explicit_commit_is_active_and_on_cpu",
+  "idle_transaction_states_and_boundary",
+  "aborted_idle_episodes_with_no_xact_start_are_distinct",
+  "unknown_samples_do_not_resolve_prior_findings",
+  "disabled_worker_activity_does_not_resolve_prior_findings",
+  "same_epoch_backwards_clock_is_unknown",
+  "lock_streaks_and_blocking_heads",
+  "deep_and_wide_lock_evidence_is_bounded",
+  "xmin_streaks_reset_when_advancing_or_cleared",
+  "transaction_identity_and_restart_split_findings_and_streaks",
+  "cli_uses_a_literal_database_and_accepts_previous_report_or_state",
+  "cli_fails_closed_on_worker_error_invalid_snapshot_and_timeout",
+]
+
+[[inventories]]
+origin = "rust"
 id_prefix = "native.postgres_storage."
 selector_prefix = ""
 source = "tests/postgres_storage.rs"
@@ -4499,6 +4524,19 @@ platforms = ["aarch64-linux"]
 deadline_seconds = 1200
 execution = { kind = "nix", installable = ".#checks.aarch64-linux.postgres-lifecycle-eval" }
 
+[[cases]]
+id = "nix.x86_64-linux.postgres-observer-eval"
+source = "nix/postgres-observer-eval.nix"
+platforms = ["x86_64-linux"]
+deadline_seconds = 1200
+execution = { kind = "nix", installable = ".#checks.x86_64-linux.postgres-observer-eval" }
+[[cases]]
+id = "nix.aarch64-linux.postgres-observer-eval"
+source = "nix/postgres-observer-eval.nix"
+platforms = ["aarch64-linux"]
+deadline_seconds = 1200
+execution = { kind = "nix", installable = ".#checks.aarch64-linux.postgres-observer-eval" }
+
 # Nine existing NixOS VM checks on each declared flake system. These are metadata only.
 [[nix_inventories]]
 namespace = "checks"
@@ -7174,6 +7212,35 @@ required = true
 version = 1
 source = "vm.x86_64-linux.native-source-local-recovery"
 path = "source-local-recovery-acceptance.json"
+kind = "semantic"
+required = true
+
+[[cases]]
+id = "vm.x86_64-linux.native-postgres-observer"
+source = "nix/test-postgres-observer.nix; tests/fixtures/postgres_observer.rs"
+profile = "vm"
+platforms = ["x86_64-linux"]
+deadline_seconds = 3600
+resources = { cpu = 2, memory_mib = 4096, disk_mib = 16384, exclusive = [
+  "nixos-vm",
+] }
+execution = { kind = "nix", installable = ".#checks.x86_64-linux.native-postgres-observer" }
+[[cases.artifact_specs]]
+version = 1
+source = "vm.x86_64-linux.native-postgres-observer"
+path = "nix-outputs.json"
+kind = "nix_outputs"
+required = true
+[[cases.artifact_specs]]
+version = 1
+source = "vm.x86_64-linux.native-postgres-observer"
+path = "junit.xml"
+kind = "junit"
+required = true
+[[cases.artifact_specs]]
+version = 1
+source = "vm.x86_64-linux.native-postgres-observer"
+path = "postgres-observer-acceptance.json"
 kind = "semantic"
 required = true
 

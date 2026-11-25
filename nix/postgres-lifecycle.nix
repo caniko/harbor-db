@@ -176,7 +176,7 @@
     then "${lib.getExe cfg.package} --config ${rolloutManifest} rollout activation-check"
     else "${lib.getExe cfg.package} --config ${manifest} rollout-guard";
 in {
-  imports = [./postgres-writer-clients.nix ./storage-package-argument.nix];
+  imports = [./postgres-observer.nix ./postgres-writer-clients.nix ./storage-package-argument.nix];
   options.services.harbor-db.postgresql = {
     enable = mkEnableOption "adopted PostgreSQL identity guards and staged upgrades";
     package = mkOption {

@@ -231,7 +231,13 @@ fn committed_inventory_is_individual_and_migration_bound() {
             .iter()
             .filter(|case| case.id.starts_with("vm."))
             .count(),
-        31
+        32
+    );
+    assert!(
+        suite
+            .cases
+            .iter()
+            .any(|case| case.id == "vm.x86_64-linux.native-postgres-observer")
     );
     for profile in [
         Profile::Fast,
