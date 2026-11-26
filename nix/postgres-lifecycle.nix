@@ -85,7 +85,7 @@
   # prepares and adopts under, so the candidate's activation agrees with it.
   command = "${lib.getExe cfg.package} --config ${
     if cfg.rollout != null
-    then cfg.rollout.maintenance
+    then lib.escapeShellArg cfg.rollout.maintenance
     else manifest
   }";
   liveArgs = lib.optionalString (cfg.switchAdoption != null) (lib.escapeShellArgs [
@@ -842,14 +842,26 @@ in {
       })
       (lib.mkIf (cfg.recovery != null) {
         # Lexical ordering rejects missing recovery evidence before any adoption.
-        # Without an adoption request, routine switches gate on backup health.
-        "00-harbor-db-postgresql-recovery" = ''
-          ${serviceUserCommand} ${
-            if cfg.switchAdoption != null
-            then "inspect-recovery"
-            else "inspect-backup"
-          }
-        '';
+        # Dry activation outside a rollout defers backup checksums to activation.
+        "00-harbor-db-postgresql-recovery" =
+          if cfg.switchAdoption != null
+          then ''
+            ${serviceUserCommand} inspect-recovery
+          ''
+          else if rollout == null
+          then ''
+            case "''${2-}" in
+              dry-activate)
+                ${serviceUserCommand} inspect-backup --preflight
+                ;;
+              *)
+                ${serviceUserCommand} inspect-backup
+                ;;
+            esac
+          ''
+          else ''
+            ${serviceUserCommand} inspect-backup
+          '';
       })
       (lib.mkIf (cfg.switchAdoption != null) {
         harbor-db-postgresql-adoption = ''

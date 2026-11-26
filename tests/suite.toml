@@ -3332,6 +3332,7 @@ selectors = [
   "fractional_verification_timeout_runs_backup_verification",
   "hostile_receipts_cannot_claim_record_level_acceptance",
   "incomplete_or_malformed_snapshot_records_never_admit",
+  "inspect_backup_cli_preflight_checks_selection_without_running_verifier",
   "interrupted_capture_refuses_replacement_backup_and_orphan_receipts",
   "interrupted_capture_resumes_retained_backup_journal_without_recapture",
   "loss_and_changed_source_records_cannot_publish_or_reuse_certification",
